@@ -1,8 +1,9 @@
 /* Repair accepted League Update actions; reconcile status only after both installs finish. */
+// Legacy inspector/API hook: excluded from the normal manual launch/testing workflow.
 (() => {
   const e = process.mainModule.require("electron");
   if (!e.app.getName().toLowerCase().includes("riot")) return false;
-  if (global.__darlingLeagueUpdate && global.__darlingLeagueUpdate.version >= 9) return true;
+  if (global.__darlingLeagueUpdate && global.__darlingLeagueUpdate.version >= 10) return true;
   const fs = process.mainModule.require("fs"), path = process.mainModule.require("path");
   const https = process.mainModule.require("https");
   const argument = name => {
@@ -33,7 +34,7 @@
     req.on("error", reject); req.end(body);
   });
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const patchable = state => state === "out_of_date" || state === "not_installed";
+  const patchable = state => state === "out_of_date" || state === "not_installed" || state === "pending_verify";
   const installIds = ["league_of_legends.live", "league_of_legends.live.game_patch"];
   const ownedPatches = new Map();
   const normalizeGameRoot = async install => {
@@ -145,7 +146,7 @@
       "PUT", {updateAvailable: false, updateRequired: false});
     return true;
   };
-  const state = {version: 9, pending: false, rootPending: true, rootError: false,
+  const state = {version: 10, pending: false, rootPending: true, rootError: false,
     submitted: 0, failed: 0, last: null, convergence: null};
   // Riot's startup integrity pass can replace the bundle-root alias with an
   // empty directory. Bind the updater to the real files before the user clicks
@@ -178,7 +179,10 @@
     return {queued: true};
   };
   e.session.defaultSession.webRequest.onCompleted({urls: ["http://127.0.0.1/*", "https://127.0.0.1/*"]}, details => {
-    if (details.statusCode !== 204 || state.pending) return;
+    // A missing native LaunchAgent makes an accepted Install action fail with
+    // 409 after its install path has been registered. The legacy patch API can
+    // still resume it; repairInstall preserves any request already in flight.
+    if (![204, 409].includes(details.statusCode) || state.pending) return;
     if (new URL(details.url).pathname !== "/patch-proxy/v2/priority-patch/products/league_of_legends/patchlines/live") return;
     state.pending = true; setTimeout(repairHandoff, 5000);
   });

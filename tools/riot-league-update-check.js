@@ -115,5 +115,11 @@ async function scenario(options = {}) {
   assert.equal(behind.writes[0].body.url,'https://lol.secure.dyn.riotcdn.net/channels/public/releases/66B91DB25E5AD56E.manifest');
   const current=await scenario({client:'up_to_date',game:'up_to_date',manual:true,recordedUrl:'https://lol.secure.dyn.riotcdn.net/channels/public/releases/66B91DB25E5AD56E.manifest'});
   assert.equal(current.writes.length,0);
-  console.log('LEAGUE_UPDATE_HANDOFF cases=24 pass=1');
+  const installConflict=await scenario({status:409,client:'not_installed',game:'not_installed'});
+  assert.equal(installConflict.writes.filter(w=>w.path.includes('/requests/patch')).length,2);
+  const interrupted=await scenario({client:'pending_verify',manual:true});
+  assert.equal(interrupted.writes.length,1);assert.equal(interrupted.state.convergence,'ready');
+  assert.equal((await scenario({status:409,active:'client'})).writes.length,0);
+  assert.equal((await scenario({status:409,path:'/unrelated'})).writes.length,0);
+  console.log('LEAGUE_UPDATE_HANDOFF cases=28 pass=1');
 })().catch(error=>{console.error(error);process.exitCode=1;});
