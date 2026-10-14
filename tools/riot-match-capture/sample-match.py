@@ -95,7 +95,16 @@ class Thread:
         except OSError:
             self.fd = None
         self.sched = self.read_sched()
+        self.faults = self.read_faults()
         self.counts = collections.Counter()
+
+    def read_faults(self):
+        text = read(self.base + "stat")
+        fields = text[text.rfind(")") + 2:].split()
+        try:
+            return int(fields[7]), int(fields[9])  # minflt, majflt
+        except (IndexError, ValueError):
+            return None
 
     def read_sched(self):
         try:
@@ -180,6 +189,11 @@ class Process:
         for tid, thread in self.threads.items():
             new = thread.read_sched()
             row = {"name": thread.name, "syscall": dict(thread.counts)}
+            faults = thread.read_faults()
+            if faults and thread.faults:
+                row["minflt"] = faults[0] - thread.faults[0]
+                row["majflt"] = faults[1] - thread.faults[1]
+            thread.faults = faults
             if new and thread.sched and len(new) == 3:
                 row["run_ns"] = new[0] - thread.sched[0]
                 row["queue_ns"] = new[1] - thread.sched[1]
