@@ -54,6 +54,9 @@ write_entry "$applications_dir/darling-lol-riot.desktop" \
   darling-lol-riot-client RiotClientServices
 write_entry "$applications_dir/darling-lol-league.desktop" \
   'League of Legends' 'Launch League through darling-lol' \
+  darling-lol-league-of-legends LeagueofLegends
+write_entry "$applications_dir/darling-lol-league-client.desktop" \
+  'League Client' 'Launch League through darling-lol' \
   darling-lol-league-of-legends LeagueClientUx
 
 # Prefer the conventional Desktop directory when it exists. Some systems set
@@ -69,7 +72,7 @@ fi
 mkdir -p "$desktop_dir"
 write_entry "$desktop_dir/League of Legends.desktop" \
   'League of Legends' 'Launch League through darling-lol' \
-  darling-lol-league-of-legends LeagueClientUx
+  darling-lol-league-of-legends LeagueofLegends
 chmod 755 "$desktop_dir/League of Legends.desktop"
 
 printf 'Installed Riot Client and League launchers in %s\n' "$applications_dir"
