@@ -75,7 +75,44 @@ write_entry "$desktop_dir/League of Legends.desktop" \
   darling-lol-league-of-legends LeagueofLegends
 chmod 755 "$desktop_dir/League of Legends.desktop"
 
+# On KDE, keep the game window fullscreen whenever it opens. Match both parts
+# of WM_CLASS so the League client UI window is left alone.
+if command -v kwriteconfig6 >/dev/null 2>&1 &&
+   command -v kreadconfig6 >/dev/null 2>&1; then
+  rule_id=leagueoflegends-fullscreen
+  rules_file=kwinrulesrc
+  current_rules=$(kreadconfig6 --file "$rules_file" --group General --key rules --default '')
+  case ",$current_rules," in
+    *,$rule_id,*) ;;
+    *)
+      if [ -n "$current_rules" ]; then
+        current_rules=$current_rules,$rule_id
+      else
+        current_rules=$rule_id
+      fi
+      rule_count=$(printf '%s\n' "$current_rules" | awk -F, '{ print NF }')
+      kwriteconfig6 --file "$rules_file" --group General --key count "$rule_count"
+      kwriteconfig6 --file "$rules_file" --group General --key rules "$current_rules"
+      ;;
+  esac
+  kwriteconfig6 --file "$rules_file" --group "$rule_id" --key Description \
+    'League of Legends always fullscreen'
+  kwriteconfig6 --file "$rules_file" --group "$rule_id" --key wmclass \
+    'LeagueofLegends LeagueofLegends'
+  kwriteconfig6 --file "$rules_file" --group "$rule_id" --key wmclasscomplete true
+  kwriteconfig6 --file "$rules_file" --group "$rule_id" --key wmclassmatch 1
+  kwriteconfig6 --file "$rules_file" --group "$rule_id" --key fullscreen true
+  kwriteconfig6 --file "$rules_file" --group "$rule_id" --key fullscreenrule 3
+  if command -v qdbus6 >/dev/null 2>&1; then
+    qdbus6 org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+  fi
+fi
+
 printf 'Installed Riot Client and League launchers in %s\n' "$applications_dir"
 printf 'Installed bundled Riot and League icons in %s\n' "$icon_dir"
 printf 'Installed League desktop icon in %s\n' "$desktop_dir"
+if command -v kwriteconfig6 >/dev/null 2>&1 &&
+   command -v kreadconfig6 >/dev/null 2>&1; then
+  printf 'Configured League game windows to open fullscreen in KDE\n'
+fi
 printf 'Launcher output is saved to %s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/darling-lol/launcher.log"
