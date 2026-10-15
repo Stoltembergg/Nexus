@@ -71,7 +71,17 @@ fi
 if [ "${RCLOL_NATIVE_VPX:-$native_vpx_default}" = 1 ]; then
  RIOT_INSERT_LIBRARIES="$RIOT_INSERT_LIBRARIES:@GUEST_HOME@/libRiotNativeVpx.dylib"
 fi
-A=${RIOT_LAUNCHER_HOST:-"$HOME/.darling/Applications/Riot Client.app/Contents/MacOS/RiotClientServices"}
+if [ -n "${RIOT_LAUNCHER_HOST:-}" ]; then
+ A=$RIOT_LAUNCHER_HOST
+else
+ A="$HOME/.darling/Applications/Riot Client.app/Contents/MacOS/RiotClientServices"
+ # Riot's installer places the client in /Users/Shared. The conventional
+ # /Applications symlink may be an absolute macOS path, which Linux cannot
+ # resolve when Darling's launcher checks the host-side executable path.
+ if [ ! -f "$A" ] && [ -f "$HOME/.darling/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices" ]; then
+  A="$HOME/.darling/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices"
+ fi
+fi
 # External XIM (for example Fcitx) consumes keys before Darling forwards them.
 # Use Xlib's local input method; allow explicit testing of another modifier.
 # Linux C.UTF-8 is not a supported codecvt locale in the macOS client.
