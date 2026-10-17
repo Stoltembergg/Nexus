@@ -61,21 +61,48 @@ index 80c92bc07..2a80df649 100644
 +
 +FOUNDATION_EXPORT NSString *const NSUserActivityTypeBrowsingWeb;
 diff --git a/src/NSProcessInfo.m b/src/NSProcessInfo.m
-index 1c21f176d..855a97fd3 100644
+index 1c21f176d..6dfc4b0d8 100644
 --- a/src/NSProcessInfo.m
 +++ b/src/NSProcessInfo.m
-@@ -251,7 +251,9 @@ SINGLETON_RR()
-     }
- #else
+@@ -239,25 +239,21 @@ SINGLETON_RR()
+ 
+ - (NSString *)operatingSystemVersionString
+ {
+-#ifndef __APPLE__
+-    struct utsname n;
+-    if (uname(&n) == 0)
+-    {
+-        return [NSString stringWithUTF8String:n.version];
+-    }
+-    else
+-    {
+-        return @"Unknown";
+-    }
+-#else
  	NSDictionary* dict = (NSDictionary*) _CFCopySystemVersionDictionary();
 -	NSString* string = [dict objectForKey: @"ProductVersion"];
-+	NSString* string = [dict objectForKey: @"FullVersionString"];
+-
+-	[string retain];
+-	[dict release];
++	NSString* string = nil;
++	if (dict)
++	{
++		string = [dict objectForKey: @"FullVersionString"];
++		if (!string)
++			string = [dict objectForKey: @"ProductVersion"];
++		if (string)
++			[string retain];
++		[dict release];
++	}
 +	if (!string)
-+		string = [dict objectForKey: @"ProductVersion"];
++		string = [@"Version 14.7 (Build 23H124)" retain];
  
- 	[string retain];
- 	[dict release];
-@@ -285,11 +287,14 @@ SINGLETON_RR()
+ 	return [string autorelease];
+-#endif
+ }
+ 
+ - (NSUInteger)processorCount
+@@ -285,11 +281,14 @@ SINGLETON_RR()
  
  - (unsigned long long)physicalMemory
  {
@@ -93,32 +120,32 @@ index 1c21f176d..855a97fd3 100644
      }
      return amt;
  }
-@@ -305,25 +310,33 @@ SINGLETON_RR()
+@@ -305,25 +304,34 @@ SINGLETON_RR()
      return t.tv_sec + t.tv_usec / (NSTimeInterval)USEC_PER_SEC;
  }
  
--- (NSOperatingSystemVersion)operatingSystemVersion
 +- (NSProcessInfoThermalState)thermalState
- {
--	NSOperatingSystemVersion version = { 0, 0, 0 };
++{
 +    /* No thermal-pressure source on Linux; report Nominal so clients
 +     * (e.g. Chromium's ThermalStateObserverMac) proceed normally. */
 +    return NSProcessInfoThermalStateNominal;
 +}
++
+ - (NSOperatingSystemVersion)operatingSystemVersion
+ {
+-	NSOperatingSystemVersion version = { 0, 0, 0 };
++	NSOperatingSystemVersion version = { 14, 7, 0 };
++	NSDictionary* dict = (NSDictionary*) _CFCopySystemVersionDictionary();
++	NSString* string = nil;
++	if (dict)
++	{
++		string = [[dict objectForKey: @"ProductVersion"] retain];
++		[dict release];
++	}
++	if (!string)
++		string = [@"14.7" retain];
  
 -	NSString* string = [self operatingSystemVersionString];
-+- (NSOperatingSystemVersion)operatingSystemVersion
-+{
-+	NSOperatingSystemVersion version = { 14, 7, 0 };
-+#ifdef __APPLE__
-+	NSDictionary* dict = (NSDictionary*) _CFCopySystemVersionDictionary();
-+	NSString* string = [[dict objectForKey: @"ProductVersion"] retain];
-+	[dict release];
-+	if (!string)
-+		string = [[self operatingSystemVersionString] retain];
-+#else
-+	NSString* string = [[self operatingSystemVersionString] retain];
-+#endif
  	NSArray* arr = [string componentsSeparatedByString:@"."];
 +	[string release];
  
@@ -139,7 +166,7 @@ index 1c21f176d..855a97fd3 100644
  	}
  
  	return version;
-@@ -396,3 +409,5 @@ void __NSInitializeProcess(int argc,const char *argv[]) {
+@@ -396,3 +404,5 @@ void __NSInitializeProcess(int argc,const char *argv[]) {
      }
  }
  #endif

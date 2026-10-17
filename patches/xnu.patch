@@ -117,10 +117,10 @@ index 207dae6..f5e96db 100644
  VISIBLE
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
 new file mode 100644
-index 0000000..8ae1665
+index 0000000..d759cfd
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,282 @@
 +#ifndef DARLING_COMMON_CPU_TOPOLOGY_H
 +#define DARLING_COMMON_CPU_TOPOLOGY_H
 +
@@ -370,6 +370,16 @@ index 0000000..8ae1665
 +	}
 +	if (topo->physical_available > topo->physical_online)
 +		topo->physical_available = topo->physical_online;
++
++	/* Cap to authentic MacBookPro16,1 Intel Core i9-9980HK bounds (8 cores, 16 threads) */
++	if (topo->physical_online == 0 || topo->physical_online > 8)
++		topo->physical_online = 8;
++	if (topo->physical_available == 0 || topo->physical_available > 8)
++		topo->physical_available = 8;
++	if (topo->online == 0 || topo->online > 16)
++		topo->online = 16;
++	if (topo->available == 0 || topo->available > 16)
++		topo->available = 16;
 +
 +	topo->detected = true;
 +}
@@ -2126,7 +2136,7 @@ index 7d5ef80..46debb8 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..6dac814 100644
+index f273989..7bbf317 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,6 +9,7 @@
@@ -2295,18 +2305,18 @@ index f273989..6dac814 100644
 +
 +		if (topo->detected && !topo->fixed)
 +		{
-+			hinfo.avail_cpus = topo->available;
-+			hinfo.max_cpus = topo->online;
-+			hinfo.physical_cpu = topo->physical_available;
-+			hinfo.physical_cpu_max = topo->physical_online;
-+			hinfo.logical_cpu = topo->available;
-+			hinfo.logical_cpu_max = topo->online;
++			hinfo.physical_cpu = (topo->physical_available > 8) ? 8 : (topo->physical_available ? topo->physical_available : 8);
++			hinfo.physical_cpu_max = (topo->physical_online > 8) ? 8 : (topo->physical_online ? topo->physical_online : 8);
++			hinfo.logical_cpu = (topo->available > 16) ? 16 : (topo->available ? topo->available : 16);
++			hinfo.logical_cpu_max = (topo->online > 16) ? 16 : (topo->online ? topo->online : 16);
++			hinfo.avail_cpus = hinfo.logical_cpu;
++			hinfo.max_cpus = hinfo.logical_cpu_max;
 +		}
 +		else
 +		{
-+			hinfo.avail_cpus = hinfo.max_cpus = DARLING_CPU_FIXED_COUNT;
-+			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
-+			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
++			hinfo.avail_cpus = hinfo.max_cpus = 16;
++			hinfo.physical_cpu = hinfo.physical_cpu_max = 8;
++			hinfo.logical_cpu = hinfo.logical_cpu_max = 16;
 +		}
 +		hinfo.max_mem = 17179869184ULL; // 16 GB, matching the emulated machine
  	}
@@ -2642,7 +2652,7 @@ index bd9cdc2..01cb67c 100644
 +
 +
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..adefcaa 100644
+index 4319355..80c9f20 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -4,6 +4,7 @@
@@ -2852,7 +2862,7 @@ index 4319355..adefcaa 100644
      int current_length = 0;
  
      if (old != NULL)
-@@ -269,45 +239,54 @@ sysctl_handler(handle_features)
+@@ -269,53 +239,80 @@ sysctl_handler(handle_features)
  // TODO: i doubt core count is ever going to change.
  //       this is something that could be cached if we had some way of doing something only once in libsystem_kernel (i.e. a simple version of dispatch_once).
  sysctl_handler(handle_core_count) {
@@ -2936,7 +2946,13 @@ index 4319355..adefcaa 100644
  	}
  
  out:
-@@ -319,3 +298,21 @@ out:
+ 	if (infofd >= 0)
+ 		close_internal(infofd);
++	if (core_count == 0 || core_count > 8)
++		core_count = 8;
+ 	if (old != NULL && oldlen && *oldlen >= sizeof(uint32_t))
+ 		*(uint32_t*)old = core_count;
+ 	if (oldlen)
  		*oldlen = sizeof(uint32_t);
  	return 0;
  }
@@ -2946,10 +2962,8 @@ index 4319355..adefcaa 100644
 +	const struct darling_cpu_topology* topo = darling_host_cpu_topology();
 +	size_t thread_count = (topo->detected && !topo->fixed) ? topo->online : 0;
 +
-+	if (thread_count == 0) {
-+		// Detection failed or the opt-out is active: fall back to the same
-+		// fixed value the hw.* handlers use.
-+		thread_count = DARLING_CPU_FIXED_COUNT;
++	if (thread_count == 0 || thread_count > 16) {
++		thread_count = 16;
 +	}
 +
 +	if (old != NULL && oldlen && *oldlen >= sizeof(uint32_t))
