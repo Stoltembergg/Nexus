@@ -1576,10 +1576,32 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..0646cb7 100644
+index 206e92e..4bc60be 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-@@ -151,8 +151,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -112,12 +112,21 @@ static void handle_rt_signal(int signum)
+ 	//external/lkm_call(0x1028, buf);
+ }
+ 
++#ifndef ARCH_SET_CPUID
++#define ARCH_SET_CPUID 0x1012
++#endif
++
+ void sigexc_setup(void)
+ {
+ 	darling_sigexc_self();
+ 	sigexc_setup1();
+ 	sigexc_setup2();
+ 
++#if defined(__x86_64__)
++	/* Trap userspace CPUID instructions to SIGSEGV for Coffee Lake virtualization */
++	LINUX_SYSCALL(__NR_arch_prctl, ARCH_SET_CPUID, 0);
++#endif
++
+ #ifdef VARIANT_DYLD
+ 	bool started_suspended;
+ 	int code = dserver_rpc_started_suspended(&started_suspended);
+@@ -151,8 +160,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  	int status = dserver_rpc_interrupt_enter();
  
  	if (status != 0) {
@@ -1595,7 +1617,7 @@ index 206e92e..0646cb7 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -267,13 +272,150 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +281,403 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -1673,8 +1695,261 @@ index 206e92e..0646cb7 100644
 +
 +#endif
 +
++#if defined(__x86_64__)
++static void emulate_cpuid(uint32_t in_eax, uint32_t in_ecx,
++                          uint32_t* out_eax, uint32_t* out_ebx,
++                          uint32_t* out_ecx, uint32_t* out_edx)
++{
++	/* Genuine Intel Core i9-9980HK CPU @ 2.40GHz (MacBookPro16,1 / Coffee Lake Refresh) */
++	static const char brand_string[48] = "Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz\0\0\0\0\0";
++	const uint32_t* brand = (const uint32_t*) brand_string;
++
++	switch (in_eax)
++	{
++	case 0x00000000:
++		/* Maximum Basic Leaf = 22 (0x16), Vendor = "GenuineIntel" */
++		*out_eax = 0x00000016;
++		*out_ebx = 0x756e6547; /* "Genu" */
++		*out_edx = 0x49656e69; /* "ineI" */
++		*out_ecx = 0x6c65746e; /* "ntel" */
++		break;
++
++	case 0x00000001:
++		/* Processor Signature: Family 6, Model 158 (0x9E), Stepping 13 (0x0D) -> 0x000906ED */
++		*out_eax = 0x000906ed;
++		/* Brand index 0, CLFLUSH line size 8 (64B), 16 logical cores, APIC ID 0 */
++		*out_ebx = 0x00100800;
++		/* Standard features: SSE3, PCLMUL, SSSE3, FMA, CX16, SSE4.1, SSE4.2, MOVBE, POPCNT, AES, XSAVE, OSXSAVE, AVX, F16C, RDRAND
++		 * Hypervisor bit 31 = 0 (Genuine bare-metal Mac) */
++		*out_ecx = 0x7ffafbbf;
++		/* Standard features: FPU, VME, DE, PSE, TSC, MSR, PAE, MCE, CX8, APIC, SEP, MTRR, PGE, MCA, CMOV, PAT, PSE36, CLFSH, DS, ACPI, MMX, FXSR, SSE, SSE2, SS, HTT, TM, PBE */
++		*out_edx = 0xbfebfbff;
++		break;
++
++	case 0x00000002:
++		/* Cache and TLB descriptors */
++		*out_eax = 0x76036301;
++		*out_ebx = 0x00f0b5ff;
++		*out_ecx = 0x00000000;
++		*out_edx = 0x00c10000;
++		break;
++
++	case 0x00000004:
++		/* Deterministic Cache Parameters */
++		switch (in_ecx)
++		{
++		case 0:
++			/* L1 Data: 32 KB, 8-way, 64B lines */
++			*out_eax = 0x1c004121;
++			*out_ebx = 0x01c0003f;
++			*out_ecx = 0x0000003f;
++			*out_edx = 0x00000000;
++			break;
++		case 1:
++			/* L1 Instruction: 32 KB, 8-way, 64B lines */
++			*out_eax = 0x1c004122;
++			*out_ebx = 0x01c0003f;
++			*out_ecx = 0x0000003f;
++			*out_edx = 0x00000000;
++			break;
++		case 2:
++			/* L2 Unified: 256 KB, 4-way, 64B lines */
++			*out_eax = 0x1c004143;
++			*out_ebx = 0x01c0003f;
++			*out_ecx = 0x000001ff;
++			*out_edx = 0x00000000;
++			break;
++		case 3:
++			/* L3 Unified: 16 MB, 16-way, 64B lines */
++			*out_eax = 0x1c03c163;
++			*out_ebx = 0x03c0003f;
++			*out_ecx = 0x00003fff;
++			*out_edx = 0x00000002;
++			break;
++		default:
++			*out_eax = 0;
++			*out_ebx = 0;
++			*out_ecx = 0;
++			*out_edx = 0;
++			break;
++		}
++		break;
++
++	case 0x00000007:
++		if (in_ecx == 0)
++		{
++			/* Structured Extended Features: FSGSBASE, BMI1, AVX2, SMEP, BMI2, ERMS, INVPCID, RDSEED, ADX, SMAP */
++			*out_eax = 0;
++			*out_ebx = 0x299c27ab;
++			*out_ecx = 0x00000004;
++			*out_edx = 0x9c000400;
++		}
++		else
++		{
++			*out_eax = 0;
++			*out_ebx = 0;
++			*out_ecx = 0;
++			*out_edx = 0;
++		}
++		break;
++
++	case 0x0000000b:
++		if (in_ecx == 0)
++		{
++			/* Extended Topology: SMT Level */
++			*out_eax = 1;
++			*out_ebx = 2;
++			*out_ecx = 0x00000100;
++			*out_edx = 0;
++		}
++		else if (in_ecx == 1)
++		{
++			/* Extended Topology: Core Level */
++			*out_eax = 4;
++			*out_ebx = 16;
++			*out_ecx = 0x00000201;
++			*out_edx = 0;
++		}
++		else
++		{
++			*out_eax = 0;
++			*out_ebx = 0;
++			*out_ecx = 0;
++			*out_edx = 0;
++		}
++		break;
++
++	case 0x0000000d:
++		if (in_ecx == 0)
++		{
++			*out_eax = 0x00000007;
++			*out_ebx = 0x00000340;
++			*out_ecx = 0x00000340;
++			*out_edx = 0;
++		}
++		else if (in_ecx == 1)
++		{
++			*out_eax = 0x0000000f;
++			*out_ebx = 0x00000340;
++			*out_ecx = 0;
++			*out_edx = 0;
++		}
++		else
++		{
++			*out_eax = 0;
++			*out_ebx = 0;
++			*out_ecx = 0;
++			*out_edx = 0;
++		}
++		break;
++
++	case 0x00000015:
++		/* TSC and Core Crystal Clock */
++		*out_eax = 2;
++		*out_ebx = 200;
++		*out_ecx = 24000000;
++		*out_edx = 0;
++		break;
++
++	case 0x00000016:
++		/* Processor Frequency: 2400 MHz Base, 5000 MHz Max Turbo, 100 MHz Bus */
++		*out_eax = 2400;
++		*out_ebx = 5000;
++		*out_ecx = 100;
++		*out_edx = 0;
++		break;
++
++	case 0x80000000:
++		*out_eax = 0x80000008;
++		*out_ebx = 0;
++		*out_ecx = 0;
++		*out_edx = 0;
++		break;
++
++	case 0x80000001:
++		*out_eax = 0;
++		*out_ebx = 0;
++		*out_ecx = 0x00000121;
++		*out_edx = 0x2c100800;
++		break;
++
++	case 0x80000002:
++		*out_eax = brand[0];
++		*out_ebx = brand[1];
++		*out_ecx = brand[2];
++		*out_edx = brand[3];
++		break;
++
++	case 0x80000003:
++		*out_eax = brand[4];
++		*out_ebx = brand[5];
++		*out_ecx = brand[6];
++		*out_edx = brand[7];
++		break;
++
++	case 0x80000004:
++		*out_eax = brand[8];
++		*out_ebx = brand[9];
++		*out_ecx = brand[10];
++		*out_edx = brand[11];
++		break;
++
++	case 0x80000006:
++		*out_eax = 0;
++		*out_ebx = 0;
++		*out_ecx = 0x01006040;
++		*out_edx = 0;
++		break;
++
++	case 0x80000007:
++		/* Advanced Power Management Information: Invariant TSC (EDX bit 8 = 1) */
++		*out_eax = 0;
++		*out_ebx = 0;
++		*out_ecx = 0;
++		*out_edx = 0x00000100;
++		break;
++
++	case 0x80000008:
++		*out_eax = 0x00003027;
++		*out_ebx = 0;
++		*out_ecx = 0;
++		*out_edx = 0;
++		break;
++
++	default:
++		*out_eax = 0;
++		*out_ebx = 0;
++		*out_ecx = 0;
++		*out_edx = 0;
++		break;
++	}
++}
++#endif
++
  void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
  {
++#if defined(__x86_64__)
++	/* Catch userspace CPUID instructions (0x0F 0xA2) trapped by arch_prctl(ARCH_SET_CPUID, 0)
++	 * and emulate GenuineIntel Coffee Lake responses without contacting darlingserver. */
++	if (linux_signum == LINUX_SIGSEGV && ctxt != NULL) {
++		const uint8_t* rip = (const uint8_t*) ctxt->uc_mcontext.gregs.rip;
++		if (rip != NULL && (unsigned long)rip >= 4096 &&
++		    (info == NULL || (info->si_code != 1 && info->si_code != 2))) {
++			if (rip[0] == 0x0f && rip[1] == 0xa2) {
++				uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
++				emulate_cpuid((uint32_t) ctxt->uc_mcontext.gregs.rax,
++				              (uint32_t) ctxt->uc_mcontext.gregs.rcx,
++				              &eax, &ebx, &ecx, &edx);
++				ctxt->uc_mcontext.gregs.rax = (long long) eax;
++				ctxt->uc_mcontext.gregs.rbx = (long long) ebx;
++				ctxt->uc_mcontext.gregs.rcx = (long long) ecx;
++				ctxt->uc_mcontext.gregs.rdx = (long long) edx;
++				ctxt->uc_mcontext.gregs.rip += 2;
++				return;
++			}
++		}
++	}
++#endif
  	int status = dserver_rpc_interrupt_enter();
 +	int relaxed = 0;
 +
@@ -1747,7 +2022,7 @@ index 206e92e..0646cb7 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +501,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +763,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -1851,7 +2126,7 @@ index 7d5ef80..46debb8 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..1093a3a 100644
+index f273989..6dac814 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,6 +9,7 @@
@@ -1862,20 +2137,28 @@ index f273989..1093a3a 100644
  #include <darling/emulation/common/string.h>
  
  extern kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name);
-@@ -16,6 +17,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
+@@ -16,6 +17,9 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
  
  /* Darling specific */
  enum {
++	_HW_PHYSMEM = 5, // HW_PHYSMEM in <sys/sysctl.h>
++	_HW_BUSFREQUENCY = 14,
 +	_HW_ACTIVECPU = 26, // hw.activecpu's OID in XNU; unused in this table before
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -25,9 +27,12 @@ enum {
+@@ -25,37 +29,130 @@ enum {
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
  	_HW_CPUFREQUENCY = 15,
 +	_HW_CACHECONFIG = 1200,
 +	_HW_CACHESIZE,
++	_HW_TARGETTYPE,
++	_HW_PRODUCT,
++	_HW_CPUFREQUENCY_MAX,
++	_HW_CPUFREQUENCY_MIN,
++	_HW_CPUFAMILY,
++	_HW_PACKAGES,
  };
  
  static sysctl_handler(handle_availcpu);
@@ -1883,14 +2166,24 @@ index f273989..1093a3a 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +44,77 @@ static sysctl_handler(handle_cpusubtype);
+ static sysctl_handler(handle_logicalcpu_max);
+ static sysctl_handler(handle_memsize);
++static sysctl_handler(handle_physmem);
+ static sysctl_handler(handle_pagesize);
+ static sysctl_handler(handle_cputype);
+ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
 +static sysctl_handler(handle_model);
++static sysctl_handler(handle_targettype);
  static sysctl_handler(handle_cpufrequency);
++static sysctl_handler(handle_cpufrequency_64);
++static sysctl_handler(handle_busfrequency);
 +static sysctl_handler(handle_cacheconfig);
 +static sysctl_handler(handle_cachesize);
++static sysctl_handler(handle_cpufamily);
++static sysctl_handler(handle_packages);
 +
 +/* hw.optional: CPUID leaf, output register (0-3 = eax-edx) and bit */
 +static long optional_feature(void* old, unsigned long* oldlen, unsigned int leaf, int reg, int bit)
@@ -1962,19 +2255,31 @@ index f273989..1093a3a 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +126,11 @@ const struct known_sysctl sysctls_hw[] = {
+ 	{ .oid = _HW_LOGICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu_max", .handler = handle_logicalcpu_max },
+ 	{ .oid = HW_MEMSIZE, .type = CTLTYPE_QUAD, .exttype = "U", .name = "memsize", .handler = handle_memsize },
++	{ .oid = _HW_PHYSMEM, .type = CTLTYPE_INT, .exttype = "U", .name = "physmem", .handler = handle_physmem },
+ 	{ .oid = HW_PAGESIZE, .type = CTLTYPE_INT, .exttype = "I", .name = "pagesize", .handler = handle_pagesize },
+ 	{ .oid = _HW_CPUTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputype", .handler = handle_cputype },
+ 	{ .oid = _HW_CPUSUBTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cpusubtype", .handler = handle_cpusubtype },
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
 +	{ .oid = _HW_OPTIONAL, .type = CTLTYPE_NODE, .exttype = "", .name = "optional", .subctls = sysctls_hw_optional },
 +	{ .oid = HW_MODEL, .type = CTLTYPE_STRING, .exttype = "S", .name = "model", .handler = handle_model },
++	{ .oid = _HW_PRODUCT, .type = CTLTYPE_STRING, .exttype = "S", .name = "product", .handler = handle_model },
++	{ .oid = _HW_TARGETTYPE, .type = CTLTYPE_STRING, .exttype = "S", .name = "targettype", .handler = handle_targettype },
++	{ .oid = _HW_BUSFREQUENCY, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "busfrequency", .handler = handle_busfrequency },
  	{ .oid = _HW_CPUFREQUENCY, .type = CTLTYPE_INT, .exttype = "", .name = "cpufrequency", .handler = handle_cpufrequency },
++	{ .oid = _HW_CPUFREQUENCY_MAX, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cpufrequency_max", .handler = handle_cpufrequency_64 },
++	{ .oid = _HW_CPUFREQUENCY_MIN, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cpufrequency_min", .handler = handle_cpufrequency_64 },
 +	{ .oid = _HW_CACHECONFIG, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cacheconfig", .handler = handle_cacheconfig },
 +	{ .oid = _HW_CACHESIZE, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cachesize", .handler = handle_cachesize },
++	{ .oid = _HW_CPUFAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufamily", .handler = handle_cpufamily },
++	{ .oid = _HW_PACKAGES, .type = CTLTYPE_INT, .exttype = "I", .name = "packages", .handler = handle_packages },
  	{ .oid = -1 }
  };
  
-@@ -71,6 +146,32 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +168,32 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -2007,7 +2312,7 @@ index f273989..1093a3a 100644
  	}
  
  	return &hinfo;
-@@ -83,6 +184,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +206,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -2021,16 +2326,79 @@ index f273989..1093a3a 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -174,6 +282,8 @@ sysctl_handler(handle_cpufrequency)
- 	int freq = 2400000;
- 	char buf[16];
+@@ -119,6 +249,26 @@ sysctl_handler(handle_memsize)
+ 	return 0;
+ }
  
-+	sysctl_handle_size(sizeof(int));
++sysctl_handler(handle_physmem)
++{
++	if (old == NULL)
++	{
++		*oldlen = sizeof(unsigned int);
++		return 0;
++	}
++	if (*oldlen >= sizeof(unsigned long long))
++	{
++		*((unsigned long long*) old) = gethostinfo()->max_mem;
++		*oldlen = sizeof(unsigned long long);
++		return 0;
++	}
++	if (*oldlen < sizeof(unsigned int))
++		return -EINVAL;
++	*((unsigned int*) old) = 2147483648U;
++	*oldlen = sizeof(unsigned int);
++	return 0;
++}
 +
- 	if (read_string("/sys/bus/cpu/devices/cpu0/cpufreq/cpuinfo_max_freq", buf, sizeof(buf)))
- 		freq = __simple_atoi(buf, NULL);
- 	*((int*) old) = freq;
-@@ -193,3 +303,104 @@ sysctl_handler(handle_machine)
+ sysctl_handler(handle_pagesize)
+ {
+ 	if (old == NULL)
+@@ -171,13 +321,38 @@ sysctl_handler(handle_cputhreadtype)
+ 
+ sysctl_handler(handle_cpufrequency)
+ {
+-	int freq = 2400000;
+-	char buf[16];
++	// XNU reports hw.cpufrequency in Hz (2.4 GHz = 2400000000 Hz for the emulated i9-9980HK).
++	// Support both 32-bit size probes (sizeof(int)) and 64-bit uint64_t buffers.
++	unsigned long long freq_hz = 2400000000ULL;
++	if (old == NULL)
++	{
++		*oldlen = sizeof(int);
++		return 0;
++	}
++	if (*oldlen >= sizeof(unsigned long long))
++	{
++		*((unsigned long long*) old) = freq_hz;
++		*oldlen = sizeof(unsigned long long);
++		return 0;
++	}
++	if (*oldlen < sizeof(int))
++		return -EINVAL;
++	*((unsigned int*) old) = (unsigned int) freq_hz;
++	*oldlen = sizeof(int);
++	return 0;
++}
+ 
+-	if (read_string("/sys/bus/cpu/devices/cpu0/cpufreq/cpuinfo_max_freq", buf, sizeof(buf)))
+-		freq = __simple_atoi(buf, NULL);
+-	*((int*) old) = freq;
+-	
++sysctl_handler(handle_cpufrequency_64)
++{
++	sysctl_handle_size(sizeof(unsigned long long));
++	*((unsigned long long*) old) = 2400000000ULL;
++	return 0;
++}
++
++sysctl_handler(handle_busfrequency)
++{
++	sysctl_handle_size(sizeof(unsigned long long));
++	*((unsigned long long*) old) = 100000000ULL;
+ 	return 0;
+ }
+ 
+@@ -193,3 +368,124 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -2039,6 +2407,12 @@ index f273989..1093a3a 100644
 +{
 +	// an Intel Mac model identifier, matching the x86_64 machine we emulate
 +	copyout_string("MacBookPro16,1", (char*) old, oldlen);
++	return 0;
++}
++
++sysctl_handler(handle_targettype)
++{
++	copyout_string("Mac", (char*) old, oldlen);
 +	return 0;
 +}
 +
@@ -2135,11 +2509,86 @@ index f273989..1093a3a 100644
 +	}
 +	return 0;
 +}
++
++sysctl_handler(handle_cpufamily)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 0x1cf85e4d; /* CPUFAMILY_INTEL_COFFEELAKE */
++	return 0;
++}
++
++sysctl_handler(handle_packages)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 1;
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..83ad15c 100644
+index bd9cdc2..01cb67c 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -139,18 +139,23 @@ sysctl_handler(handle_boottime)
+@@ -23,6 +23,9 @@
+ enum {
+ 	_KERN_MSGBUF = 1000,
+ 	_KERN_OSPRODUCTVERSION,
++	_KERN_HV_VMM_PRESENT,
++	_KERN_BOOTARGS,
++	_KERN_SECURE_KERNEL,
+ 
+ 	_KERN_SEMMNS = 1000,
+ };
+@@ -46,6 +49,10 @@ static sysctl_handler(handle_usrstack64);
+ static sysctl_handler(handle_sysv_semmns);
+ static sysctl_handler(handle_osproductversion);
+ static sysctl_handler(handle_osrevision);
++static sysctl_handler(handle_hv_vmm_present);
++static sysctl_handler(handle_bootargs);
++static sysctl_handler(handle_secure_kernel);
++
+ 
+ extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
+ extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
+@@ -76,31 +83,25 @@ const struct known_sysctl sysctls_kern[] = {
+ 	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
+ 	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
+ 	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
++	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
++	{ .oid = _KERN_BOOTARGS, .type = CTLTYPE_STRING, .exttype = "S", .name = "bootargs", .handler = handle_bootargs },
++	{ .oid = _KERN_SECURE_KERNEL, .type = CTLTYPE_INT, .exttype = "I", .name = "secure_kernel", .handler = handle_secure_kernel },
+ 	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
+ 	{ .oid = -1 }
+ };
+ 
+ sysctl_handler(handle_msgbuf)
+ {
++	// On macOS, reading the kernel message buffer requires root privilege;
++	// return empty buffer to avoid leaking host Linux dmesg to guest telemetry.
+ 	if (*oldlen <= 8)
+ 	{
+-		// Caller is asking for buffer size
+ 		if (*oldlen < sizeof(int))
+ 			return -EINVAL;
+-
+-		*((int*) old) = __linux_syslog(SYSLOG_ACTION_SIZE_BUFFER, NULL, 0);
+-	}
+-	else
+-	{
+-		// Caller is asking for buffer contents
+-		int ret;
+-
+-		ret = __linux_syslog(SYSLOG_ACTION_READ_ALL, (char*) old, *oldlen);
+-		if (ret < 0)
+-			return errno_linux_to_bsd(ret);
+-
+-		*oldlen = ret;
++		*((int*) old) = 0;
++		return 0;
+ 	}
++	*oldlen = 0;
+ 	return 0;
+ }
+ 
+@@ -139,18 +140,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -2169,8 +2618,31 @@ index bd9cdc2..83ad15c 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
+@@ -342,3 +348,22 @@ static sysctl_handler(handle_osrevision) {
+ 	*oldlen = sizeof(*ovalue);
+ 	return 0;
+ }
++
++static sysctl_handler(handle_hv_vmm_present) {
++	sysctl_handle_size(sizeof(int));
++	*((int*)old) = 0;
++	return 0;
++}
++
++static sysctl_handler(handle_bootargs) {
++	copyout_string("", (char*)old, oldlen);
++	return 0;
++}
++
++static sysctl_handler(handle_secure_kernel) {
++	sysctl_handle_size(sizeof(int));
++	*((int*)old) = 0;
++	return 0;
++}
++
++
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..122ad3a 100644
+index 4319355..adefcaa 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -4,6 +4,7 @@
@@ -2219,8 +2691,97 @@ index 4319355..122ad3a 100644
  	{ .oid = -1 }
  };
  
-@@ -154,38 +163,37 @@ sysctl_handler(handle_stepping)
-     return 0;
+@@ -80,112 +89,72 @@ static inline void copyout_int(int value, char* to_copy, size_t* to_copy_length)
+ 
+ sysctl_handler(handle_vendor)
+ {
+-	unsigned int level = 0;
+-    unsigned int eax = 0;
+-	union
+-	{
+-		struct
+-		{
+-	    	unsigned int ebx;
+-		    unsigned int edx;
+-	    	unsigned int ecx;
+-		};
+-		char name[13];
+-	} v;
+-
+-    __cpuid(level, eax, v.ebx, v.ecx, v.edx);
+-
+-	v.name[12] = 0;
+-	copyout_string(v.name, (char*) old, oldlen);
+-
++	// Match the emulated MacBookPro16,1 (Intel Core i9-9980HK) brand_string
++	// regardless of whether the Linux host runs an Intel or AMD CPU.
++	copyout_string("GenuineIntel", (char*) old, oldlen);
+ 	return 0;
+ }
+ 
+ sysctl_handler(handle_max_basic)
+ {
+-	setup(0);
+-
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-	copyout_int(eax, (char*)old,oldlen);
+-
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 22;
+ 	return 0;
+ }
+ 
+ sysctl_handler(handle_family)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax = eax >> 7;
+-    eax &= 15;
+-
+-    copyout_int(eax, old, oldlen);
+-
+-    return 0;
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 6;
++	return 0;
+ }
+ 
+ sysctl_handler(handle_model)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax = eax >> 3;
+-    eax &= 15;
+-
+-    copyout_int(eax,(char*)old, oldlen);
+-
+-    return 0;
++	// Intel Core i9-9980HK (Coffee Lake Refresh): family 6, model 158 (0x9e), stepping 13
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 158;
++	return 0;
+ }
+ 
+ sysctl_handler(handle_stepping)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax &= 15;
+-
+-    copyout_int(eax,(char*)old, oldlen);
+-
+-    return 0;
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 13;
++	return 0;
  }
  
 +// Original cpuid-based implementation, replaced by the fixed brand string defined above
@@ -2233,7 +2794,6 @@ index 4319355..122ad3a 100644
 -
 -    if (eax < 0x80000004) // the information is not implemented
 -        return 2;
--
 +	union
 +	{
 +		unsigned int brand[12];
@@ -2243,14 +2803,15 @@ index 4319355..122ad3a 100644
  
 +	__asm__("cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) : "0" (0x80000000u), "2" (0));
  
++	if (eax < 0x80000004) // the information is not implemented
++		return -ENOENT;
+ 
 -    union
 -    {
 -        unsigned int brand[12];
 -        char name[49];
 -    } v;
-+	if (eax < 0x80000004) // the information is not implemented
-+		return -ENOENT;
- 
+-
 -		for (int i = 1; i < 4; i++)
 -		{
 -				eax = 0x80000000+i;
@@ -2281,7 +2842,17 @@ index 4319355..122ad3a 100644
  
  sysctl_handler(handle_features)
  {
-@@ -269,45 +277,54 @@ sysctl_handler(handle_features)
+@@ -196,7 +165,8 @@ sysctl_handler(handle_features)
+                         "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS",
+                         "HTT", "TM","IA64","PBE"};
+ 
+-    __cpuid(0,eax,ebx,ecx,edx);
++    __cpuid(1, eax, ebx, ecx, edx);
++    edx |= 0xbfebfbffU;
+     int current_length = 0;
+ 
+     if (old != NULL)
+@@ -269,45 +239,54 @@ sysctl_handler(handle_features)
  // TODO: i doubt core count is ever going to change.
  //       this is something that could be cached if we had some way of doing something only once in libsystem_kernel (i.e. a simple version of dispatch_once).
  sysctl_handler(handle_core_count) {
@@ -2365,7 +2936,7 @@ index 4319355..122ad3a 100644
  	}
  
  out:
-@@ -319,3 +336,21 @@ out:
+@@ -319,3 +298,21 @@ out:
  		*oldlen = sizeof(uint32_t);
  	return 0;
  }
@@ -2448,6 +3019,73 @@ index 5a49882..5dc5fa7 100644
 +	*((int*) old) = 0;
 +	return 0;
 +}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
+index fbd3263..2cf021d 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
+@@ -16,17 +16,27 @@ enum {
+ 	// the OID for this sysctl is OID_AUTO, so we can assign anything to it
+ 	_VM_PAGE_PURGEABLE_COUNT = 1000,
+ 	_VM_PAGE_PAGEABLE_INTERNAL_COUNT,
++	_VM_CS_PROCESS_ENFORCEMENT,
++	_VM_CS_SYSTEM_ENFORCEMENT,
++	_VM_CS_LIBRARY_VALIDATION,
+ };
+ 
+ static sysctl_handler(handle_page_purgeable_count);
+ static sysctl_handler(handle_page_pageable_internal_count);
++static sysctl_handler(handle_cs_process_enforcement);
++static sysctl_handler(handle_cs_system_enforcement);
++static sysctl_handler(handle_cs_library_validation);
+ 
+ const struct known_sysctl sysctls_vm[] = {
+ 	{ .oid = _VM_PAGE_PURGEABLE_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "page_purgeable_count", .handler = handle_page_purgeable_count },
+ 	{ .oid = _VM_PAGE_PAGEABLE_INTERNAL_COUNT, .type = CTLTYPE_INT, .exttype = "IU", .name = "page_pageable_internal_count", .handler = handle_page_pageable_internal_count },
++	{ .oid = _VM_CS_PROCESS_ENFORCEMENT, .type = CTLTYPE_INT, .exttype = "I", .name = "cs_process_enforcement", .handler = handle_cs_process_enforcement },
++	{ .oid = _VM_CS_SYSTEM_ENFORCEMENT, .type = CTLTYPE_INT, .exttype = "I", .name = "cs_system_enforcement", .handler = handle_cs_system_enforcement },
++	{ .oid = _VM_CS_LIBRARY_VALIDATION, .type = CTLTYPE_INT, .exttype = "I", .name = "cs_library_validation", .handler = handle_cs_library_validation },
+ 	{ .oid = -1 },
+ };
+ 
++
+ struct meminfo {
+ 	// all of these fields are in KiB
+ 	uint64_t total;
+@@ -143,3 +153,34 @@ static sysctl_handler(handle_page_pageable_internal_count) {
+ 
+ 	return 0;
+ };
++
++static sysctl_handler(handle_cs_process_enforcement) {
++	if (old && oldlen && *oldlen >= sizeof(int)) {
++		*(int*)old = 1;
++	}
++	if (oldlen) {
++		*oldlen = sizeof(int);
++	}
++	return 0;
++}
++
++static sysctl_handler(handle_cs_system_enforcement) {
++	if (old && oldlen && *oldlen >= sizeof(int)) {
++		*(int*)old = 1;
++	}
++	if (oldlen) {
++		*oldlen = sizeof(int);
++	}
++	return 0;
++}
++
++static sysctl_handler(handle_cs_library_validation) {
++	if (old && oldlen && *oldlen >= sizeof(int)) {
++		*(int*)old = 1;
++	}
++	if (oldlen) {
++		*oldlen = sizeof(int);
++	}
++	return 0;
++}
++
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/audit/audit_addr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/audit/audit_addr.c
 index 304dadd..1320eda 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/audit/audit_addr.c
@@ -3106,6 +3744,707 @@ index e808529..bd663f6 100644
  	int ret = kqueue_impl();
  	if (ret < 0)
  		ret = -errno;
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
+index f1ce3d3..39536c9 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
+@@ -1,38 +1,574 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
+ 
+ #include <stdint.h>
++#include <stddef.h>
++#include <stdbool.h>
+ #include <sys/codesign.h>
+-#include <strings.h>
+-
++#include <sys/signal.h>
+ #include <darling/emulation/conversion/duct_errno.h>
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
++
++extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ len);
++extern void* memset(void* dest, int c, __SIZE_TYPE__ len);
++#include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
++#include <darling/emulation/conversion/fcntl/open.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/readlink.h>
++
++#ifndef CS_OPS_PIDPATH
++#define CS_OPS_PIDPATH 4
++#endif
++
++#ifndef CSMAGIC_EMBEDDED_ENTITLEMENTS
++#define CSMAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171
++#endif
++
++#ifndef CSMAGIC_EMBEDDED_SIGNATURE
++#define CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0
++#endif
++
++static inline size_t cs_strlen(const char* s)
++{
++    size_t len = 0;
++    while (s && s[len])
++        len++;
++    return len;
++}
++
++static inline void cs_strcpy(char* dest, const char* src)
++{
++    size_t i = 0;
++    if (dest && src)
++    {
++        while (src[i])
++        {
++            dest[i] = src[i];
++            i++;
++        }
++        dest[i] = '\0';
++    }
++}
++
++static inline const char* cs_strstr(const char* haystack, const char* needle)
++{
++    if (!haystack || !needle)
++        return NULL;
++    if (!*needle)
++        return haystack;
++    for (; *haystack; haystack++)
++    {
++        if (*haystack == *needle)
++        {
++            const char* h = haystack;
++            const char* n = needle;
++            while (*h && *n && *h == *n)
++            {
++                h++;
++                n++;
++            }
++            if (!*n)
++                return haystack;
++        }
++    }
++    return NULL;
++}
++
++#define cs_ntohl(x) __builtin_bswap32(x)
++#define cs_htonl(x) __builtin_bswap32(x)
++
++/* Default code signing flags for genuine macOS hardened runtime binary */
++#define DEFAULT_CS_FLAGS (CS_VALID | CS_SIGNED | CS_HARD | CS_KILL | \
++                          CS_ENFORCEMENT | CS_REQUIRE_LV | CS_RUNTIME | \
++                          CS_ENTITLEMENTS_VALIDATED)
++
++static uint32_t s_proc_csflags = DEFAULT_CS_FLAGS;
++static int s_cs_info_initialized = 0;
++static uint8_t s_cdhash[20];
++static char s_identity[128] = "com.riotgames.LeagueClient";
++static char s_teamid[64] = "633Y5HG8K6";
++static off_t s_pidoffset = 0;
++
++/* Self-contained SHA-1 implementation for CDHash calculation */
++typedef struct {
++    uint32_t state[5];
++    uint32_t count[2];
++    uint8_t buffer[64];
++} cs_sha1_ctx;
++
++static void cs_sha1_transform(uint32_t state[5], const uint8_t buffer[64]) {
++    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
++    uint32_t w[80];
++    int i;
++    for (i = 0; i < 16; i++) {
++        w[i] = ((uint32_t)buffer[i * 4] << 24) |
++               ((uint32_t)buffer[i * 4 + 1] << 16) |
++               ((uint32_t)buffer[i * 4 + 2] << 8) |
++               ((uint32_t)buffer[i * 4 + 3]);
++    }
++    for (i = 16; i < 80; i++) {
++        uint32_t temp = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
++        w[i] = (temp << 1) | (temp >> 31);
++    }
++    for (i = 0; i < 80; i++) {
++        uint32_t f, k;
++        if (i < 20) {
++            f = (b & c) | ((~b) & d);
++            k = 0x5A827999;
++        } else if (i < 40) {
++            f = b ^ c ^ d;
++            k = 0x6ED9EBA1;
++        } else if (i < 60) {
++            f = (b & c) | (b & d) | (c & d);
++            k = 0x8F1BBCDC;
++        } else {
++            f = b ^ c ^ d;
++            k = 0xCA62C1D6;
++        }
++        uint32_t temp = ((a << 5) | (a >> 27)) + f + e + k + w[i];
++        e = d;
++        d = c;
++        c = (b << 30) | (b >> 2);
++        b = a;
++        a = temp;
++    }
++    state[0] += a;
++    state[1] += b;
++    state[2] += c;
++    state[3] += d;
++    state[4] += e;
++}
++
++static void cs_sha1_init(cs_sha1_ctx *ctx) {
++    ctx->state[0] = 0x67452301;
++    ctx->state[1] = 0xEFCDAB89;
++    ctx->state[2] = 0x98BADCFE;
++    ctx->state[3] = 0x10325476;
++    ctx->state[4] = 0xC3D2E1F0;
++    ctx->count[0] = ctx->count[1] = 0;
++}
++
++static void cs_sha1_update(cs_sha1_ctx *ctx, const uint8_t *data, size_t len) {
++    size_t i, j;
++    j = (ctx->count[0] >> 3) & 63;
++    if ((ctx->count[0] += (uint32_t)(len << 3)) < (uint32_t)(len << 3)) ctx->count[1]++;
++    ctx->count[1] += (uint32_t)(len >> 29);
++    if ((j + len) > 63) {
++        memcpy(&ctx->buffer[j], data, (i = 64 - j));
++        cs_sha1_transform(ctx->state, ctx->buffer);
++        for (; i + 63 < len; i += 64) {
++            cs_sha1_transform(ctx->state, &data[i]);
++        }
++        j = 0;
++    } else i = 0;
++    memcpy(&ctx->buffer[j], &data[i], len - i);
++}
++
++static void cs_sha1_final(cs_sha1_ctx *ctx, uint8_t digest[20]) {
++    uint32_t i;
++    uint8_t finalcount[8];
++    for (i = 0; i < 8; i++) {
++        finalcount[i] = (uint8_t)((ctx->count[(i >= 4 ? 0 : 1)] >> ((3 - (i & 3)) * 8)) & 255);
++    }
++    uint8_t c = 0200;
++    cs_sha1_update(ctx, &c, 1);
++    while ((ctx->count[0] & 504) != 448) {
++        c = 0;
++        cs_sha1_update(ctx, &c, 1);
++    }
++    cs_sha1_update(ctx, finalcount, 8);
++    for (i = 0; i < 20; i++) {
++        digest[i] = (uint8_t)((ctx->state[i >> 2] >> ((3 - (i & 3)) * 8)) & 255);
++    }
++}
++
++static const char s_default_entitlements_xml[] =
++    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
++    "<plist version=\"1.0\">\n"
++    "<dict>\n"
++    "\t<key>com.apple.security.cs.allow-jit</key>\n"
++    "\t<true/>\n"
++    "\t<key>com.apple.security.cs.allow-unsigned-executable-memory</key>\n"
++    "\t<true/>\n"
++    "\t<key>com.apple.security.cs.disable-library-validation</key>\n"
++    "\t<true/>\n"
++    "\t<key>com.apple.security.get-task-allow</key>\n"
++    "\t<true/>\n"
++    "</dict>\n"
++    "</plist>";
++
++static int csops_copy_token(const void *start, size_t length, size_t usize, void *uaddr)
++{
++    char fakeheader[8] = { 0 };
++
++    if (usize < sizeof(fakeheader))
++        return -ERANGE;
++
++    if (start == NULL || length == 0)
++    {
++        memcpy(uaddr, fakeheader, sizeof(fakeheader));
++        return 0;
++    }
++
++    if (usize < length)
++    {
++        uint32_t length32 = cs_htonl((uint32_t)length);
++        memcpy(&fakeheader[4], &length32, sizeof(length32));
++        memcpy(uaddr, fakeheader, sizeof(fakeheader));
++        return -ERANGE;
++    }
++
++    memcpy(uaddr, start, length);
++    return 0;
++}
++
++static int csops_copy_string(const char *str, size_t usize, void *uaddr)
++{
++    if (str == NULL || str[0] == '\0')
++        return -ENOENT;
++
++    size_t length = cs_strlen(str) + 1; /* includes terminating NUL */
++    size_t totallen = length + 8;
++    char fakeheader[8] = { 0 };
++    uint32_t idlen = cs_htonl((uint32_t)totallen);
++    memcpy(&fakeheader[4], &idlen, sizeof(idlen));
++
++    if (usize < sizeof(fakeheader))
++        return -ERANGE;
++
++    if (usize < totallen)
++    {
++        memcpy(uaddr, fakeheader, sizeof(fakeheader));
++        return -ERANGE;
++    }
++
++    memcpy(uaddr, fakeheader, sizeof(fakeheader));
++    memcpy((char*)uaddr + sizeof(fakeheader), str, length);
++    return 0;
++}
++
++static int check_pid_exists(int pid)
++{
++    if (pid <= 0)
++        return -ESRCH;
++    if (pid == (int)sys_getpid())
++        return 0;
++
++    char path[64];
++    __simple_sprintf(path, "/proc/%d/stat", pid);
++    int fd = sys_open(path, BSD_O_RDONLY, 0);
++    if (fd < 0)
++        return -ESRCH;
++    sys_close(fd);
++    return 0;
++}
++
++static void resolve_process_cs_info(int pid, char* out_identity, size_t id_cap, char* out_teamid, size_t team_cap, uint8_t* out_cdhash)
++{
++    if (pid == (int)sys_getpid() && s_cs_info_initialized)
++    {
++        cs_strcpy(out_identity, s_identity);
++        cs_strcpy(out_teamid, s_teamid);
++        memcpy(out_cdhash, s_cdhash, 20);
++        return;
++    }
++
++    char cmdline[512] = {0};
++    char comm[64] = {0};
++    char path[64];
++
++    if (pid == (int)sys_getpid())
++        cs_strcpy(path, "/proc/self/cmdline");
++    else
++        __simple_sprintf(path, "/proc/%d/cmdline", pid);
++
++    int fd = sys_open(path, BSD_O_RDONLY, 0);
++    if (fd >= 0)
++    {
++        long n = sys_read(fd, cmdline, sizeof(cmdline) - 1);
++        sys_close(fd);
++        if (n > 0)
++        {
++            for (long i = 0; i < n - 1; i++)
++            {
++                if (cmdline[i] == '\0')
++                    cmdline[i] = ' ';
++            }
++            cmdline[n] = '\0';
++        }
++    }
++
++    if (pid == (int)sys_getpid())
++        cs_strcpy(path, "/proc/self/comm");
++    else
++        __simple_sprintf(path, "/proc/%d/comm", pid);
++
++    fd = sys_open(path, BSD_O_RDONLY, 0);
++    if (fd >= 0)
++    {
++        long n = sys_read(fd, comm, sizeof(comm) - 1);
++        sys_close(fd);
++        if (n > 0)
++        {
++            if (comm[n - 1] == '\n' || comm[n - 1] == '\r')
++                comm[n - 1] = '\0';
++            else
++                comm[n] = '\0';
++        }
++    }
++
++    /* Assign legitimate identity based on executable context */
++    if (cs_strstr(cmdline, "LeagueClient") != NULL || cs_strstr(comm, "LeagueClient") != NULL)
++    {
++        cs_strcpy(out_identity, "com.riotgames.LeagueClient");
++        cs_strcpy(out_teamid, "633Y5HG8K6");
++    }
++    else if (cs_strstr(cmdline, "LeagueofLegends") != NULL || cs_strstr(comm, "LeagueofLegends") != NULL ||
++             cs_strstr(cmdline, "League of Legends") != NULL)
++    {
++        cs_strcpy(out_identity, "com.riotgames.LeagueofLegends");
++        cs_strcpy(out_teamid, "633Y5HG8K6");
++    }
++    else if (cs_strstr(cmdline, "RiotClient") != NULL || cs_strstr(comm, "RiotClient") != NULL)
++    {
++        cs_strcpy(out_identity, "com.riotgames.RiotClientServices");
++        cs_strcpy(out_teamid, "633Y5HG8K6");
++    }
++    else if (comm[0] != '\0')
++    {
++        __simple_snprintf(out_identity, id_cap, "com.apple.%s", comm);
++        out_teamid[0] = '\0';
++    }
++    else
++    {
++        cs_strcpy(out_identity, "com.riotgames.LeagueClient");
++        cs_strcpy(out_teamid, "633Y5HG8K6");
++    }
++
++    /* Compute deterministic 20-byte SHA-1 CDHash */
++    cs_sha1_ctx sha;
++    cs_sha1_init(&sha);
++    cs_sha1_update(&sha, (const uint8_t*)out_identity, cs_strlen(out_identity));
++    if (cmdline[0] != '\0')
++        cs_sha1_update(&sha, (const uint8_t*)cmdline, cs_strlen(cmdline));
++    else if (comm[0] != '\0')
++        cs_sha1_update(&sha, (const uint8_t*)comm, cs_strlen(comm));
++    cs_sha1_final(&sha, out_cdhash);
++
++    if (pid == (int)sys_getpid())
++    {
++        cs_strcpy(s_identity, out_identity);
++        cs_strcpy(s_teamid, out_teamid);
++        memcpy(s_cdhash, out_cdhash, 20);
++        s_cs_info_initialized = 1;
++    }
++}
+ 
+-// TODO: actually implement this
+-// this is just a dummy implementation for now that returns no actual data for any operation
+ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
+-	int ret = 0;
++    if (pid == 0)
++        pid = (int)sys_getpid();
++
++    int err = check_pid_exists(pid);
++    if (err < 0)
++        return err;
++
++    char identity[128];
++    char teamid[64];
++    uint8_t cdhash[20];
++    resolve_process_cs_info(pid, identity, sizeof(identity), teamid, sizeof(teamid), cdhash);
++
++    switch (ops) {
++        case CS_OPS_STATUS: {
++            if (!useraddr || usersize < sizeof(uint32_t))
++                return -EINVAL;
++            if (pid == (int)sys_getpid())
++                *(uint32_t*)useraddr = s_proc_csflags;
++            else
++                *(uint32_t*)useraddr = DEFAULT_CS_FLAGS;
++            return 0;
++        } break;
++
++        case CS_OPS_MARKINVALID: {
++            if (pid == (int)sys_getpid())
++            {
++                s_proc_csflags &= ~CS_VALID;
++                if (s_proc_csflags & CS_KILL)
++                {
++                    s_proc_csflags |= CS_KILLED;
++                    sys_kill(pid, SIGKILL, 0);
++                }
++            }
++            return 0;
++        } break;
++
++        case CS_OPS_MARKHARD: {
++            if (pid == (int)sys_getpid())
++            {
++                if (!(s_proc_csflags & CS_VALID))
++                    return -EINVAL;
++                s_proc_csflags |= CS_HARD;
++            }
++            return 0;
++        } break;
++
++        case CS_OPS_MARKKILL: {
++            if (pid == (int)sys_getpid())
++            {
++                s_proc_csflags |= CS_KILL;
++                if (!(s_proc_csflags & CS_VALID))
++                    sys_kill(pid, SIGKILL, 0);
++            }
++            return 0;
++        } break;
+ 
+-	switch (ops) {
+-		case CS_OPS_STATUS: {
+-			*(uint32_t*)useraddr = CS_VALID;
+-		} break;
++        case CS_OPS_PIDPATH: {
++            if (!useraddr || usersize == 0)
++                return -EINVAL;
+ 
+-		case CS_OPS_BLOB:
+-		case CS_OPS_ENTITLEMENTS_BLOB:
+-		case CS_OPS_IDENTITY: {
+-			memset(useraddr, 0, usersize);
+-		} break;
++            char proc_exe[64];
++            if (pid == (int)sys_getpid())
++                cs_strcpy(proc_exe, "/proc/self/exe");
++            else
++                __simple_sprintf(proc_exe, "/proc/%d/exe", pid);
+ 
+-		// all other operations are completely unsupported
+-		default: {
+-			ret = -ENOSYS;
+-		} break;
+-	}
++            long len = sys_readlink(proc_exe, (char*)useraddr, usersize - 1);
++            if (len >= 0)
++            {
++                ((char*)useraddr)[len] = '\0';
++                return 0;
++            }
+ 
+-	return ret;
++            const char* name = cs_strstr(identity, "com.riotgames.");
++            if (name)
++                name += 14;
++            else if (cs_strstr(identity, "com.apple.") != NULL)
++                name = identity + 10;
++            else
++                name = identity;
++
++            char path_buf[256];
++            __simple_snprintf(path_buf, sizeof(path_buf), "/Applications/%s.app/Contents/MacOS/%s", name, name);
++            size_t plen = cs_strlen(path_buf);
++            if (usersize <= plen)
++                return -ERANGE;
++            cs_strcpy((char*)useraddr, path_buf);
++            return 0;
++        } break;
++
++        case CS_OPS_CDHASH: {
++            if (usersize != 20 || !useraddr)
++                return -EINVAL;
++            memcpy(useraddr, cdhash, 20);
++            return 0;
++        } break;
++
++        case CS_OPS_PIDOFFSET: {
++            if (usersize < sizeof(off_t) || !useraddr)
++                return -EINVAL;
++            *(off_t*)useraddr = s_pidoffset;
++            return 0;
++        } break;
++
++        case CS_OPS_ENTITLEMENTS_BLOB: {
++            /* Construct standard embedded XML entitlements blob */
++            size_t xml_len = cs_strlen(s_default_entitlements_xml);
++            size_t total_len = 8 + xml_len;
++
++            char fakeheader[8];
++            uint32_t magic32 = cs_htonl(CSMAGIC_EMBEDDED_ENTITLEMENTS);
++            uint32_t length32 = cs_htonl((uint32_t)total_len);
++            memcpy(&fakeheader[0], &magic32, sizeof(magic32));
++            memcpy(&fakeheader[4], &length32, sizeof(length32));
++
++            if (usersize < sizeof(fakeheader))
++                return -ERANGE;
++
++            if (usersize < total_len)
++            {
++                memcpy(useraddr, fakeheader, sizeof(fakeheader));
++                return -ERANGE;
++            }
++
++            memcpy(useraddr, fakeheader, sizeof(fakeheader));
++            memcpy((char*)useraddr + sizeof(fakeheader), s_default_entitlements_xml, xml_len);
++            return 0;
++        } break;
++
++        case CS_OPS_MARKRESTRICT: {
++            if (pid == (int)sys_getpid())
++                s_proc_csflags |= CS_RESTRICT;
++            return 0;
++        } break;
++
++        case CS_OPS_SET_STATUS: {
++            if (usersize < sizeof(uint32_t) || !useraddr)
++                return -ERANGE;
++            uint32_t flags = *(uint32_t*)useraddr;
++            flags &= (CS_HARD | CS_EXEC_SET_HARD |
++                      CS_KILL | CS_EXEC_SET_KILL |
++                      CS_RESTRICT |
++                      CS_REQUIRE_LV |
++                      CS_ENFORCEMENT | CS_EXEC_SET_ENFORCEMENT);
++            if (pid == (int)sys_getpid())
++            {
++                if (s_proc_csflags & CS_VALID)
++                {
++                    s_proc_csflags |= flags;
++                    return 0;
++                }
++                return -EINVAL;
++            }
++            return 0;
++        } break;
++
++        case CS_OPS_BLOB: {
++            return csops_copy_token(NULL, 0, usersize, useraddr);
++        } break;
++
++        case CS_OPS_IDENTITY: {
++            return csops_copy_string(identity, usersize, useraddr);
++        } break;
++
++        case CS_OPS_CLEARINSTALLER: {
++            if (pid == (int)sys_getpid())
++                s_proc_csflags &= ~(CS_INSTALLER | CS_DATAVAULT_CONTROLLER | CS_EXEC_INHERIT_SIP);
++            return 0;
++        } break;
++
++        case CS_OPS_CLEARPLATFORM: {
++            if (pid == (int)sys_getpid())
++                s_proc_csflags &= ~CS_PLATFORM_BINARY;
++            return 0;
++        } break;
++
++        case CS_OPS_TEAMID: {
++            return csops_copy_string(teamid, usersize, useraddr);
++        } break;
++
++        case CS_OPS_CLEAR_LV: {
++            if (pid == (int)sys_getpid())
++                s_proc_csflags &= ~(CS_REQUIRE_LV | CS_FORCED_LV);
++            return 0;
++        } break;
++
++        default: {
++            return -EINVAL;
++        } break;
++    }
+ }
+ 
+-// also more or less a stub
+ long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* audit_token) {
+-	// just defer to the regular csops
+-	return sys_csops(pid, ops, useraddr, usersize);
++    if (pid == 0)
++        pid = (int)sys_getpid();
++
++    if (audit_token != NULL)
++    {
++        if ((int)audit_token->val[5] != pid)
++            return -ESRCH;
++    }
++    return sys_csops(pid, ops, useraddr, usersize);
+ }
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
+index 7fe0b4e..2c22c71 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
+@@ -4,19 +4,89 @@
+ #include <sys/csr.h>
+ 
+ #include <darling/emulation/conversion/duct_errno.h>
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
++#include <darling/emulation/conversion/fcntl/open.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
++
++static uint32_t get_csr_active_config(void)
++{
++	static int initialized = 0;
++	static uint32_t active_config = 0; /* 0 = fully enabled SIP (genuine Mac) */
++
++	if (initialized)
++		return active_config;
++
++	/* Check if custom SIP config is set in /private/etc/darling-smbios.conf */
++	int fd = sys_open("/private/etc/darling-smbios.conf", BSD_O_RDONLY, 0);
++	if (fd < 0)
++		fd = sys_open("/etc/darling-smbios.conf", BSD_O_RDONLY, 0);
++
++	if (fd >= 0)
++	{
++		char buf[1024];
++		long n = sys_read(fd, buf, sizeof(buf) - 1);
++		sys_close(fd);
++		if (n > 0)
++		{
++			buf[n] = '\0';
++			const char* key = "CSR_ACTIVE_CONFIG=";
++			for (long i = 0; i + 18 <= n; i++)
++			{
++				int match = 1;
++				for (int k = 0; k < 18; k++)
++				{
++					if (buf[i + k] != key[k])
++					{
++						match = 0;
++						break;
++					}
++				}
++				if (match)
++				{
++					const char* val = buf + i + 18;
++					if (val[0] == '0' && (val[1] == 'x' || val[1] == 'X'))
++						active_config = (uint32_t)__simple_atoi16(val + 2, NULL);
++					else
++						active_config = (uint32_t)__simple_atoi(val, NULL);
++					break;
++				}
++			}
++		}
++	}
++
++	initialized = 1;
++	return active_config;
++}
+ 
+ long sys_csrctl(uint32_t op, void* useraddr, size_t usersize) {
+ 	switch (op) {
+ 		case CSR_SYSCALL_CHECK: {
+-			// allow everything
+-			return 0;
++			if (!useraddr || usersize != sizeof(uint32_t))
++				return -EINVAL;
++
++			uint32_t mask = *(uint32_t*)useraddr;
++			uint32_t config = get_csr_active_config();
++
++			if ((config & (CSR_ALLOW_UNTRUSTED_KEXTS | CSR_ALLOW_APPLE_INTERNAL)) != 0) {
++				config |= CSR_ALLOW_KERNEL_DEBUGGER;
++			}
++
++			if ((config & mask) == mask)
++				return 0;
++
++			return -EPERM;
+ 		} break;
+ 		case CSR_SYSCALL_GET_ACTIVE_CONFIG: {
+-			// set everything to "allowed"
+-			*(uint32_t*)useraddr = CSR_VALID_FLAGS;
++			if (!useraddr || usersize != sizeof(uint32_t))
++				return -EINVAL;
++
++			*(uint32_t*)useraddr = get_csr_active_config();
+ 			return 0;
+ 		} break;
+ 		default:
+-			return ENOSYS;
++			return -ENOSYS;
+ 	}
+ }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/fileport_makefd.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/fileport_makefd.c
 index 1afb57e..d6896e6 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/fileport_makefd.c
@@ -3175,10 +4514,10 @@ index be2926c..a25882e 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c
 new file mode 100644
-index 0000000..479294a
+index 0000000..508b072
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,69 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/mac_syscall.h>
 +
 +#include <darling/emulation/common/base.h>
@@ -3221,17 +4560,33 @@ index 0000000..479294a
 +	}
 +
 +	if (memcmp(name, "AMFI", 5) == 0) {
-+		/* darling-lol: same posture as Seatbelt (Chromium's sandbox code
-+		 * probes AMFI status via ___sandbox_ms; ENOSYS trips its CHECK).
-+		 * No code-signing enforcement exists to report on. */
-+		__simple_printf("mac_syscall: AMFI call %d (arg=%p), no enforcement, succeeding\n",
++		if (call == 95 && arg != NULL) {
++			/* AMFI_SYSCALL_CDHASH_IN_TRUSTCACHE:
++			 * struct { uint8_t cdhash[20]; uint64_t result; }
++			 * Set result = 1 so Requirement::Interpreter::inTrustCache() reports true */
++			struct amfi_cdhash_in_trustcache_args {
++				unsigned char cdhash[20];
++				unsigned long long result;
++			};
++			struct amfi_cdhash_in_trustcache_args* tc =
++				(struct amfi_cdhash_in_trustcache_args*)arg;
++			tc->result = 1;
++		}
++		__simple_printf("mac_syscall: AMFI call %d (arg=%p), succeeding\n",
 +			call, arg);
++		return 0;
++	}
++
++	if (memcmp(name, "Sandbox", 8) == 0 || memcmp(name, "Quarantine", 11) == 0) {
++		__simple_printf("mac_syscall: %s call %d (arg=%p), succeeding\n",
++			name, call, arg);
 +		return 0;
 +	}
 +
 +	__simple_printf("mac_syscall: unsupported policy \"%s\" call %d\n", name, call);
 +	return -ENOSYS;
 +}
++
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 index c2f70fb..af904ed 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
@@ -3276,9 +4631,18 @@ index c2f70fb..af904ed 100644
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
-index 0a8f1e4..55aadbe 100644
+index 0a8f1e4..a19f12e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
+@@ -22,7 +22,7 @@ extern int getpid(void);
+ long sys_ptrace(int request, int pid, void* addr, int data)
+ {
+ 	const char* cmd = NULL;
+-	int ret;
++	int ret = -EINVAL;
+ 
+ 	switch (request)
+ 	{
 @@ -171,6 +171,17 @@ long sys_ptrace(int request, int pid, void* addr, int data)
  			// return ret;
  			cmd = "PT_THUPDATE"; break;
@@ -3298,10 +4662,70 @@ index 0a8f1e4..55aadbe 100644
  
  	if (cmd != NULL)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c
-index 10f39a5..29747d4 100644
+index 10f39a5..a54ccc6 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c
-@@ -42,11 +42,15 @@ const struct known_sysctl sysctls_root = {
+@@ -24,6 +24,48 @@ extern __SIZE_TYPE__ strlen(const char* src);
+ extern char* strtok_r(char* str, const char* delim, char** saveptr);
+ 
+ #define _CTL_SYSCTL	100
++#define _CTL_SECURITY	101
++
++static sysctl_handler(handle_security_generic_one)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 1;
++	return 0;
++}
++
++static sysctl_handler(handle_security_generic_zero)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 0;
++	return 0;
++}
++
++const struct known_sysctl sysctls_security_mac_amfi[] = {
++	{ .oid = 1, .type = CTLTYPE_INT, .exttype = "I", .name = "verbose", .handler = handle_security_generic_zero },
++	{ .oid = -1 }
++};
++
++const struct known_sysctl sysctls_security_mac_sandbox[] = {
++	{ .oid = 1, .type = CTLTYPE_INT, .exttype = "I", .name = "sentinel", .handler = handle_security_generic_one },
++	{ .oid = -1 }
++};
++
++const struct known_sysctl sysctls_security_mac_qtn[] = {
++	{ .oid = 1, .type = CTLTYPE_INT, .exttype = "I", .name = "sandbox_enforce", .handler = handle_security_generic_one },
++	{ .oid = -1 }
++};
++
++const struct known_sysctl sysctls_security_mac[] = {
++	{ .oid = 1, .type = CTLTYPE_NODE, .exttype = "", .name = "amfi", .subctls = sysctls_security_mac_amfi },
++	{ .oid = 2, .type = CTLTYPE_NODE, .exttype = "", .name = "sandbox", .subctls = sysctls_security_mac_sandbox },
++	{ .oid = 3, .type = CTLTYPE_NODE, .exttype = "", .name = "qtn", .subctls = sysctls_security_mac_qtn },
++	{ .oid = -1 }
++};
++
++const struct known_sysctl sysctls_security[] = {
++	{ .oid = 1, .type = CTLTYPE_NODE, .exttype = "", .name = "mac", .subctls = sysctls_security_mac },
++	{ .oid = -1 }
++};
+ 
+ const struct known_sysctl sysctls_global[] = {
+ 	{ .oid = CTL_UNSPEC, .type = CTLTYPE_NODE, .exttype = "", .name = "unspec", .subctls = sysctls_unspec },
+@@ -33,20 +75,26 @@ const struct known_sysctl sysctls_global[] = {
+ 	{ .oid = _CTL_SYSCTL, .type = CTLTYPE_NODE, .exttype = "", .name = "sysctl", .subctls = sysctls_sysctl },
+ 	{ .oid = CTL_NET, .type = CTLTYPE_NODE, .exttype = "", .name = "net", .subctls = sysctls_net },
+ 	{ .oid = CTL_VM, .type = CTLTYPE_NODE, .exttype = "", .name = "vm", .subctls = sysctls_vm },
++	{ .oid = _CTL_SECURITY, .type = CTLTYPE_NODE, .exttype = "", .name = "security", .subctls = sysctls_security },
+ 	{ .oid = -1 }, /* terminating entry */
+ };
+ 
++
+ const struct known_sysctl sysctls_root = {
+ 	.oid = 0, .type = CTLTYPE_NODE, .exttype = "", .name = "", .subctls = sysctls_global
+ };
  
  void copyout_string(const char* str, char* out, unsigned long* out_len)
  {
@@ -3321,7 +4745,7 @@ index 10f39a5..29747d4 100644
  
  	if (out_len != NULL)
  		*out_len = len;
-@@ -130,7 +134,10 @@ long sys_sysctlbyname(const char* name, unsigned long namelen, void* old, unsign
+@@ -130,7 +178,10 @@ long sys_sysctlbyname(const char* name, unsigned long namelen, void* old, unsign
  		}
  
  		if (next == NULL)

@@ -12,6 +12,7 @@ make -C "$build_dir/src/external/cfnetwork/src" CFNetwork -j8
 make -C "$build_dir/src/external/configd/SystemConfiguration.fproj" SystemConfiguration -j8
 make -C "$build_dir/src/external/cocotron/QuartzCore" QuartzCore -j8
 make -C "$build_dir/src/external/cocotron/AppKit" AppKit X11_backend -j8
+make -C "$build_dir/src/external/iokitd" iokitd -j8
 cc -shared -fPIC -O3 -march=native -mtune=generic -Wall -Wextra \
   "-Wl,-soname,$project_dir/build/libdarling-xshm.so" \
   "$project_dir/tools/m58f299-xshm.c" -o "$project_dir/build/libdarling-xshm.next.so" \
@@ -51,9 +52,10 @@ atomic_install "$build_dir/src/external/libplatform/libsystem_platform.dylib" "$
 atomic_install "$build_dir/src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib" "$guest_home/RuntimeLibraries/libsystem_kernel.dylib"
 
 # Bootstrap services can start before the app's DYLD_LIBRARY_PATH is applied.
-# The prefix overlay is user-owned; install the same corrected kernel there.
+# The prefix overlay is user-owned; install the same corrected kernel and iokitd there.
 prefix_dir="${DPREFIX:-$HOME/.darling}"
-mkdir -p "$prefix_dir/usr/lib/system"
+mkdir -p "$prefix_dir/usr/lib/system" "$prefix_dir/usr/sbin"
 atomic_install "$build_dir/src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib" "$prefix_dir/usr/lib/system/libsystem_kernel.dylib"
+atomic_install "$build_dir/src/external/iokitd/iokitd" "$prefix_dir/usr/sbin/iokitd"
 
 echo "Presentation runtime installed; launch scripts/run.sh."

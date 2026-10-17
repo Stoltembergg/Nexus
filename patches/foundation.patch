@@ -23,6 +23,33 @@ index b3742a82e..f4d7b4d6d 100644
  #endif
 +
 +FOUNDATION_EXPORT NSString *const NSProcessInfoThermalStateDidChangeNotification;
+diff --git a/include/Foundation/NSRaise.h b/include/Foundation/NSRaise.h
+index a8b830426..37d8a252f 100644
+--- a/include/Foundation/NSRaise.h
++++ b/include/Foundation/NSRaise.h
+@@ -32,11 +32,21 @@ static inline void _NSInvalidAbstractInvocation(SEL selector, id object,
+                         sel_getName(selector), file, line];
+ }
+ 
++static inline const char* _NSBaseFileName(const char* path)
++{
++    if (!path) return "";
++    const char* p = path;
++    for (const char* s = path; *s; s++) {
++        if (*s == '/' || *s == '\\') p = s + 1;
++    }
++    return p;
++}
++
+ static inline void _NSUnimplementedMethod(SEL selector, id object,
+                                           const char *file, int line)
+ {
+     NSLog(@"-[%@ %s] unimplemented in %s at %d", [object class],
+-          sel_getName(selector), file, line);
++          sel_getName(selector), _NSBaseFileName(file), line);
+ }
+ 
+ static inline void _NSUnimplementedFunction(const char *function,
 diff --git a/include/Foundation/NSUserActivity.h b/include/Foundation/NSUserActivity.h
 index 80c92bc07..2a80df649 100644
 --- a/include/Foundation/NSUserActivity.h
@@ -34,24 +61,85 @@ index 80c92bc07..2a80df649 100644
 +
 +FOUNDATION_EXPORT NSString *const NSUserActivityTypeBrowsingWeb;
 diff --git a/src/NSProcessInfo.m b/src/NSProcessInfo.m
-index 1c21f176d..f9f354c80 100644
+index 1c21f176d..855a97fd3 100644
 --- a/src/NSProcessInfo.m
 +++ b/src/NSProcessInfo.m
-@@ -305,6 +305,13 @@ SINGLETON_RR()
+@@ -251,7 +251,9 @@ SINGLETON_RR()
+     }
+ #else
+ 	NSDictionary* dict = (NSDictionary*) _CFCopySystemVersionDictionary();
+-	NSString* string = [dict objectForKey: @"ProductVersion"];
++	NSString* string = [dict objectForKey: @"FullVersionString"];
++	if (!string)
++		string = [dict objectForKey: @"ProductVersion"];
+ 
+ 	[string retain];
+ 	[dict release];
+@@ -285,11 +287,14 @@ SINGLETON_RR()
+ 
+ - (unsigned long long)physicalMemory
+ {
+-    unsigned long long amt = 1;
++    unsigned long long amt = 17179869184ULL;
+     size_t len = sizeof(unsigned long long);
+-    if (sysctlbyname("hw.physmem", &amt, &len, 0, 0) != 0)
++    if (sysctlbyname("hw.memsize", &amt, &len, 0, 0) != 0)
+     {
+-        amt = 1;
++        if (sysctlbyname("hw.physmem", &amt, &len, 0, 0) != 0)
++        {
++            amt = 17179869184ULL;
++        }
+     }
+     return amt;
+ }
+@@ -305,25 +310,33 @@ SINGLETON_RR()
      return t.tv_sec + t.tv_usec / (NSTimeInterval)USEC_PER_SEC;
  }
  
+-- (NSOperatingSystemVersion)operatingSystemVersion
 +- (NSProcessInfoThermalState)thermalState
-+{
+ {
+-	NSOperatingSystemVersion version = { 0, 0, 0 };
 +    /* No thermal-pressure source on Linux; report Nominal so clients
 +     * (e.g. Chromium's ThermalStateObserverMac) proceed normally. */
 +    return NSProcessInfoThermalStateNominal;
 +}
-+
- - (NSOperatingSystemVersion)operatingSystemVersion
- {
- 	NSOperatingSystemVersion version = { 0, 0, 0 };
-@@ -396,3 +403,5 @@ void __NSInitializeProcess(int argc,const char *argv[]) {
+ 
+-	NSString* string = [self operatingSystemVersionString];
++- (NSOperatingSystemVersion)operatingSystemVersion
++{
++	NSOperatingSystemVersion version = { 14, 7, 0 };
++#ifdef __APPLE__
++	NSDictionary* dict = (NSDictionary*) _CFCopySystemVersionDictionary();
++	NSString* string = [[dict objectForKey: @"ProductVersion"] retain];
++	[dict release];
++	if (!string)
++		string = [[self operatingSystemVersionString] retain];
++#else
++	NSString* string = [[self operatingSystemVersionString] retain];
++#endif
+ 	NSArray* arr = [string componentsSeparatedByString:@"."];
++	[string release];
+ 
+ 	if ([arr count] >= 1)
+ 	{
+ 		version.majorVersion = [[arr objectAtIndex: 0] integerValue];
+-		if ([arr count] >= 2)
+-		{
+-			version.minorVersion = [[arr objectAtIndex: 1] integerValue];
+-
+-			if ([arr count] >= 3)
+-			{
+-				version.patchVersion = [[arr objectAtIndex: 2] integerValue];
+-			}
+-		}
++		version.minorVersion = ([arr count] >= 2) ? [[arr objectAtIndex: 1] integerValue] : 0;
++		version.patchVersion = ([arr count] >= 3) ? [[arr objectAtIndex: 2] integerValue] : 0;
+ 	}
+ 
+ 	return version;
+@@ -396,3 +409,5 @@ void __NSInitializeProcess(int argc,const char *argv[]) {
      }
  }
  #endif

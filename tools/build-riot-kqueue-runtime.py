@@ -83,7 +83,13 @@ repairs += [('src/xnu_syscall/bsd/helper/misc/sysctl_kern.c',{**emulation_flags,
 # topology; sysctl_machdep.c shares its probe for core_count/thread_count.
 repairs += [('src/xnu_syscall/bsd/helper/misc/sysctl_hw.c',emulation_flags,emulation_root)]
 repairs += [('src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c',emulation_flags,emulation_root)]
+repairs += [('src/xnu_syscall/bsd/impl/misc/csrctl.c',repair_flags,emulation_root)]
+repairs += [('src/xnu_syscall/bsd/impl/misc/csops.c',repair_flags,emulation_root)]
+repairs += [('src/xnu_syscall/bsd/impl/misc/mac_syscall.c',repair_flags,emulation_root)]
+repairs += [('src/xnu_syscall/bsd/helper/misc/sysctl_vm.c',repair_flags,emulation_root)]
+repairs += [('src/xnu_syscall/bsd/impl/misc/sysctl.c',repair_flags,emulation_root)]
 repairs += [('src/linux_premigration/resources/dserver-rpc-defs.c',rpc_flags,emulation_root)]
+
 forced_rpc_flags={**rpc_flags,'C_FLAGS':[*rpc_flags['C_FLAGS'],'-include',str(emulation_root/'include/linux_premigration/resources/dserver-rpc-defs.h')]}
 repairs += [('src/rpc.c',forced_rpc_flags,build/'src/external/darlingserver')]
 # Process-local Mach semaphores (mach_traps.c) wrap semaphore_create/semaphore_destroy: the MIG stubs get private names.
@@ -121,10 +127,13 @@ for line in (build / 'src/frameworks/CoreVideo/CMakeFiles/CoreVideo.dir/flags.ma
     if line.startswith('C_') and ' = ' in line:
         name, value = line.split(' = ', 1)
         flags[name] = shlex.split(value)
-for probe in ('riot-task-info-check','riot-kqueue-lifetime-check','riot-kqueue-stack-check','riot-workqueue-reuse-check','riot-dispatch-fd-check','riot-kqueue-dispatch2-check','riot-syscall-fastpath-check','riot-select-backoff-check','riot-vnode-close-check','riot-rpc-signal-mask-check','riot-fileport-lifetime-check','riot-kqueue-timer-check','riot-cancel-rpc-check'):
+sdk = Path('@DARLING_SDK@')
+if not sdk.is_dir():
+    sdk = Path('/usr/local/libexec/darling')
+for probe in ('riot-task-info-check','riot-kqueue-lifetime-check','riot-kqueue-stack-check','riot-workqueue-reuse-check','riot-dispatch-fd-check','riot-kqueue-dispatch2-check','riot-syscall-fastpath-check','riot-select-backoff-check','riot-vnode-close-check','riot-rpc-signal-mask-check','riot-fileport-lifetime-check','riot-kqueue-timer-check','riot-cancel-rpc-check','riot-sip-codesign-check'):
     obj = project / f'build/{probe}.o'
     subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
                     '-O2', '-c', str(project / f'tools/{probe}.c'), '-o', str(obj)], check=True)
     subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-nostdlib',
-                    '-isysroot', '@DARLING_SDK@', str(obj), '-lSystem', '-o',
+                    '-isysroot', str(sdk), str(obj), '-lSystem', '-o',
                     str(project / f'build/{probe}')], check=True)
