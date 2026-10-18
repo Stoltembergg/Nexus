@@ -22,6 +22,15 @@ for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_V
  case "$value" in 0|'') unset "$option";; *) export "$option=$value";; esac
 done
 prefix=${DPREFIX:-$HOME/.darling}
+guest_home='@GUEST_HOME@'
+shim_host="$prefix$guest_home/zzlogdir.dylib"
+shim_guest=
+if [ -f "$shim_host" ]; then
+ shim_guest="$guest_home/zzlogdir.dylib"
+ export DYLD_INSERT_LIBRARIES=$shim_guest
+else
+ unset DYLD_INSERT_LIBRARIES
+fi
 # The first-time installer puts the client in /Users/Shared/Riot Games and then
 # hands off through LaunchServices, which does not start it under Darling. Link
 # the installed client where the normal launch expects it.
@@ -60,7 +69,7 @@ else
     --launch-patchline="${RCLOL_LAUNCH_PATCHLINE-live}"
  fi
 fi
-exec env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
+exec env -u ELECTRON_RUN_AS_NODE EGL_PLATFORM=x11 \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
   mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-false}}" \
   XMODIFIERS="${RCLOL_XMODIFIERS:-@im=none}" DISPLAY="${DISPLAY:-:1}" \

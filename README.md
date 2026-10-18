@@ -67,6 +67,19 @@ On KDE, install a desktop icon and taskbar entries so that icons show up properl
 
 Clicking on the League icon launches `scripts/run.sh`. Startup output is saved to `~/.local/state/darling-lol/launcher.log` (or `$XDG_STATE_HOME/darling-lol/launcher.log`); Riot's own client logs remain under `~/.darling`.
 
+To enable the optional Riot UX workaround for a relative Electron log directory, build and install its small argument shim once. Run this from the repository root after configuring the guest account:
+
+```sh
+clang -target x86_64-apple-macosx11.0 -fuse-ld=lld -dynamiclib -nostdlib \
+  -nodefaultlibs -undefined dynamic_lookup -O2 -o /tmp/zzlogdir.dylib \
+  tools/m58f101-logdir-shim.c -Wl,-install_name,/tmp/zzlogdir.dylib
+prefix=${DPREFIX:-"$HOME/.darling"}
+guest_home=$(python3 -c 'import json; print(json.load(open("build/config.json"))["guest_home"])')
+install -D -m 644 /tmp/zzlogdir.dylib "$prefix$guest_home/zzlogdir.dylib"
+```
+
+The normal launcher detects this file and injects it into Riot processes. Without it, launch proceeds without the workaround.
+
 ## Testing
 
 Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. This project ships no client-side automation, inspection or profiling helpers.

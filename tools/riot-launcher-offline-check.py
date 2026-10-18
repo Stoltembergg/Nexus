@@ -77,6 +77,13 @@ with open({str(log)!r}, "a") as output:
         assert "--launch-product=league_of_legends" in launch["args"], "product launch lost"
         assert "--app-root=/Applications/Riot Client.app" in launch["args"], "application root lost"
         assert "--log-dir=/Users/offline-check/Library/Logs/Riot Games/Riot Client" in launch["args"], "absolute log directory lost"
+        shim_host = prefix / "Users/offline-check/zzlogdir.dylib"
+        shim_host.parent.mkdir(parents=True, exist_ok=True)
+        shim_host.write_bytes(b"offline shim fixture")
+        subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
+        shim_launch = json.loads(log.read_text().splitlines()[-1])
+        assert shim_launch["flags"]["DYLD_INSERT_LIBRARIES"] == "/Users/offline-check/zzlogdir.dylib", "installed log-dir shim was not injected"
+        shim_host.unlink()
         # An inherited injection must also be absent for first-time installation.
         env["RIOT_LAUNCHER_HOST"] = str(folder / "Install Riot.app/Contents/MacOS/RiotClientServices")
         subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
