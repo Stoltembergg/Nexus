@@ -1,5 +1,23 @@
 # Troubleshooting
 
+## NixOS launcher fails before Riot opens
+
+A message saying Darling must be setuid root is not fixed by running `sudo`
+inside `buildFHSEnv`: bubblewrap enables `no_new_privs`, so setuid elevation is
+ignored there. Use the package's rootless launcher with subordinate UID/GID
+mapping enabled. Never make a mutable workspace executable host-setuid-root.
+
+If a newly installed client aborts with `Cannot load libavformat.so.62 (ELF)`,
+check the FHS runtime dependencies. The generated Darling wrappers use FFmpeg 8
+SONAMEs, so an unversioned nixpkgs `ffmpeg` dependency can break them when its
+major changes. The package pins `ffmpeg_8`; do not create fake ABI symlinks.
+
+Older packages used `cp -n` and never refreshed already-copied tools. The current
+launcher replaces packaged source files while retaining compiled/runtime data.
+An incomplete prefix can be backed up by renaming it with Darling stopped;
+never delete a populated Riot/game prefix just to repair the launcher.
+
+
 Use the [setup instructions](SETUP.md) from the repository root as your ordinary user. Exit the game and both clients manually before a full installation or Darling restart. Incremental server/memory installers can replace files without interrupting processes, but their changes need a later full restart to activate.
 
 ## Memory installer: permission denied
@@ -56,11 +74,98 @@ The installer fetcher no longer treats a missing archive `Info.plist` or the inf
 
 There is also a separate known compatibility gap: native LaunchAgent watch registration can return HTTP 409 after the League install path is accepted, leaving the download idle. A historical inspector hook handles this and interrupted `pending_verify` states in 28 mock cases, but that hook is disabled in normal launches and excluded from the manual workflow. There is no verified runtime-only replacement for that handoff in this snapshot. Do not assume the native permission and launcher fixes resolve every idle Install case, or enable debugger/API automation to work around it.
 
+## Riot exits and League reports that it lost its connection
+
+Check the launcher stderr or `build/desktop-launch.log` when launched through
+the generated application-menu entry. The following Objective-C exceptions
+were observed immediately before RiotClientServices aborted:
+
+```
+-[NSURLSessionDataTask initWithRequest:completionHandler:]: unrecognized selector
+-[NSURLSession finishTasksAndInvalidate]: unrecognized selector
+```
+
+League then reports localhost connection refusal and loses its external-client
+authorization. Restarting temporarily clears the broken session, but does not
+implement the missing methods. The CFNetwork patch now supplies a minimal
+completion-handler data-task implementation, uses the existing NSURLConnection
+transport on a worker, and tracks outstanding tasks while a session finishes
+or cancels. Session factories create the concrete CFNetwork session so its
+delegate-queue storage is not confused with the public class's synthesized
+properties. The URL convenience method also preserves GET rather than forcing POST.
+
+Rebuild and install the base and paired runtime with both clients and the game
+closed. Run the standalone NSURLSession regression in [testing](TESTING.md#nsurlsession-lifecycle-regression).
+This is partial NSURLSession compatibility: in-flight cancellation reports the
+cancellation once but does not interrupt the synchronous transport already in
+progress. Completion handlers use a global worker queue rather than the
+session's delegate queue. Delegate-only data tasks, suspension, background
+sessions, downloads and uploads are not established by these tests.
+
+### Client remains running without a window
+
+New launches can exit with `Client already running, exiting` when a stale Riot
+session has no visible window. After exiting the game and clients, `darling
+shutdown` followed by `scripts/run.sh` recovers this case without deleting game
+files. For a dedicated Riot installation in the default prefix, Hyprland users
+can opt in to automatic recovery:
+
+```sh
+RCLOL_RECOVER_HIDDEN_CLIENT=1 ./scripts/run.sh
+```
+
+The helper requires an owned Riot process in the default prefix and a successful
+Hyprland window query. It preserves a running game, any visible Riot/League
+window, foreign-owned processes and custom prefixes, and takes no action when
+ownership or window information cannot be read. A hidden background client or
+download is restarted when recovery is enabled. Other desktop environments are
+not supported by this helper; recovery is off by default.
+
+### Downloads repeatedly fail with an IPv6 CONNECT_TO error
+
+The bundled downloader was observed retrying CDN chunks with:
+
+```
+Use of IPv6 in *_CONNECT_TO without IPv6 support built-in
+```
+
+The launcher now defaults `RCLOL_CDN_IPV4_ONLY=1`. The Libinfo resolver suppresses
+AAAA queries only for subdomains of `riotcdn.net`, retaining IPv4 DNS rotation,
+TLS and the normal resolver for all other names. It does not pin CDN addresses
+or disable IPv6 on the Linux host. Opt out with:
+
+```sh
+RCLOL_CDN_IPV4_ONLY=0 ./scripts/run.sh
+```
+
+The resolver change requires a rebuilt/installed base runtime. The environment
+flag alone cannot alter an older Libinfo binary.
+
+## Riot closes after a network lookup is cancelled
+
+Two local crashes were traced to `CFNetwork::_HostCancel` calling `CFRetain(NULL)`.
+`CFHostCancelInfoResolution` scheduled its cancellation callback with an empty
+context, so processing that source triggered `SIGTRAP` in CoreFoundation and
+terminated RiotClientServices. The UI helpers then exited as a consequence.
+
+The CFNetwork patch supplies the host and retains it until the cancellation source
+is invalidated. The standalone `riot-cfhost-cancel-check` reproduces the old trap
+and passes 100 cancellations with the fix, including releasing the caller's host
+reference before callback delivery. This establishes the cancellation fix; a long
+Riot session still needs confirmation. With both clients and the game closed,
+run `./scripts/update.sh` to install it, then `sh scripts/run.sh`.
+
 ## UI crashes after a button opens an external link
 
 LaunchServices dereferenced a nullable error-output pointer in six paths. The patch checks the pointer itself and populates supplied outputs; the standalone regression covers missing handlers and null outputs. Electron opens LaunchServices through an absolute CoreServices subframework path, so the paired installer also replaces that binary in the stopped guest prefix. Updating only `RuntimeFrameworks/LaunchServices.framework` can leave the crash unfixed.
 
 LaunchServices now opens `http`, `https` and `mailto` links on the Linux desktop itself. It loads the host's `libsystemd.so.0` and asks `xdg-desktop-portal` (`org.freedesktop.portal.OpenURI`) on the user session bus to open the link, so your default browser starts outside Darling and survives `darling shutdown`. Without a portal, it starts `xdg-open` in a transient systemd user unit instead. It also reports a handler for these schemes, since Electron checks for one before opening a link. Other schemes, control characters and URLs over 4096 bytes are rejected. If a link still does nothing, check the client's stderr for a `LaunchServices:` line and that `busctl --user status org.freedesktop.portal.Desktop` works on the host. Both LaunchServices and AppKit must be rebuilt. The hand-off passed the host-side D-Bus regression and opened the host browser from a guest through both `open(1)` and `NSWorkspace`; a link clicked in the Riot client is not yet confirmed. The null-pointer fix does not explain every unrelated button crash.
+
+## Riot client shows "Not Found" instead of its UI
+
+On affected setups, including the reported NixOS installation, the client window opens but only shows `Not Found`, and its log has `ENOENT, dist/renderer/index.html not found in …/app.asar` although the archive contains that file. Electron's asynchronous file opening can copy an archive entry to a temporary file first (`copyFileOut`), and a failed copy can be reported as "not found". Chromium checks `MAC_CHROMIUM_TMPDIR` before falling back to `NSTemporaryDirectory()`; an unusable default temporary directory can therefore produce this symptom even while synchronous archive reads work.
+
+The launcher defaults `MAC_CHROMIUM_TMPDIR` to `/private/tmp`, preserving a non-empty override. `scripts/install-runtime.sh` creates that guest directory with mode `1777`. Verify directory creation and temporary-file writes with a standalone guest probe, then launch the client normally and check whether its UI loads. Do not run diagnostic scripts through Riot's executable. This workaround addresses temporary-file failures; an actually missing or damaged archive needs separate investigation.
 
 ## Language dropdown closes Riot, or client resize leaves a clipped UI
 
@@ -142,6 +247,20 @@ A separate multi-window path stopped the active async presenter when another dif
 - **Prebuilt Swift file contains Git LFS pointer text:** install Git LFS and fetch the original upstream assets; pointer text is not a usable library.
 - **Submodule fetch stops with no output right after `src/external/sqlite`:** the next submodule is `src/external/swift`, whose pinned `.lfsconfig` points at the retired `git-lfs.darlinghq.org`. The checkout is blocked on that host, not on sqlite. `prepare.py` redirects that submodule's LFS requests to GitHub. To finish a fetch that was interrupted before any patches were applied, run `git -C build/darling-src -c lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs submodule update --init --recursive --progress`, then re-run `./scripts/build.sh`. Do not run that submodule update once `prepare.py` has applied patches: it resets every submodule working tree to the pinned revision and discards the patches.
 
+## launchd crashes at boot after changing compiler flags
+
+`darling shell` fails with `Error connecting to shellspawn` and `/tmp/lolsig.log` shows `LOLSIGFAIL pid=1 sig=11 code=1 addr=0x0` in `memmove`, called from `snprintf` in libkqueue's `epoll_event_dump`. The binaries were tuned for AMD Zen: clang 23 with `-mtune=znver*` (also selected by `-march=native` or `-mtune=native` on Zen) loads a thread-local variable's descriptor into a register other than `%rdi`, but dyld's `tlv_get_addr` reads `%rdi`, so every `__thread` and `thread_local` access returns NULL. Rebuild with `-mtune=generic` (the default in `scripts/build.sh` and the overlay builders), and check any binary with:
+
+```sh
+python3 tools/check-darwin-tlv-calls.py <binary>...
+```
+
+It prints each thread-local access that calls its thunk without the descriptor in `%rdi` and exits 1. A plain `darling shell` boot does not load the `RuntimeLibraries` overlays; to boot the way the launcher does, run `env DYLD_LIBRARY_PATH=/Users/<user>/RuntimeLibraries DYLD_FRAMEWORK_PATH=/Users/<user>/RuntimeFrameworks darling shell /usr/bin/true`.
+
+## Base install refuses to continue while Darling is not running
+
+`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. `python3 build/runtime/tools/ensure-darling-runtime.py` stops such a launchd (your own, only when no darlingserver runs); `scripts/run.sh` and `scripts/install-runtime.sh` run it too.
+
 ## Lower fight FPS than Windows
 
 The game code itself runs natively under Darling: the x86-64 slice of the universal binary executes unchanged, picks its instruction-set paths with `cpuid` on the real CPU, and sizes its worker pool from the real logical CPU count. What differs from Windows is the path around it. Every Metal call goes through Objective-C, the Metal wrapper, Indium and Vulkan instead of a native Direct3D driver, and kernel services go through the emulation and darlingserver. In an ARAM fight the game's own code now takes most of a frame; see [status](STATUS.md#game-fps-2026-10-1314) for measurements.
@@ -155,6 +274,11 @@ If FPS drops back towards the 10-13 morning numbers (75–85 on Hexgate):
 Compare matches on the same map: Bilgewater runs a few percent below Hexgate.
 
 On Hyprland, also check that direct scanout is off (`hyprctl getoption render:direct_scanout` prints `int: 0`). The first match with it off ran about 16 FPS faster than the previous one on the same build; see the next section.
+
+On the NVIDIA proprietary driver, check the submit worker's kernel time: a thread of the game process spending most of its time in the kernel (`/proc/<pid>/task/<tid>/stat` system time, or `perf trace -s -p <pid>`) points at driver calls. Each `vkQueueSubmit2` and each CPU-side `vkSignalSemaphore` is an RM control ioctl (command `0xc020462a`) that queues on a driver-wide lock. Before 2026-10-18 every command buffer signalled the event loop's wake-up semaphore, ~25 times per frame; with lazy wake-ups (default) and a 5 ms batch window (`/tmp/metal-submit-batch-us` = `5000`, `/tmp/metal-submit-batch-max` = `64`) an RTX 4090 ran at 206–552 FPS against 91–147 FPS with `/tmp/metal-no-lazy-wakeup`, in alternating 20 s phases of one match (the later phases with wake-ups on were capped at 240 FPS) (see [setup](SETUP.md#metal-and-indium-overlays)).
+
+The NVIDIA performance figures above were reported on an earlier runtime base;
+they have not been remeasured after integration with current `main`.
 
 ## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
 
@@ -198,15 +322,125 @@ Resources only the GPU uses (`private`, `memoryless`, and drawables, including L
 The first import of a drawable into the presenting OpenGL context, and the first semaphore import, are logged too; later ones only when they fail (at most five):
 
 ```
-[MetalDevice] pid=… drawable GL import (first) dedicated=yes size=… 1920x1080 memoryType=1 tiling=linear glTiling=linear dedicated_error=0x0 import_error=0x0 setup_error=0x0 storage_error=0x0 query_error=0x0 ok
+[MetalDevice] pid=… drawable GL import (first) dedicated=yes size=… 1920x1080 memoryType=1 vkTiling=linear glTiling=linear dedicated_error=0x0 import_error=0x0 setup_error=0x0 storage_error=0x0 query_error=0x0 ok
 [MetalDevice] pid=… drawable GL semaphore (first) import_error=0x0 wait_error=0x0 ok (checked for the first 600 imports)
 ```
 
-A non-zero error or `FAILED` means the frames cannot reach the window. Before 2026-10-16 the import did not mark the memory as dedicated, which the extension requires; Mesa ignores it, and it is the suspected cause of the NVIDIA black screen (not yet confirmed). If the game shows a black screen on NVIDIA, report it with this file.
+A non-zero error or `FAILED` means the frames cannot reach the window. Before 2026-10-16 the import did not mark the memory as dedicated, which the extension requires; Mesa ignores it, and it is the suspected cause of the NVIDIA black screen (not yet confirmed). An NVIDIA log of 2026-10-16 showed `glTiling=optimal` with `setup_error=0x501 storage_error=0x501 FAILED`: NVIDIA's GL rejects `GL_LINEAR_TILING_EXT`, so the linear Vulkan image could not be imported. Since then the internal image and the GL texture use optimal tiling when `GL_VENDOR` contains NVIDIA (`vkTiling=optimal glTiling=optimal ok` is the expected line); everything else keeps linear. If the game shows a black screen on NVIDIA, report it with this file.
+
+An additional NVIDIA report on `68f816d` showed successful optimal-tiling import but repeated `Metal Device timed out giving us a Drawable to present` messages. Its [presentation trace](https://github.com/lucannez64/darling-lol/issues/3#issuecomment-6214732591) shows all three drawables queued and all three main-thread presentation callbacks running, followed by timeouts with three frames still queued. The compositor only prepared a Metal layer when it was the root layer, skipping nested Metal layers. It now prepares Metal layers throughout the tree. A standalone nested-layer reproduction exhausts the pool before this correction and passes ten presentations with pixel readback after it; the root-layer probe also passes. Confirmation on the reporter's NVIDIA system is still needed.
+
+### NVIDIA resize signals, CPU readback and completion latency
+
+The EGL-compatible window visual, compositor back buffer and collision-safe RPC
+socket allocation fixes are already part of the runtime. The remaining NVIDIA
+work covers these independent paths:
+
+- A terminal resize can deliver `SIGWINCH` to a native driver thread without a
+  Darling RPC socket. The runtime forwards that resize notification to the guest
+  main thread; it keeps the existing handling for other signals and faults.
+- With `RCLOL_GPU_DIRECT_PRESENT=0`, Chromium frames arrive through CPU readback.
+  The local compositor skips non-Metal trees to avoid covering the live client
+  with stale cached textures. Mixed trees still prepare and present Metal layers.
+- NVIDIA timeline waits can wake late after GPU completion. Each device now polls
+  briefly while completions are pending before blocking: 2000 microseconds by
+  default on NVIDIA and zero on other vendors. An idle device blocks immediately.
+  The guest file `/tmp/metal-wait-spin-us` overrides the budget when the device is
+  created; `0` disables polling. Values are capped at 10000 microseconds and
+  malformed values use the vendor default. Restart Darling to change the budget.
+
+The contributor reported custom matches on a single-GPU RTX 3060, driver 615.71,
+with sway/Xwayland using CPU readback. The initial polling change improved their
+reported rate from about 20 to 27 FPS. Those observations predate the narrowed
+integration; they do not establish hybrid-GPU or general NVIDIA support.
+
+### NVIDIA 580 (Pascal and older): black game window
+
+Driver 580 is the last branch for Pascal (GTX 10-series) and older GPUs. With
+`__GL_THREADED_OPTIMIZATIONS=1`, this driver with egl-x11 1.0.6 rejects the X11
+`EGLDisplay` with `EGL_BAD_DISPLAY` on every thread that has a context current.
+The display stays valid on other threads, and `eglReleaseThread()` makes it work
+again on the failing one. A small native EGL program outside Darling shows the
+same: `eglQueryString(display, EGL_VENDOR)` after `eglMakeCurrent` returns
+`NVIDIA` without the variable and fails with `EGL_BAD_DISPLAY` with it.
+
+In the Riot client the main thread loses EGL right after its first window frame;
+`CGLCreateContext` then fails with CGL error 10004 and, if another display is
+opened, glvnd hands it to Mesa's software renderer, which cannot present the
+game's NVIDIA Vulkan frames. The launcher therefore leaves threaded optimizations
+off (`__GL_THREADED_OPTIMIZATIONS=0`). Setting the variable to `1` before launch
+restores the old behaviour.
+
+Tested on a GTX 1060 6GB with driver 580.178.04 on NixOS, Hyprland and Xwayland:
+the client and the tutorial match render on the NVIDIA GPU. Newer drivers were not
+retested with the option off.
+
+### Metal device name and memory budget
+
+`MTLDevice` reports the host GPU: its Vulkan name in macOS style (for example
+`AMD Radeon RX 6800 XT (RADV NAVI21)` becomes `AMD Radeon RX 6800 XT`) and a working set
+(`recommendedMaxWorkingSetSize`) from the GPU's Vulkan memory heaps. Apps size their GPU
+allocations from the working set, so only override it to match the card's real memory.
+Both can be overridden per launch:
+
+```sh
+DARLING_METAL_GPU_NAME='AMD Radeon Pro 5500M' DARLING_METAL_VRAM_MB=4096 ./scripts/run.sh
+```
+
+The Riot launcher sets `DARLING_METAL_MAC_GPU_NAME=1`: the name becomes the GPU that
+the MacBookPro16,1 IOKit reports shipped with, from the host's vendor: `AMD Radeon Pro 5500M`
+on AMD and `Intel UHD Graphics 630` on Intel. NVIDIA GPUs keep their own name, so the game
+never takes AMD or Intel driver paths on an NVIDIA card. The working set is still the host's.
+`DARLING_METAL_MAC_GPU_NAME=0 ./scripts/run.sh` reports the host name instead; other Darling
+apps report it unless they set the variable. `DARLING_METAL_GPU_NAME` wins over both.
+
+`registryID` is a fixed non-zero value, as on a real Mac.
 
 ### Host-side checks
 
 These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
+
+## Mouse latency despite good FPS
+
+[Issue #10](https://github.com/lucannez64/darling-lol/issues/10) reports mouse latency with FPS comparable to Windows. FPS alone does not measure input-to-display latency, and the report does not yet identify which stage adds the delay.
+
+The X11 backend previously called `XSync` after every cursor-shape update, waiting for an X server reply on the input thread. It now uses `XFlush` to send the change immediately without waiting. This removes an avoidable round trip during cursor updates. A local manual retest on 2026-10-16 found that the mouse problem no longer occurred with VSync enabled. Input-to-display latency has not been measured, and confirmation from the original reporter is still pending. Rebuild and install with `./scripts/update.sh` after exiting the game and both clients.
+
+A later input trace showed League setting the cursor about 190 times and unhiding it about 100 times per second, each time sending the same cursor to the X server. The backend now skips the update when the window already has that cursor. The effect on latency has not been measured.
+
+The backend's relative mouse mode (`CGAssociateMouseAndMouseCursorPosition(false)`) previously warped the pointer to the window center, treated the game's own cursor warps as motion and reported `deltaY` upside down. It now follows macOS: the cursor stays where it is, events carry the physical motion as deltas (positive `deltaY` downwards, also for ordinary motion), the game's warps move the cursor without a delta, and `+[NSEvent mouseLocation]` returns that cursor. On Xwayland a warp takes effect only while the cursor is hidden, so with a visible cursor the pointer is not held in place. `python3 tools/riot-input-offline-check.py` checks the shipped patch on the host without fetching Darling. Add `--xvfb /path/to/Xvfb` to exercise real Xorg protocol on an isolated virtual display; it never uses your desktop display. For Xorg/XLibre (issue #17), relative capture now starts from a fresh `XQueryPointer` snapshot and ignores older queued motion. Warp echoes match both their X request serial and position, so a real motion crossing the anchor cannot be mistaken for an echo. Application warp targets are clipped to the grabbed window in root coordinates, including on a secondary monitor; events, `mouseLocation`, and rewarps share that target. Queued motion before a pending warp does not generate another rewarp. A failed pointer query leaves relative capture suspended, and focus loss releases the grab until the window receives keyboard focus again. Host regression tests cover these paths, but League on the tested Hyprland setup never enters this mode; in-game confirmation on XLibre is still required.
+
+For a manual comparison, keep the scene, FPS cap, display refresh and compositor settings the same. Record whether the delay affects the cursor itself, camera movement, or actions after clicking, and compare the in-game VSync setting on and off. Include the desktop/compositor, X11 or Xwayland session, GPU/driver, monitor refresh and fullscreen/windowed mode in the report. Do not automate game input. The fullscreen cursor-shape problem below is a separate known symptom.
+
+## Click offset grows towards the bottom of the screen
+
+A growing vertical offset has been reported on KDE Plasma/Wayland with Xwayland.
+The cause is unconfirmed, including whether it is related to commit `426fb75`.
+The borderless fullscreen request has been restored separately; retest alignment
+once the game covers the panel.
+
+If it persists, enable the passive input trace before the next manual game launch:
+
+```sh
+darling shell touch /tmp/rclol-input-trace
+```
+
+The flag is checked once per process, so enable it before launching the game.
+During a short manual test, compare clicks near the top, middle and bottom, and
+note the direction and approximate size of the error. Include the in-game
+resolution and window mode, Plasma's scale setting for each monitor, and the
+host output of `xrandr --listmonitors`. Collect the guest log with:
+
+```sh
+darling shell cat /tmp/rclol-input-trace.log > rclol-input-trace.log
+darling shell rm -f /tmp/rclol-input-trace
+```
+
+Removing the flag disables tracing for subsequently started processes. The log
+records motion, warps, pointer-position queries and relative-mode transitions;
+it can establish whether the relative path is active, but cannot by itself
+establish where the game rendered a clicked target. If practical, compare the
+same resolution in a smaller window and in borderless fullscreen.
 
 ## Cursor stops changing shape in fullscreen
 
@@ -219,3 +453,20 @@ render {
 ```
 
 `hyprctl keyword render:direct_scanout 0` applies it until Hyprland restarts.
+
+### Black layer over a running Metal game
+
+The X11 Chromium presenter searches shared Core Animation frame slots by surface size. Native League game windows now bypass that presenter, so a same-size client frame cannot create a presentation child over the game's Metal drawable. This also disables the remote-frame polling timer for the game while preserving Chromium client presentation.
+
+`tools/riot-remote-frame-ownership-check.m` exercises the cached-frame path without creating a display or window. `tools/build-riot-x11-runtime.py` builds this probe. For an unidentified overlay, `python3 tools/trace-riot-windows.py --output build/riot-window-trace.jsonl` passively records Riot/League windows, including unmanaged windows and child stacking, for one hour. It requires the host `python-xlib` package and does not send input.
+
+If a black fullscreen game has only its normal Metal child and becomes visible after removing and restoring fullscreen, inspect the initial fullscreen transition. Automatic fullscreen now requires the window to cover an active monitor, so temporary 1x1 startup windows and ordinary windowed sizes are not promoted. Explicit Cocoa fullscreen requests are preserved. `riot-fullscreen-geometry-check` (built by the X11 builder) checks the policy against active XRandR monitor geometry using only read requests; the next game launch is still required to validate the startup sequence.
+
+### Visible cursor while relative on Xwayland (PR #18)
+
+When Xwayland does not honour warps, the virtual cursor follows real pointer motion and application warps leave it in place. Expected warp echoes are still discarded using their request serial and coordinates. This keeps clicks and camera edge panning aligned with the visible cursor on GNOME/gamescope. The contributor confirmed this path in a gamescope practice-tool session; plain GNOME and NVIDIA still require manual verification.
+
+Recovery requires every matching client to be at least 60 seconds old and a
+complete Hyprland window record (`class`, `title`, `mapped`, `hidden`). A second
+process scan after window inspection must find the same client identities and
+no game. Missing information or shutdown failure leaves normal launch in charge.

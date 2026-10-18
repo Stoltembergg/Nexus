@@ -1,5 +1,36 @@
 # Setup and portability
 
+<a id="nixos-package"></a>
+
+## Nix package
+
+See [prerequisites](NIX.md#prerequisites) before starting, and the
+[Nix setup guide](NIX.md) for local checkout usage, updates, scripts, and runtime
+details.
+
+Run the experimental rootless package on x86_64 Linux:
+
+```sh
+nix --extra-experimental-features 'nix-command flakes' run github:lucannez64/darling-lol
+```
+
+To install permanently, adding the launcher to your user profile:
+
+```sh
+nix profile add github:lucannez64/darling-lol#default
+# Older Nix/Lix versions without `profile add`:
+# nix profile install github:lucannez64/darling-lol#default
+```
+
+Then run `darling-lol` or use the desktop application menu. See
+[permanent installation](NIX.md#install-permanently) for details.
+
+First launch builds Darling and guides you through Riot client installation.
+NixOS is not required; other Linux distributions with Nix installed are also
+supported.
+
+## Native setup notes
+
 The patch manifest pins Darling to `60ba801decee7a00782f74f6be4c8ffb013f79ff` and records every changed submodule's revision. `scripts/prepare.py` checks each revision before applying patches and never resets an existing checkout to make a patch apply. Re-running it accepts an already-applied patch.
 
 Git LFS must be available before fetching the upstream submodules. The pinned `darling-swift` submodule's `.lfsconfig` points at the retired `git-lfs.darlinghq.org`, which no longer accepts connections; `prepare.py` redirects that submodule's LFS requests to GitHub, which still serves the objects. Without that override a fresh `git submodule update` blocks with no output right after `src/external/sqlite` is checked out. The local development checkout had removed prebuilt Swift files from its working directory; that deletion is deliberately not exported. A fresh upstream checkout keeps its original Swift assets and licensing. Do not install Git LFS pointer text as a library.
@@ -18,6 +49,8 @@ The build uses Unix Makefiles because the incremental runtime helpers read CMake
 
 The supported build is x86-64 only (`TARGET_i386=OFF`). The patched OpenDirectory uses Objective-C ivars that the 32-bit fragile ABI cannot compile. Keep the empty `CMAKE_BUILD_TYPE` used by `scripts/build.sh`: selecting `Release` introduces `NDEBUG` while objc4 defines `OBJC_IS_DEBUG_BUILD=1`, causing a debug-macro mismatch. The base patch requests the macOS 10.15 Objective-C runtime code generation to avoid undefined `__NSArray0__struct` / `__NSDictionary0__struct` symbols with newer Clang. Indium handles both the LLVM 22 and LLVM 23 branch opcode names.
 
+`scripts/build.sh` compiles the whole tree with `-O3 -march=native -mtune=generic`, so the binaries only run on CPUs with the build machine's instruction set. Keep `-mtune=generic`: clang 23 tuning for AMD Zen (`-mtune=native` or `-mtune=znver*`) miscompiles Darwin thread-local variables, which crashes launchd at boot (see [troubleshooting](TROUBLESHOOTING.md#launchd-crashes-at-boot-after-changing-compiler-flags)). Two kernel files keep `-O0` because they depend on the unoptimized stack layout: `bsdthread_register.c` and `sigexc.c`.
+
 Linux 5.14 or newer is required for `MADV_POPULATE_WRITE`, used when Darwin's allocator reuses lazily reclaimable pages. The memory installer checks this requirement; do not bypass it.
 
 The runtime installer requires native `pkg-config` entries for `x11`, `x11-xcb`, `xcb-shm` and `xext`, plus the base Darling SDK.
@@ -25,6 +58,31 @@ The runtime installer requires native `pkg-config` entries for `x11`, `x11-xcb`,
 Run configuration, builds and the per-user runtime installation as your ordinary account. Use sudo only for the base CMake installation and the incremental server installer. Running the whole build or per-user install under sudo can create root-owned files and configure the wrong guest home. `scripts/install-runtime.sh` initializes the default user prefix and creates `~/.darling/private/tmp` with mode `1777`, so the installer can write guest temporary files. It then shuts down Darling before replacing the paired runtime: first exit the game and both clients manually.
 
 The normal launcher starts neither an Electron inspector nor client API/UI helpers. It clears inherited `DYLD_INSERT_LIBRARIES`, retains Darling runtime library/framework overrides, supplies an absolute log directory to the launcher, and selects the League product. The log-directory/Chromium argument shim, empty-autofill hook and optional native VPX bridge are no longer injected or built by runtime installation. Existing copies on disk are inactive and may remain. Child-process log-directory rewriting and Chromium feature overrides previously supplied by the shim are removed; client startup without those workarounds needs manual validation. The first-time installer uses `--skip-to-install` and omits the installed client's `--app-root`, avoiding an immediate exit or inaccessible intro screen. The project ships no inspector hooks, client API helpers, input automation or client binary patches. Keep account data, logs and captures private.
+
+## Application-menu diagnostics and recovery options
+
+`scripts/create-desktop-entry.sh` creates an application-menu entry that runs
+`scripts/desktop-run.sh`, preserving the normal launcher behavior and saving
+stdout/stderr in `build/desktop-launch.log` with mode 0600. Logs can contain
+private session details; do not attach raw launcher logs to a public issue.
+Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
+
+`RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
+to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`
+opts in to Hyprland-only recovery of a default-prefix Riot session with no
+visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
+for the observed failures, recovery guards and NSURLSession limitations.
+
+`RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
+the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
+GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),
+Flatpak/Snap/AppImage and exported shell functions, and `SHELL` becomes `/bin/zsh`.
+It is off by default. Variables that Darling or the host graphics and audio libraries read
+are always kept: `DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and the XDG base directories,
+D-Bus, PulseAudio/PipeWire/ALSA, `DRI_PRIME`, `MESA_*`, `__GL_*`, `__NV_*`, `VK_*`,
+`LD_PRELOAD` and `LD_LIBRARY_PATH`. List names to keep anyway in `RCLOL_KEEP_HOST_ENV`,
+for example `RCLOL_KEEP_HOST_ENV=WAYLAND_DISPLAY`. The launcher always closes inherited
+file descriptors above stderr before the guest starts.
 
 ## Updating an existing runtime
 
@@ -69,7 +127,7 @@ sh build/runtime/tools/build-riot-libs-runtime.sh
 python3 build/runtime/tools/install-riot-libs-runtime.py
 ```
 
-The builders recompile libsystem_c (618 of its 641 objects), libc++ and libc++abi (38 and 18) and the libsystem_platform string primitives at `-O2`, each object with its own configured defines, includes and per-file options, and relink with the configured link line. `-fno-strict-aliasing` is added for this old BSD C and no `-DNDEBUG`, `-ffast-math` or LTO is. Files whose correctness depends on frame layout, on running in a forked child, or on the floating-point environment keep their configured flags: the fork paths and the stack guard handler in libc and the frame-pointer backtrace walker. libsystem_m is not rebuilt: its sources are built at `-O0` upstream, and an `-O2` rebuild made the Riot client UI render a black window. The libkqueue objects libsystem_c also links belong to the kernel library's target and are left alone. Each builder stops while a League game process is running, because compiling would skew the FPS the user measures.
+The builders recompile libsystem_c (618 of its 641 objects), libc++ and libc++abi (38 and 18) and the libsystem_platform string primitives at `-O3 -march=native -mtune=generic`, each object with its own configured defines, includes and per-file options, and relink with the configured link line. `-fno-strict-aliasing` is added for this old BSD C and no `-DNDEBUG`, `-ffast-math` or LTO is. Files whose correctness depends on frame layout, on running in a forked child, or on the floating-point environment keep their configured flags: the fork paths and the stack guard handler in libc and the frame-pointer backtrace walker. libsystem_m is not rebuilt: its sources are built at `-O0` upstream, and an `-O2` rebuild made the Riot client UI render a black window. The libkqueue objects libsystem_c also links belong to the kernel library's target and are left alone. Each builder stops while a League game process is running, because compiling would skew the FPS the user measures. `scripts/install-runtime.sh` builds and installs these overlays, then runs `tools/check-darwin-tlv-calls.py` on everything in `RuntimeLibraries` and `RuntimeFrameworks` and fails if any binary has the thread-local miscompile.
 
 The installer writes the four files into `~/.darling/Users/<user>/RuntimeLibraries`, the directory the launcher puts in `DYLD_LIBRARY_PATH`; dyld searches those directories by leaf name before the install path, which is why an overlay there replaces the prefix and SDK copies of `libsystem_c.dylib`, `libc++.1.dylib`, `libc++abi.dylib` and `libsystem_platform.dylib` without touching either. Every replaced file is backed up first (`build/libs-runtime-backups`), the staged file is verified against the built artifact, and the rename is atomic. The installer never stops a process, so a running guest keeps the library it already loaded; exit the game and both clients and restart the namespace for activation. One command restores the previous state:
 
@@ -91,7 +149,7 @@ sh build/runtime/tools/install-riot-metal-pair.sh
 
 The installer copies `build/riot-Metal` and `build/riot-libindium.dylib` into the guest `RuntimeFrameworks/Metal.framework` and `RuntimeLibraries`. It backs up the pair it replaces in `build/metal-pair-backups`; a repeated install keeps the older backup. `sh build/runtime/tools/install-riot-metal-pair.sh --rollback` restores that backup. `tools/install-riot-gpu-runtime.sh` still builds and installs the whole GPU set, including these two. Activation needs the namespace restart below.
 
-Indium also contains experimental hand-off changes. They are **off by default**: without the files below, libindium behaves like the build measured before them, and two matches with them on had lower FPS. Each one is a guest file, read once per game process when the game starts.
+The hand-off experiments (`metal-present-dispatch-wait`, `metal-deferred-blit` and `metal-worker-lease`) are **off by default**; two matches with them enabled had lower FPS. The table also lists diagnostics and tuning controls with their own defaults. Lazy event-loop wake-ups are **on by default** and `metal-no-lazy-wakeup` disables them. Files are read once per game process at startup unless an entry specifies a different refresh interval.
 
 | Guest file | Effect when present |
 |---|---|
@@ -102,6 +160,9 @@ Indium also contains experimental hand-off changes. They are **off by default**:
 | `/tmp/metal-gpu` | diagnostic: selects the Vulkan device used for Metal by index or case-insensitive name substring instead of the loader's first device. The OpenGL context that presents does not follow it; see [hybrid laptops](TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia). `METAL_INDIUM_GPU` is the environment equivalent; the file wins |
 | `/tmp/metal-all-devices` | a `VkDevice` is created for every supported Vulkan device, as before 2026-10-16. Without it only the selected device gets one; on a machine with lavapipe installed this also drops lavapipe's idle rasterizer threads |
 | `/tmp/metal-no-drawable-vram` | drawables of a layer with `framebufferOnly` off (League sets it off) go back to host-visible system RAM, as before 2026-10-16. Without the file they are allocated in GPU memory like `framebufferOnly` drawables; nothing maps drawable memory from the CPU. On the RX 6600 this gave about 20 FPS more in a practice-tool fight and the same FPS when idle, not yet measured in an ARAM. `/tmp/metal-device.log` shows `drawable-vram=on` and `storage=vram` |
+| `/tmp/metal-no-lazy-wakeup` | every completion registration signals the event loop's wake-up semaphore from the CPU again, as before 2026-10-18. The handshake is per device. Without the file a registration signals only while the poller has announced a blocking wait (a spinning poller re-reads the registrations on its next pass, and its spin ends when one arrives). On the NVIDIA proprietary driver each `vkSignalSemaphore` is an RM control ioctl that waits on a driver-wide lock, about 0.3 ms each and ~25 per League frame, and it was the largest kernel cost of the submit worker. Re-read every 256 registrations; the wait log counts `wakeupSignalled` and `wakeupSkipped` |
+| `/tmp/metal-submit-batch-us` | the submit batch window in microseconds (500–100000, default 500); re-read every 256 checks, so it can be changed during a match. A presenting commit and every CPU wait still flush the batch at once. On the NVIDIA proprietary driver every `vkQueueSubmit2` is an RM control ioctl that waits on a driver-wide lock (about 0.4 ms each in a League match); with the default window a frame took about 8.5 submits, with `5000` about 2.5 (RTX 4090: 89 → 113 FPS, same match) |
+| `/tmp/metal-submit-batch-max` | command buffers per batch (1–256, default 16), re-read like the window; `64` lets one batch hold a whole frame |
 | `/tmp/metal-debug-waits` | diagnostic: counts how often and how long threads block at the hand-off waits and in `nextDrawable`, every 5 s in `/tmp/metal-trace.log`; the first check writes a `waits enabled` line |
 
 Create these files from inside the guest, for example `darling shell touch /tmp/metal-debug-waits`, or while Darling is shut down. The guest `/tmp` is `~/.darling/private/tmp` seen through Darling's overlay mount. A file created on the host in that directory while Darling runs may stay invisible to guest processes that already looked for it. The same applies to removing a file. The older `/tmp/metal-no-present-dispatch-wait`, `/tmp/metal-no-deferred-blit` and `/tmp/metal-no-skip-cpu-devices` files are ignored.
