@@ -15,9 +15,7 @@
 #   clang -target x86_64-apple-macosx11.0 -fuse-ld=lld -dynamiclib -nostdlib \
 #     -nodefaultlibs -undefined dynamic_lookup -O2 -o /tmp/zzlogdir.dylib \
 #     tools/m58f101-logdir-shim.c -Wl,-install_name,/tmp/zzlogdir.dylib
-#   prefix=${DPREFIX:-"$HOME/.darling"}
-#   guest_home='@GUEST_HOME@'
-#   install -D -m 644 /tmp/zzlogdir.dylib "$prefix$guest_home/zzlogdir.dylib"
+#   cp /tmp/zzlogdir.dylib "$HOME/.darling@GUEST_HOME@/zzlogdir.dylib"
 #   # -> guest path @GUEST_HOME@/zzlogdir.dylib (outside the app bundle, so the
 #   #    launcher's install-integrity check is unaffected)
 #
@@ -31,7 +29,6 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
  ulimit -c 0
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-prefix=${DPREFIX:-$HOME/.darling}
 python3 "$runner_dir/ensure-darling-runtime.py"
 python3 "$runner_dir/ensure-darling-service-accounts.py"
 python3 "$runner_dir/ensure-league-runtime-layout.py"
@@ -64,14 +61,11 @@ done
 # Use Chromium's normal decoder, frame and background scheduling policies.
 # Launching the client does not start inspector helpers or inject UI hooks.
 SHIM_GUEST="@GUEST_HOME@/zzlogdir.dylib"
-RIOT_INSERT_LIBRARIES=
-if [ -f "$prefix@GUEST_HOME@/zzlogdir.dylib" ]; then
- RIOT_INSERT_LIBRARIES=$SHIM_GUEST
-fi
+RIOT_INSERT_LIBRARIES="$SHIM_GUEST:@GUEST_HOME@/libRiotEmptyAutofill.dylib"
 # Use the verified bridge when the paired host/guest artifacts are installed.
 # Its UUID and interface guards retain Chromium's decoder on other builds.
 native_vpx_default=0
-if [ -f "$prefix@GUEST_HOME@/libRiotNativeVpx.dylib" ] && [ -f "$runner_dir/../build/libriot-native-vpx.so" ]; then
+if [ -f "$HOME/.darling@GUEST_HOME@/libRiotNativeVpx.dylib" ] && [ -f "$runner_dir/../build/libriot-native-vpx.so" ]; then
  native_vpx_default=1
 fi
 if [ "${RCLOL_NATIVE_VPX:-$native_vpx_default}" = 1 ]; then
@@ -80,16 +74,12 @@ fi
 if [ -n "${RIOT_LAUNCHER_HOST:-}" ]; then
  A=$RIOT_LAUNCHER_HOST
 else
- A="$prefix/Applications/Riot Client.app/Contents/MacOS/RiotClientServices"
+ A="$HOME/.darling/Applications/Riot Client.app/Contents/MacOS/RiotClientServices"
  # Riot's installer places the client in /Users/Shared. The conventional
  # /Applications symlink may be an absolute macOS path, which Linux cannot
  # resolve when Darling's launcher checks the host-side executable path.
- if [ ! -f "$A" ] && [ -f "$prefix/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices" ]; then
-  A="$prefix/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices"
- fi
- app_root="$prefix/Applications/Riot Client.app"
- if [ ! -e "$app_root" ] && [ ! -L "$app_root" ] && [ -d "$prefix/Users/Shared/Riot Games/Riot Client.app" ]; then
-  ln -s "../Users/Shared/Riot Games/Riot Client.app" "$app_root"
+ if [ ! -f "$A" ] && [ -f "$HOME/.darling/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices" ]; then
+  A="$HOME/.darling/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices"
  fi
 fi
 # External XIM (for example Fcitx) consumes keys before Darling forwards them.
