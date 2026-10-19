@@ -1,5 +1,5 @@
 diff --git a/AppKit/CMakeLists.txt b/AppKit/CMakeLists.txt
-index 393a1eb3..6a47ac89 100644
+index 393a1eb3..347d070d 100644
 --- a/AppKit/CMakeLists.txt
 +++ b/AppKit/CMakeLists.txt
 @@ -1,5 +1,8 @@
@@ -11,7 +11,15 @@ index 393a1eb3..6a47ac89 100644
  include(darling_framework)
  
  remove_sdk_framework(AppKit)
-@@ -619,6 +622,7 @@ add_backend(X11
+@@ -551,6 +554,7 @@ add_framework(AppKit
+ 		CoreGraphics
+ 		ImageIO
+ 		# native libraries
++		X11
+ 		FreeType
+ 		fontconfig
+ 		jpeg png tiff
+@@ -619,6 +623,7 @@ add_backend(X11
                  X11
  		XRandR
  		Xcursor
@@ -126,7 +134,7 @@ index d543e329..e320a3af 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSApplication.m b/AppKit/NSApplication.m
-index 8e7508e2..6fc86b32 100644
+index 8e7508e2..2a011d7d 100644
 --- a/AppKit/NSApplication.m
 +++ b/AppKit/NSApplication.m
 @@ -17,6 +17,9 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -139,7 +147,15 @@ index 8e7508e2..6fc86b32 100644
  #import <AppKit/NSAlert.h>
  #import <AppKit/NSApplication.h>
  #import <AppKit/NSColorPanel.h>
-@@ -271,6 +274,11 @@ NSApplication *NSApp = nil;
+@@ -37,6 +40,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSSheetContext.h>
+ #import <AppKit/NSSpellChecker.h>
+ #import <AppKit/NSSystemInfoPanel.h>
++#import <AppKit/NSStatusBar.h>
+ #import <AppKit/NSWindow-Private.h>
+ #import <AppKit/NSWorkspace.h>
+ #import <CoreGraphics/CGWindow.h>
+@@ -271,6 +275,11 @@ NSApplication *NSApp = nil;
      return _isRunning;
  }
  
@@ -151,7 +167,7 @@ index 8e7508e2..6fc86b32 100644
  - (NSWindow *) makeWindowsPerform: (SEL) selector inOrder: (BOOL) inOrder {
      NSUnimplementedMethod();
      return nil;
-@@ -382,7 +390,18 @@ NSApplication *NSApp = nil;
+@@ -382,7 +391,18 @@ NSApplication *NSApp = nil;
  - (void) setDelegate: delegate {
      if (delegate != _delegate) {
          [self unregisterDelegate];
@@ -171,7 +187,7 @@ index 8e7508e2..6fc86b32 100644
          [self registerDelegate];
      }
  }
-@@ -550,6 +569,13 @@ NSApplication *NSApp = nil;
+@@ -550,6 +570,13 @@ NSApplication *NSApp = nil;
  }
  
  - (void) finishLaunching {
@@ -185,7 +201,7 @@ index 8e7508e2..6fc86b32 100644
      NSAutoreleasePool *pool = [NSAutoreleasePool new];
      BOOL needsUntitled = YES;
  
-@@ -558,7 +584,6 @@ NSApplication *NSApp = nil;
+@@ -558,7 +585,6 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
      NS_ENDHANDLER
@@ -193,7 +209,7 @@ index 8e7508e2..6fc86b32 100644
      // Load the application icon if we have one
      NSString *iconName = [[[NSBundle mainBundle] infoDictionary]
              objectForKey: @"CFBundleIconFile"];
-@@ -614,7 +639,6 @@ NSApplication *NSApp = nil;
+@@ -614,7 +640,6 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
      NS_ENDHANDLER
@@ -201,11 +217,39 @@ index 8e7508e2..6fc86b32 100644
              [pool release];
  }
  
-@@ -652,7 +676,15 @@ NSApplication *NSApp = nil;
+@@ -643,16 +668,42 @@ NSApplication *NSApp = nil;
+ 
+ - (void) _checkForTerminate {
+     int count = [_windows count];
++    BOOL hasVisible = NO;
+ 
+     while (--count >= 0) {
+         NSWindow *check = [_windows objectAtIndex: count];
+ 
+         if (![check isKindOfClass: [NSPanel class]] && [check isVisible]) {
+-            return;
++            hasVisible = YES;
++            break;
          }
      }
  
 -    [self terminate: self];
++    static BOOL s_hasEverHadVisibleWindow = NO;
++    if (hasVisible) {
++        s_hasEverHadVisibleWindow = YES;
++        return;
++    }
++
++    if (s_hasEverHadVisibleWindow) {
++        NSString *procName = [[NSProcessInfo processInfo] processName];
++        if ([procName isEqualToString: @"RiotClientUx"]) {
++            NSArray *statusItems = [[NSStatusBar systemStatusBar] statusItems];
++            if (!statusItems || [statusItems count] == 0) {
++                [self terminate: self];
++                return;
++            }
++        }
++    }
 +    // darling-lol: match AppKit and only terminate when the delegate opts
 +    // in via applicationShouldTerminateAfterLastWindowClosed:. The previous
 +    // unconditional terminate killed faceless/splash-screen apps (notably
@@ -218,7 +262,7 @@ index 8e7508e2..6fc86b32 100644
  }
  
  - (void) _checkForAppActivation {
-@@ -666,17 +698,13 @@ NSApplication *NSApp = nil;
+@@ -666,17 +717,13 @@ NSApplication *NSApp = nil;
  }
  
  - (void) run {
@@ -239,7 +283,7 @@ index 8e7508e2..6fc86b32 100644
  
      do {
          pool = [NSAutoreleasePool new];
-@@ -716,6 +744,12 @@ NSApplication *NSApp = nil;
+@@ -716,6 +763,12 @@ NSApplication *NSApp = nil;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -252,7 +296,7 @@ index 8e7508e2..6fc86b32 100644
      if ([event type] == NSKeyDown) {
          unsigned modifierFlags = [event modifierFlags];
  
-@@ -742,6 +776,61 @@ NSApplication *NSApp = nil;
+@@ -742,6 +795,61 @@ NSApplication *NSApp = nil;
      do {
          NSAutoreleasePool *pool = [NSAutoreleasePool new];
  
@@ -1377,7 +1421,7 @@ index c3f5d056..dbd93174 100644
          @"NSTouchBarItemIdentifierCharacterPicker";
  
 diff --git a/AppKit/NSView.m b/AppKit/NSView.m
-index 8ac2bbdc..a0fb4f37 100644
+index 8ac2bbdc..595b9f43 100644
 --- a/AppKit/NSView.m
 +++ b/AppKit/NSView.m
 @@ -46,6 +46,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1401,7 +1445,18 @@ index 8ac2bbdc..a0fb4f37 100644
  @end
  
  @implementation NSView
-@@ -955,6 +962,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -790,6 +797,10 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+             [self viewDidHide];
+         else
+             [self viewDidUnhide];
++
++        if ([_window respondsToSelector: @selector(updateDecorationsForStandardWindowButtons)]) {
++            [_window updateDecorationsForStandardWindowButtons];
++        }
+     }
+ }
+ 
+@@ -955,6 +966,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              CGPointApplyAffineTransform(point, toWindow), fromWindow);
  }
  
@@ -1456,7 +1511,7 @@ index 8ac2bbdc..a0fb4f37 100644
  - (NSSize) convertSize: (NSSize) size fromView: (NSView *) viewOrNil {
      NSView *fromView =
              (viewOrNil != nil) ? viewOrNil : [[self window] _backgroundView];
-@@ -1029,6 +1084,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1029,6 +1088,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (void) setFrame: (NSRect) frame {
@@ -1473,7 +1528,7 @@ index 8ac2bbdc..a0fb4f37 100644
      // Cocoa does not post the notification if the frames are equal
      // Possible that resizeSubviewsWithOldSize is not called if the sizes are
      // equal
-@@ -1052,6 +1117,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1052,6 +1121,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      }
      _frame = frame;
  
@@ -1486,7 +1541,7 @@ index 8ac2bbdc..a0fb4f37 100644
      [_window invalidateCursorRectsForView: self]; // this also invalidates
                                                    // tracking areas
  
-@@ -1068,6 +1139,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1068,6 +1143,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
      invalidateTransform(self);
  
@@ -1501,7 +1556,7 @@ index 8ac2bbdc..a0fb4f37 100644
      if (_postsNotificationOnFrameChange)
          [[NSNotificationCenter defaultCenter]
                  postNotificationName: NSViewFrameDidChangeNotification
-@@ -1078,14 +1157,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1078,14 +1161,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      NSRect frame = _frame;
  
      frame.size = size;
@@ -1518,7 +1573,7 @@ index 8ac2bbdc..a0fb4f37 100644
  }
  
  - (void) setFrameRotation: (CGFloat) angle {
-@@ -1100,6 +1179,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1100,6 +1183,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      if (!NSEqualRects(bounds, _bounds)) {
          _bounds = bounds;
          invalidateTransform(self);
@@ -1526,7 +1581,7 @@ index 8ac2bbdc..a0fb4f37 100644
  
          [_window invalidateCursorRectsForView: self]; // this also invalidates
                                                        // tracking areas
-@@ -1254,7 +1334,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1254,7 +1338,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
                   (NSComparisonResult (*)(id, id, void *)) compareFunction
                             context: (void *) context
  {
@@ -1539,7 +1594,7 @@ index 8ac2bbdc..a0fb4f37 100644
  }
  
  - (void) didAddSubview: (NSView *) subview {
-@@ -1511,8 +1595,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1511,8 +1599,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (NSTextInputContext *) inputContext {
@@ -1558,7 +1613,7 @@ index 8ac2bbdc..a0fb4f37 100644
  }
  
  - (void) registerForDraggedTypes: (NSArray *) types {
-@@ -1819,15 +1911,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1819,15 +1915,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
  - (void) _createLayerContextIfNeeded {
      if ([_superview layer] == nil) {
@@ -1582,7 +1637,7 @@ index 8ac2bbdc..a0fb4f37 100644
      [[_superview layer] addSublayer: _layer];
      [self _createLayerContextIfNeeded];
  }
-@@ -1905,6 +2003,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1905,6 +2007,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              [[_superview layer] replaceSublayer: _layer with: value];
              [_layer release];
              _layer = value;
@@ -1590,7 +1645,7 @@ index 8ac2bbdc..a0fb4f37 100644
          }
  
          [_subviews
-@@ -2687,6 +2786,17 @@ static NSView *viewBeingPrinted = nil;
+@@ -2687,6 +2790,17 @@ static NSView *viewBeingPrinted = nil;
           slideBack: (BOOL) slideBack
  {
      location = [self convertPoint: location toView: nil];
@@ -1608,7 +1663,7 @@ index 8ac2bbdc..a0fb4f37 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2783,7 +2893,8 @@ static NSView *viewBeingPrinted = nil;
+@@ -2783,7 +2897,8 @@ static NSView *viewBeingPrinted = nil;
  }
  
  - (BOOL) prepareForDragOperation: (id<NSDraggingInfo>) sender {
@@ -1619,10 +1674,18 @@ index 8ac2bbdc..a0fb4f37 100644
  
  - (BOOL) performDragOperation: (id<NSDraggingInfo>) sender {
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120a..79760f47 100644
+index d545120a..b1d73df2 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
-@@ -27,6 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -19,6 +19,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
+ #import <AppKit/NSApplication.h>
++#import <Foundation/NSProcessInfo.h>
+ #import <AppKit/NSColor.h>
+ #import <AppKit/NSCursor.h>
+ #import <AppKit/NSDisplay.h>
+@@ -27,6 +28,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSEvent_CoreGraphics.h>
  #import <AppKit/NSGraphics.h>
  #import <AppKit/NSImage.h>
@@ -1630,7 +1693,7 @@ index d545120a..79760f47 100644
  #import <AppKit/NSMainMenuView.h>
  #import <AppKit/NSMenu.h>
  #import <AppKit/NSMenuItem.h>
-@@ -45,6 +46,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -45,6 +47,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSWindowAnimationContext.h>
  #import <ApplicationServices/ApplicationServices.h>
  #import <CoreGraphics/CGWindow.h>
@@ -1652,7 +1715,7 @@ index d545120a..79760f47 100644
  
  const NSNotificationName NSWindowDidBecomeKeyNotification =
          @"NSWindowDidBecomeKeyNotification";
-@@ -204,6 +220,122 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
+@@ -204,6 +221,122 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
  
  @end
  
@@ -1775,7 +1838,7 @@ index d545120a..79760f47 100644
  @implementation NSWindow
  
  @synthesize identifier = _identifier;
-@@ -218,7 +350,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -218,13 +351,18 @@ static BOOL _allowsAutomaticWindowTabbing;
  /* This method is Cococtron specific and can be override by subclasses, do not
   * change method name */
  + (BOOL) hasMainMenuForStyleMask: (NSWindowStyleMask) styleMask {
@@ -1785,7 +1848,18 @@ index d545120a..79760f47 100644
  }
  
  /* This method is Cococtron specific and can be override by subclasses, do not
-@@ -318,6 +451,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+  * change method name. */
+ - (BOOL) hasMainMenu {
+-    return [[self class] hasMainMenuForStyleMask: _styleMask];
++    if (![[self class] hasMainMenuForStyleMask: _styleMask])
++        return NO;
++    if (_titleVisibility == NSWindowTitleVisibilityHidden || _titlebarAppearsTransparent)
++        return NO;
++    return YES;
+ }
+ 
+ + (NSRect) frameRectForContentRect: (NSRect) contentRect
+@@ -318,6 +456,7 @@ static BOOL _allowsAutomaticWindowTabbing;
          [NSApplication sharedApplication];
      }
      _styleMask = styleMask;
@@ -1793,7 +1867,7 @@ index d545120a..79760f47 100644
      _backingType = backing;
      _isDeferred = defer;
  
-@@ -351,7 +485,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -351,7 +490,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      [_backgroundView _setWindow: self];
      [_backgroundView setNextResponder: self];
  
@@ -1802,7 +1876,7 @@ index d545120a..79760f47 100644
      _contentView = [[NSView alloc] initWithFrame: contentViewFrame];
      [_contentView setAutoresizesSubviews: YES];
      [_contentView
-@@ -399,6 +533,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -399,6 +538,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) dealloc {
@@ -1811,7 +1885,7 @@ index d545120a..79760f47 100644
      [[NSNotificationCenter defaultCenter] removeObserver: self];
      [_childWindows release];
      [_title release];
-@@ -934,6 +1070,22 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -934,6 +1075,22 @@ static BOOL _allowsAutomaticWindowTabbing;
      return _animationContext;
  }
  
@@ -1834,7 +1908,7 @@ index d545120a..79760f47 100644
  - (void) setFrame: (NSRect) newFrame
            display: (BOOL) display
            animate: (BOOL) animate
-@@ -944,8 +1096,19 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -944,8 +1101,19 @@ static BOOL _allowsAutomaticWindowTabbing;
      _frame = newFrame;
      _makeSureIsOnAScreen = YES;
  
@@ -1855,7 +1929,7 @@ index d545120a..79760f47 100644
  
      if (didSize) {
          [self resetCursorRects];
-@@ -1025,7 +1188,34 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1025,7 +1193,43 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setMovable: (BOOL) movable {
@@ -1873,7 +1947,16 @@ index d545120a..79760f47 100644
 +        FILE *trace=fopen("/tmp/rclol-window-drag.log","a");
 +        if(trace) {fprintf(trace,"DRAG pid=%d movable=%d type=%ld\n",getpid(),_isMovable,(long)[event type]);fclose(trace);}
 +    }
-+    if (!_isMovable || [event type] != NSLeftMouseDown) return;
++    if (!_isMovable) return;
++    if (event == nil) event = [NSApp currentEvent];
++
++    if ([_platformWindow respondsToSelector: @selector(beginWindowDragWithEvent:)]) {
++        if ([(id) _platformWindow beginWindowDragWithEvent: event]) {
++            return;
++        }
++    }
++
++    if ([event type] != NSLeftMouseDown && [event type] != NSLeftMouseDragged) return;
 +    /* darling-lol: follow the pointer in absolute screen coordinates. The window-relative location of every drag event is
 +     * measured against where the window really is, which lags behind setFrameOrigin: (the compositor moves the window
 +     * later), so converting it back with the new frame fed the lag into the next position and the window jumped (League's
@@ -1891,7 +1974,7 @@ index d545120a..79760f47 100644
  }
  
  - (void) setBackingType: (NSBackingStoreType) value {
-@@ -1234,6 +1424,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1234,6 +1438,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setIgnoresMouseEvents: (BOOL) value {
      _ignoresMouseEvents = value;
@@ -1899,7 +1982,7 @@ index d545120a..79760f47 100644
  }
  
  - (void) setAspectRatio: (NSSize) value {
-@@ -1413,8 +1604,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1413,8 +1618,34 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSButton *) standardWindowButton: (NSWindowButton) value {
@@ -1913,10 +1996,30 @@ index d545120a..79760f47 100644
 +		[_standardWindowButtons[value] setBordered: NO];
 +	}
 +	return _standardWindowButtons[value];
++}
++
++- (BOOL) areStandardWindowButtonsHidden {
++    BOOL anyCreated = NO;
++    for (int i = 0; i < 3; i++) {
++        if (_standardWindowButtons[i] != nil) {
++            anyCreated = YES;
++            if (![_standardWindowButtons[i] isHidden])
++                return NO;
++        }
++    }
++    return anyCreated;
++}
++
++- (void) updateDecorationsForStandardWindowButtons {
++    if ([self areStandardWindowButtonsHidden]) {
++        if ([_platformWindow respondsToSelector: @selector(updateDecorations)]) {
++            [(id) _platformWindow updateDecorations];
++        }
++    }
  }
  
  - (NSButtonCell *) defaultButtonCell {
-@@ -1425,6 +1622,17 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1425,6 +1656,17 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_sheetContext sheet];
  }
  
@@ -1934,7 +2037,7 @@ index d545120a..79760f47 100644
  - (id) windowController {
      return _windowController;
  }
-@@ -1511,10 +1719,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1511,10 +1753,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_platformWindow isMiniaturized];
  }
  
@@ -1946,7 +2049,7 @@ index d545120a..79760f47 100644
  
  - (BOOL) inLiveResize {
      return _isInLiveResize;
-@@ -1561,6 +1766,117 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1561,6 +1800,127 @@ static BOOL _allowsAutomaticWindowTabbing;
      return point;
  }
  
@@ -1976,15 +2079,25 @@ index d545120a..79760f47 100644
 +}
 +
 +- (void) setTitlebarAppearsTransparent: (BOOL) value {
-+    _titlebarAppearsTransparent = value;
++    if (_titlebarAppearsTransparent != value) {
++        _titlebarAppearsTransparent = value;
++        if ([_platformWindow respondsToSelector: @selector(updateDecorations)]) {
++            [(id) _platformWindow updateDecorations];
++        }
++    }
 +}
 +
-+- (NSInteger) titleVisibility {
++- (NSWindowTitleVisibility) titleVisibility {
 +    return _titleVisibility;
 +}
 +
-+- (void) setTitleVisibility: (NSInteger) value {
-+    _titleVisibility = value;
++- (void) setTitleVisibility: (NSWindowTitleVisibility) value {
++    if (_titleVisibility != value) {
++        _titleVisibility = value;
++        if ([_platformWindow respondsToSelector: @selector(updateDecorations)]) {
++            [(id) _platformWindow updateDecorations];
++        }
++    }
 +}
 +
 +- (BOOL) movableByWindowBackground {
@@ -2064,7 +2177,7 @@ index d545120a..79760f47 100644
  - (NSRect) frameRectForContentRect: (NSRect) contentRect {
      // hasMainMenu is an instance method so we can't just use the class method
      //  frameRectForContentRect:styleMask:
-@@ -1580,6 +1896,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1580,6 +1940,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSRect) contentRectForFrameRect: (NSRect) frameRect {
@@ -2075,24 +2188,24 @@ index d545120a..79760f47 100644
      NSRect result = [[NSDisplay currentDisplay] insetRect: frameRect
                             forNativeWindowBorderWithStyle: [self styleMask]];
  
-@@ -2155,6 +2475,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2155,6 +2519,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  - (void) orderWindow: (NSWindowOrderingMode) place
            relativeTo: (NSInteger) relativeTo
  {
-+    BOOL wasVisible = _isVisible;
++    BOOL wasVisible = [self isVisible];
      // The move notifications are sent under unknown conditions around
      // orderFront: in the Apple AppKit, we do them all the time here until it's
      // figured out. I suspect it is a side effect of off-screen windows being at
-@@ -2208,6 +2529,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2208,6 +2573,8 @@ static BOOL _allowsAutomaticWindowTabbing;
          break;
      }
  
-+    if (wasVisible != _isVisible)
++    if (wasVisible != [self isVisible])
 +        [self postNotificationName: NSWindowDidChangeOcclusionStateNotification];
      [self postNotificationName: NSWindowDidMoveNotification];
  }
  
-@@ -2257,6 +2580,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2257,6 +2624,12 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -2105,7 +2218,7 @@ index d545120a..79760f47 100644
      // Some events can cause our window to be destroyed
      // So make sure self lives at least through this current run loop...
      [[self retain] autorelease];
-@@ -2300,6 +2629,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2300,6 +2673,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  
      case NSLeftMouseDown: {
          NSView *view = [_backgroundView hitTest: [event locationInWindow]];
@@ -2116,7 +2229,7 @@ index d545120a..79760f47 100644
  
          if ([view acceptsFirstResponder]) {
              if ([view needsPanelToBecomeKey]) {
-@@ -2307,6 +2640,27 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2307,6 +2684,27 @@ static BOOL _allowsAutomaticWindowTabbing;
              }
          }
  
@@ -2144,7 +2257,7 @@ index d545120a..79760f47 100644
          // Event goes to view, not first responder.
          [view mouseDown: event];
          _mouseDownLocationInWindow = [event locationInWindow];
-@@ -2330,6 +2684,31 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2330,6 +2728,31 @@ static BOOL _allowsAutomaticWindowTabbing;
          _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
          break;
  
@@ -2176,7 +2289,7 @@ index d545120a..79760f47 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2478,6 +2857,197 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2478,6 +2901,197 @@ static BOOL _allowsAutomaticWindowTabbing;
      _draggedTypes = nil;
  }
  
@@ -2374,7 +2487,7 @@ index d545120a..79760f47 100644
  - (void) dragImage: (NSImage *) image
                  at: (NSPoint) location
              offset: (NSSize) offset
-@@ -2486,6 +3056,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2486,6 +3100,10 @@ static BOOL _allowsAutomaticWindowTabbing;
              source: (id) source
           slideBack: (BOOL) slideBack
  {
@@ -2385,7 +2498,7 @@ index d545120a..79760f47 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2536,6 +3110,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2536,6 +3154,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      } else {
          [[self platformWindow] hideWindow];
      }
@@ -2393,7 +2506,47 @@ index d545120a..79760f47 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3064,6 +3639,13 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2577,6 +3196,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+             [NSApp abortModal];
+         } else {
+             [self close];
++            if ([[[NSProcessInfo processInfo] processName] isEqualToString: @"RiotClientUx"] &&
++                ![self isKindOfClass: [NSPanel class]]) {
++                [NSApp terminate: self];
++            }
+         }
+     }
+ }
+@@ -2655,10 +3278,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+ 
+ - (void) miniaturize: (id) sender {
+     [[self platformWindow] miniaturize];
++    [self platformWindowMiniaturized: [self platformWindow]];
+ }
+ 
+ - (void) deminiaturize: (id) sender {
+     [[self platformWindow] deminiaturize];
++    [self platformWindowDeminiaturized: [self platformWindow]];
+ }
+ 
+ - (void) print: (id) sender {
+@@ -2990,6 +3615,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+                                 relativeTo: [self windowNumber]];
+     }
+     [self postNotificationName: NSWindowDidDeminiaturizeNotification];
++    [self postNotificationName: NSWindowDidChangeOcclusionStateNotification];
+     [NSApp updateWindows];
+ }
+ 
+@@ -3002,6 +3628,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+     }
+ 
+     [self postNotificationName: NSWindowDidMiniaturizeNotification];
++    [self postNotificationName: NSWindowDidChangeOcclusionStateNotification];
+ 
+     if ([self isKeyWindow]) {
+         [self resignKeyWindow];
+@@ -3064,6 +3691,13 @@ static BOOL _allowsAutomaticWindowTabbing;
      if (didSize) {
          // Don't redraw everything unless we really have to.
          [_backgroundView setFrameSize: _frame.size];
@@ -2407,7 +2560,7 @@ index d545120a..79760f47 100644
          [_backgroundView setNeedsDisplay: YES];
          [self resetCursorRects];
          [self saveFrameUsingName: _autosaveFrameName];
-@@ -3260,8 +3842,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3894,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -2417,7 +2570,7 @@ index d545120a..79760f47 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +4040,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +4092,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -2687,10 +2840,18 @@ index 18189404..12cde429 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..47fb6552 100644
+index 5ae29bf4..77856962 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
-@@ -48,12 +48,271 @@
+@@ -39,6 +39,7 @@
+ #import <AppKit/NSImage.h>
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSWindow.h>
++#import <AppKit/NSStatusBar.h>
+ 
+ #import <Onyx2D/O2Font_freetype.h>
+ 
+@@ -48,12 +49,271 @@
  #import "X11KeySymToUCS.h"
  #import <X11/XKBlib.h>
  #import <X11/Xutil.h>
@@ -2962,7 +3123,7 @@ index 5ae29bf4..47fb6552 100644
  
  void NSColorSetCatalogColor(NSColorListName catalogName, NSColorName colorName, NSColor *color);
  
-@@ -75,6 +334,15 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -75,6 +335,15 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  - init {
      if (self = [super init]) {
  
@@ -2978,10 +3139,11 @@ index 5ae29bf4..47fb6552 100644
          _display = XOpenDisplay(NULL);
  
          if (_display == NULL) {
-@@ -136,6 +404,10 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -136,6 +405,11 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
          if (XRRQueryExtension(_display, &_rrEventBase, &errorBase)) {
              XRRSelectInput(_display, DefaultRootWindow(_display), RRScreenChangeNotifyMask | RRCrtcChangeNotifyMask | RROutputChangeNotifyMask | RROutputPropertyNotifyMask);
          }
++        XSelectInput(_display, DefaultRootWindow(_display), StructureNotifyMask | PropertyChangeMask);
 +        /* Xwayland forwards pointer warps to the compositor only while the X cursor is hidden. */
 +        int xwaylandOpcode, xwaylandEvent, xwaylandError;
 +        _isXwayland = XQueryExtension(_display, "XWAYLAND", &xwaylandOpcode, &xwaylandEvent, &xwaylandError);
@@ -2989,7 +3151,7 @@ index 5ae29bf4..47fb6552 100644
  
          lastFocusedWindow = nil;
          lastClickTimeStamp = 0.0;
-@@ -145,17 +417,21 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -145,17 +419,21 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  }
  
  - (void) dealloc {
@@ -3014,7 +3176,7 @@ index 5ae29bf4..47fb6552 100644
      if (_cfSocket != NULL)
          CFRelease(_cfSocket);
  #endif
-@@ -172,6 +448,56 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -172,6 +450,56 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
      return _display;
  }
  
@@ -3071,7 +3233,7 @@ index 5ae29bf4..47fb6552 100644
  - (void) _enableDetectableAutoRepeat {
      int major = XkbMajorVersion, minor = XkbMinorVersion;
      XkbStateRec state;
-@@ -190,6 +516,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -190,6 +518,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
          [_lastScreens release];
          _lastScreens = nil;
      }
@@ -3107,7 +3269,7 @@ index 5ae29bf4..47fb6552 100644
  }
  
  - (NSArray *) screens {
-@@ -201,25 +556,60 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -201,25 +558,60 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  
      int eventBase, errorBase;
  
@@ -3178,7 +3340,7 @@ index 5ae29bf4..47fb6552 100644
  
                  nsscreen =
                          [[[NSScreen alloc] initWithFrame: frame
-@@ -228,18 +618,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -228,18 +620,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
                  Atom actualType;
                  unsigned long nitems, bytesAfter;
                  int actualFormat;
@@ -3200,7 +3362,7 @@ index 5ae29bf4..47fb6552 100644
              } else {
                  nsscreen = [[[NSScreen alloc] initWithFrame: NSZeroRect
                                                 visibleFrame: NSZeroRect]
-@@ -247,25 +636,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -247,25 +638,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
              }
              [nsscreen setCgDirectDisplayID: (i + 1)];
  
@@ -3247,7 +3409,88 @@ index 5ae29bf4..47fb6552 100644
  }
  
  static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
-@@ -536,12 +935,109 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -275,6 +676,13 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         rate = (double) mi->dotClock /
+                ((double) mi->hTotal * (double) mi->vTotal);
+ 
++    const char *envHz = getenv("RCLOL_REFRESH_HZ");
++    if (envHz && (rate <= 60.0 || rate < 1.0)) {
++        double overrideRate = atof(envHz);
++        if (overrideRate > 0.0 && overrideRate <= 1000.0)
++            rate = overrideRate;
++    }
++
+     return @{
+         @"Width" : @(mi->width),
+         @"Height" : @(mi->height),
+@@ -290,10 +698,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+ 
+     if (!XRRQueryExtension(_display, &eventBase, &errorBase)) {
+         Screen *defaultScreen = XDefaultScreenOfDisplay(_display);
++        double rate = 60.0;
++        const char *envHz = getenv("RCLOL_REFRESH_HZ");
++        if (envHz) {
++            double overrideRate = atof(envHz);
++            if (overrideRate > 0.0 && overrideRate <= 1000.0)
++                rate = overrideRate;
++        }
+         return @[ @{
+             @"Width" : @(WidthOfScreen(defaultScreen)),
+             @"Height" : @(HeightOfScreen(defaultScreen)),
+-            @"Depth" : @(defaultDepth)
++            @"Depth" : @(defaultDepth),
++            @"RefreshRate" : @(rate)
+         } ];
+     } else {
+         XRRScreenResources *screen =
+@@ -352,7 +768,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+ 
+         if (screenIndex < 0 || screenIndex >= screen->noutput) {
+             XRRFreeScreenResources(screen);
+-            return dict;
++            const int defaultDepth = XDefaultDepthOfScreen(
++                    XDefaultScreenOfDisplay(_display));
++            double rate = 60.0;
++            const char *envHz = getenv("RCLOL_REFRESH_HZ");
++            if (envHz) {
++                double overrideRate = atof(envHz);
++                if (overrideRate > 0.0 && overrideRate <= 1000.0)
++                    rate = overrideRate;
++            }
++            return @{
++                @"Width" : @(DisplayWidth(_display, DefaultScreen(_display))),
++                @"Height" : @(DisplayHeight(_display, DefaultScreen(_display))),
++                @"Depth" : @(defaultDepth),
++                @"RefreshRate" : @(rate)
++            };
+         }
+ 
+         XRROutputInfo *oinfo = XRRGetOutputInfo(_display, screen,
+@@ -378,6 +808,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         XRRFreeOutputInfo(oinfo);
+         XRRFreeScreenResources(screen);
+     }
++    if (![dict count]) {
++        const int defaultDepth = XDefaultDepthOfScreen(
++                XDefaultScreenOfDisplay(_display));
++        double rate = 60.0;
++        const char *envHz = getenv("RCLOL_REFRESH_HZ");
++        if (envHz) {
++            double overrideRate = atof(envHz);
++            if (overrideRate > 0.0 && overrideRate <= 1000.0)
++                rate = overrideRate;
++        }
++        dict = @{
++            @"Width" : @(DisplayWidth(_display, DefaultScreen(_display))),
++            @"Height" : @(DisplayHeight(_display, DefaultScreen(_display))),
++            @"Depth" : @(defaultDepth),
++            @"RefreshRate" : @(rate)
++        };
++    }
+     return dict;
+ }
+ 
+@@ -536,12 +983,109 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return &layout->layout;
  }
  
@@ -3359,7 +3602,7 @@ index 5ae29bf4..47fb6552 100644
  }
  
  - (NSPasteboard *) pasteboardWithName: (NSString *) name {
-@@ -675,6 +1171,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -675,6 +1219,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                      blue: 0.60f
                                      alpha: 1.0f];
  
@@ -3375,7 +3618,7 @@ index 5ae29bf4..47fb6552 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -688,6 +1193,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -688,6 +1241,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) hideCursor {
@@ -3386,7 +3629,7 @@ index 5ae29bf4..47fb6552 100644
      if (!_blankCursor)
          _blankCursor = [[X11Cursor alloc] initBlank];
      [self setCursor: _blankCursor];
-@@ -695,6 +1204,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -695,6 +1252,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) unhideCursor {
      NSCursor *current = [NSCursor currentCursor];
@@ -3397,7 +3640,7 @@ index 5ae29bf4..47fb6552 100644
      if (current != nil) {
          [current push];
          [current pop];
-@@ -747,12 +1260,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -747,12 +1308,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) setCursor: (id) cursor {
      CGWindow *window = [[NSApp keyWindow] platformWindow];
@@ -3431,7 +3674,7 @@ index 5ae29bf4..47fb6552 100644
      }
  }
  
-@@ -921,15 +1450,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -921,15 +1498,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -3463,7 +3706,7 @@ index 5ae29bf4..47fb6552 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -948,6 +1484,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -948,6 +1532,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          // retaining the window causes it to keep popping back up endlessly even after dismissing it
          if (lastFocusedWindow && [[lastFocusedWindow platformWindow] windowHandle] == i)
              lastFocusedWindow = nil;
@@ -3483,7 +3726,7 @@ index 5ae29bf4..47fb6552 100644
      }
  }
  
-@@ -962,20 +1511,86 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1559,86 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -3575,7 +3818,7 @@ index 5ae29bf4..47fb6552 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1010,17 +1625,96 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1010,17 +1673,101 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return result;
  }
  
@@ -3623,9 +3866,16 @@ index 5ae29bf4..47fb6552 100644
  - (void) postXEvent: (XEvent *) ev {
      id event = nil;
      NSEventType type;
-     X11Window* window = (X11Window*) [self windowForID: ev->xany.window];
+-    X11Window* window = (X11Window*) [self windowForID: ev->xany.window];
++    id rawWindow = [self windowForID: ev->xany.window];
++    if ([rawWindow respondsToSelector: @selector(handleTrayXEvent:)]) {
++        [rawWindow handleTrayXEvent: ev];
++        return;
++    }
++    X11Window* window = (X11Window*) rawWindow;
  
-     id delegate = [window delegate];
+-    id delegate = [window delegate];
++    id delegate = [window respondsToSelector: @selector(delegate)] ? [window delegate] : nil;
 +    static int inputTrace = -1;
 +    if (inputTrace < 0) inputTrace = getenv("RCLOL_INPUT_TRACE") != NULL;
 +    if (inputTrace && (ev->type == KeyPress || ev->type == KeyRelease || ev->type == ButtonPress))
@@ -3672,7 +3922,7 @@ index 5ae29bf4..47fb6552 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1030,7 +1724,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +1777,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              break;
  
          if (ev->type == KeyPress) {
@@ -3685,7 +3935,7 @@ index 5ae29bf4..47fb6552 100644
              buf[strLen] = 0;
          } else {
              // Xutf8LookupString() may not be used with KeyRelease
-@@ -1038,6 +1736,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,6 +1789,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -3704,12 +3954,27 @@ index 5ae29bf4..47fb6552 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1787,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +1840,47 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
 +        if (window && !_confinedWindow)
 +            [self updateMouseConfinementForWindow: window];
++
++        if (ev->xbutton.button == Button1 && window && [window shouldRemoveDecorationForStyleMask: [window styleMask]]) {
++            if (![window isModal] && !X11IsLeagueGameWindow(_display, [window windowHandle], [window delegate])) {
++                O2Rect winFrame = [window frame];
++                int clickX = ev->xbutton.x;
++                int clickY = ev->xbutton.y;
++                int winWidth = (int) winFrame.size.width;
++                BOOL inDragZone = (clickY >= 0 && clickY < 32 && clickX >= 0 && clickX < (winWidth - 140));
++                if (inDragZone &&
++                    [window beginWindowDragAtRootX: ev->xbutton.x_root rootY: ev->xbutton.y_root button: Button1]) {
++                    break;
++                }
++            }
++        }
++
 +        if (ev->xbutton.button >= Button4 && ev->xbutton.button <= 7) {
 +            pos = [self locationInWindow: window x: ev->xbutton.x y: ev->xbutton.y
 +                                   rootX: ev->xbutton.x_root rootY: ev->xbutton.y_root];
@@ -3737,7 +4002,7 @@ index 5ae29bf4..47fb6552 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +1822,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +1890,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -3748,7 +4013,7 @@ index 5ae29bf4..47fb6552 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +1832,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +1900,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -3759,7 +4024,7 @@ index 5ae29bf4..47fb6552 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1845,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +1913,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -3786,7 +4051,7 @@ index 5ae29bf4..47fb6552 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1870,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +1938,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -3801,7 +4066,7 @@ index 5ae29bf4..47fb6552 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +1883,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +1951,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -3812,7 +4077,7 @@ index 5ae29bf4..47fb6552 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +1894,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +1962,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -3934,7 +4199,7 @@ index 5ae29bf4..47fb6552 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +1991,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +2059,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -3995,7 +4260,7 @@ index 5ae29bf4..47fb6552 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2053,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2121,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -4060,7 +4325,7 @@ index 5ae29bf4..47fb6552 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2145,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2213,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -4088,7 +4353,7 @@ index 5ae29bf4..47fb6552 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2173,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2241,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -4110,16 +4375,31 @@ index 5ae29bf4..47fb6552 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2211,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2279,12 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
-+        if (ev->xproperty.atom == XInternAtom(_display, "_NET_WM_STATE", False))
++        if (ev->xproperty.atom == XInternAtom(_display, "_NET_WM_STATE", False)) {
 +            [self updateMouseConfinementForWindow:window];
++            if (window && [window respondsToSelector: @selector(propertyNotifyNetWmState)]) {
++                [window propertyNotifyNetWmState];
++            }
++        }
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1399,7 +2268,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1372,6 +2313,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         break;
+ 
+     case ClientMessage:
++        if (ev->xclient.message_type == XInternAtom(_display, "MANAGER", False)) {
++            [[NSStatusBar systemStatusBar] _dockAllStatusItems];
++            break;
++        }
+         if (ev->xclient.format == 32 &&
+             ev->xclient.data.l[0] ==
+                     XInternAtom(_display, "WM_DELETE_WINDOW", False)) {
+@@ -1399,7 +2344,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -4130,7 +4410,7 @@ index 5ae29bf4..47fb6552 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2304,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2380,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -4141,7 +4421,7 @@ index 5ae29bf4..47fb6552 100644
      return 0;
  }
  
-@@ -1476,54 +2351,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2427,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -4194,8 +4474,8 @@ index 5ae29bf4..47fb6552 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
-+}
-+
+ }
+ 
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -4382,8 +4662,8 @@ index 5ae29bf4..47fb6552 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
- }
- 
++}
++
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    BOOL rclolRelativeBefore = _relativeMouse.active;
@@ -4870,7 +5150,7 @@ index 0000000..31fa646
 +
 +#endif
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
-index bfe3839a..48cfac4c 100644
+index bfe3839a..a3da37ce 100644
 --- a/AppKit/X11.backend/X11Window.h
 +++ b/AppKit/X11.backend/X11Window.h
 @@ -26,7 +26,7 @@
@@ -4882,7 +5162,7 @@ index bfe3839a..48cfac4c 100644
  
  @interface X11Window : CGWindow {
      int _level; // TODO: care about this value
-@@ -47,8 +47,32 @@
+@@ -47,27 +47,58 @@
      BOOL _mapped;
      CGPoint _lastMotionPos;
      BOOL _isModal;
@@ -4915,7 +5195,12 @@ index bfe3839a..48cfac4c 100644
  
  @public
      XIC _xic;
-@@ -60,9 +84,9 @@
+ }
+ 
+++ (void) setDecorations: (BOOL) decorated forWindow: (Window) w onDisplay: (Display *) dpy;
+ + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy;
+ - (instancetype) initWithDelegate: (NSWindow *) delegate;
+ - (O2Rect) frame;
  - (Visual *) visual;
  - (Drawable) drawable;
  - (NSPoint) transformPoint: (NSPoint) pos;
@@ -4926,8 +5211,19 @@ index bfe3839a..48cfac4c 100644
  
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
+ 
+ - (void) setStyleMaskInternal: (NSUInteger) styleMask force: (BOOL) force;
++- (void) updateDecorations;
++- (BOOL) isModal;
++- (BOOL) shouldRemoveDecorationForStyleMask: (NSUInteger) mask;
++- (BOOL) beginWindowDragWithEvent: (NSEvent *) event;
++- (BOOL) beginWindowDragAtRootX: (int) root_x rootY: (int) root_y button: (int) button;
++- (void) propertyNotifyNetWmState;
+ 
+ @end
+ 
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..730d4692 100644
+index f4925b66..373b7fd6 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -18,11 +18,14 @@
@@ -5169,16 +5465,14 @@ index f4925b66..730d4692 100644
  
      [self syncDelegateProperties];
  
-@@ -217,7 +346,20 @@ static NSData *makeWindowIcon() {
+@@ -217,7 +346,18 @@ static NSData *makeWindowIcon() {
                              .res_class = (char *) name};
      XSetClassHint(_display, _window, &classHint);
  
 -    XSetWindowBackgroundPixmap(_display, _window, None);
 +    if (isGame && !(_styleMask & NSTitledWindowMask)) {
-+        /* darling-lol: never let the compositor scan out this parent window
-+         * directly (bypass=2): Metal/OpenGL draw into a child window, so direct
-+         * scanout shows black. EWMH fullscreen is requested in setStyleMask. */
-+        unsigned long bypass = 2;
++        /* darling-lol: allow compositor bypass / direct scanout for fullscreen game window */
++        unsigned long bypass = 1;
 +        XChangeProperty(_display, _window, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
 +                        XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
 +    }
@@ -5191,7 +5485,7 @@ index f4925b66..730d4692 100644
  
      _isModal = [delegate isSheet] || [NSApp modalWindow] == delegate;
      // FIXME: There should be no need for this.
-@@ -254,7 +396,8 @@ static NSData *makeWindowIcon() {
+@@ -254,19 +394,96 @@ static NSData *makeWindowIcon() {
          XNFocusWindow, _window,
          NULL);
  
@@ -5201,7 +5495,10 @@ index f4925b66..730d4692 100644
  
      [(X11Display *) [NSDisplay currentDisplay] setWindow: self forID: _window];
  
-@@ -265,8 +408,88 @@ static NSData *makeWindowIcon() {
+-    // FIXME: Move this call into setStyleMaskInternal below!
+-    if (_styleMask == NSBorderlessWindowMask) {
+-        [[self class] removeDecorationForWindow: _window onDisplay: _display];
+-    }
      [self setStyleMaskInternal: _styleMask force: YES];
  
      [self setWindowIcon];
@@ -5291,7 +5588,7 @@ index f4925b66..730d4692 100644
  }
  
  - (void) dealloc {
-@@ -279,24 +502,30 @@ static NSData *makeWindowIcon() {
+@@ -279,24 +496,30 @@ static NSData *makeWindowIcon() {
      return _styleMask;
  }
  
@@ -5331,14 +5628,14 @@ index f4925b66..730d4692 100644
  
 +- (void) requestFullscreen: (BOOL) fullscreen force: (BOOL) force {
 +    if (fullscreen) {
-+        unsigned long bypass = 2;
++        unsigned long bypass = 1;
 +        XChangeProperty(_display, _window, XInternAtom(_display,"_NET_WM_BYPASS_COMPOSITOR",False),
 +                        XA_CARDINAL,32,PropModeReplace,(unsigned char *)&bypass,1);
 +    }
      if (!_mapped) {
          long states[2];
          int states_cnt = 0;
-@@ -304,7 +533,7 @@ static NSData *makeWindowIcon() {
+@@ -304,7 +527,7 @@ static NSData *makeWindowIcon() {
              states[states_cnt++] =
                      (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
          }
@@ -5347,7 +5644,7 @@ index f4925b66..730d4692 100644
              states[states_cnt++] = (long) XInternAtom(
                      _display, "_NET_WM_STATE_FULLSCREEN", False);
          }
-@@ -312,14 +541,13 @@ static NSData *makeWindowIcon() {
+@@ -312,14 +535,13 @@ static NSData *makeWindowIcon() {
                          XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
                          32, PropModeReplace, (const unsigned char *) states,
                          states_cnt);
@@ -5364,7 +5661,7 @@ index f4925b66..730d4692 100644
          event.data.l[1] =
                  (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
          event.data.l[3] = 1;
-@@ -327,6 +555,35 @@ static NSData *makeWindowIcon() {
+@@ -327,6 +549,144 @@ static NSData *makeWindowIcon() {
                     SubstructureNotifyMask | SubstructureRedirectMask,
                     (XEvent *) &event);
      }
@@ -5372,7 +5669,112 @@ index f4925b66..730d4692 100644
 +    XFlush(_display);
 +}
 +
++- (BOOL) isModal {
++    return _isModal;
++}
++
++static BOOL X11IsCSDClientWindow(Display *display, Window window, NSWindow *delegate) {
++    static Class panelClass, menuClass, popUpClass, toolTipClass;
++    if (!panelClass) {
++        panelClass = NSClassFromString(@"NSPanel");
++        menuClass = NSClassFromString(@"NSMenuWindow");
++        popUpClass = NSClassFromString(@"NSPopUpWindow");
++        toolTipClass = NSClassFromString(@"NSToolTipWindow");
++    }
++    if (delegate && ((panelClass && [delegate isKindOfClass: panelClass]) ||
++                     (menuClass && [delegate isKindOfClass: menuClass]) ||
++                     (popUpClass && [delegate isKindOfClass: popUpClass]) ||
++                     (toolTipClass && [delegate isKindOfClass: toolTipClass])))
++        return NO;
++
++    static int isClient = -1;
++    if (isClient < 0) {
++        NSString *name = [[NSProcessInfo processInfo] processName];
++        isClient = (name && (([name rangeOfString:@"Riot" options:NSCaseInsensitiveSearch].location != NSNotFound &&
++                              [name rangeOfString:@"Client" options:NSCaseInsensitiveSearch].location != NSNotFound) ||
++                             ([name rangeOfString:@"League" options:NSCaseInsensitiveSearch].location != NSNotFound &&
++                              [name rangeOfString:@"Client" options:NSCaseInsensitiveSearch].location != NSNotFound))) ? 1 : 0;
++    }
++    return isClient == 1;
++}
++
++- (BOOL) shouldRemoveDecorationForStyleMask: (NSUInteger) mask {
++    if ((mask & NSTitledWindowMask) == 0) {
++        return YES;
++    }
++    if (mask & NSWindowStyleMaskFullSizeContentView) {
++        return YES;
++    }
++    if ([_delegate respondsToSelector: @selector(titleVisibility)] &&
++        [_delegate titleVisibility] == NSWindowTitleVisibilityHidden) {
++        return YES;
++    }
++    if ([_delegate respondsToSelector: @selector(titlebarAppearsTransparent)] &&
++        [_delegate titlebarAppearsTransparent]) {
++        return YES;
++    }
++    if ([_delegate respondsToSelector: @selector(areStandardWindowButtonsHidden)] &&
++        [_delegate areStandardWindowButtonsHidden]) {
++        return YES;
++    }
++    if (X11IsCSDClientWindow(_display, _window, _delegate)) {
++        return YES;
++    }
++    return NO;
++}
++
++- (BOOL) beginWindowDragAtRootX: (int) root_x rootY: (int) root_y button: (int) button {
++    if (_overrideRedirect) return NO;
++    if (X11IsLeagueGameWindow(_display, _window, _delegate)) return NO;
++
++    Atom moveresize = XInternAtom(_display, "_NET_WM_MOVERESIZE", False);
++    if (moveresize == None) return NO;
++
++    if (root_x == 0 && root_y == 0) {
++        Window root_ret = None, child_ret = None;
++        int rx = 0, ry = 0, wx = 0, wy = 0;
++        unsigned int mask_ret = 0;
++        if (XQueryPointer(_display, DefaultRootWindow(_display),
++                          &root_ret, &child_ret,
++                          &rx, &ry, &wx, &wy, &mask_ret)) {
++            root_x = rx;
++            root_y = ry;
++        }
++    }
++
++    XUngrabPointer(_display, CurrentTime);
++
++    XEvent xev = {0};
++    xev.xclient.type = ClientMessage;
++    xev.xclient.window = _window;
++    xev.xclient.message_type = moveresize;
++    xev.xclient.format = 32;
++    xev.xclient.data.l[0] = root_x;
++    xev.xclient.data.l[1] = root_y;
++    xev.xclient.data.l[2] = 8; /* _NET_WM_MOVERESIZE_MOVE */
++    xev.xclient.data.l[3] = button > 0 ? button : Button1;
++    xev.xclient.data.l[4] = 1; /* source indication: normal application */
++
++    XSendEvent(_display, DefaultRootWindow(_display), False,
++               SubstructureRedirectMask | SubstructureNotifyMask, &xev);
++    XFlush(_display);
++    return YES;
++}
++
++- (BOOL) beginWindowDragWithEvent: (NSEvent *) event {
++    Window root_ret = None, child_ret = None;
++    int rx = 0, ry = 0, wx = 0, wy = 0;
++    unsigned int mask_ret = 0;
++    XQueryPointer(_display, DefaultRootWindow(_display),
++                  &root_ret, &child_ret,
++                  &rx, &ry, &wx, &wy, &mask_ret);
++    return [self beginWindowDragAtRootX: rx rootY: ry button: Button1];
++}
++
 +- (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
++    BOOL removeDecorations = [self shouldRemoveDecorationForStyleMask: mask];
++    [[self class] setDecorations: !removeDecorations forWindow: _window onDisplay: _display];
++
 +    if (force || (mask & NSWindowStyleMaskResizable) !=
 +                         (_styleMask & NSWindowStyleMaskResizable)) {
 +        XSizeHints *sh = XAllocSizeHints();
@@ -5397,18 +5799,54 @@ index f4925b66..730d4692 100644
 +    }
 +
 +    [self requestFullscreen:[self wantsFullscreenWithStyleMask:mask rootFrame:_frame] force:force];
++}
++
++- (void) updateDecorations {
++    [self setStyleMaskInternal: _styleMask force: YES];
  }
  
  - (void) setStyleMask: (NSUInteger) mask {
-@@ -338,7 +595,6 @@ static NSData *makeWindowIcon() {
+@@ -337,27 +697,40 @@ static NSData *makeWindowIcon() {
+     _styleMask = mask;
  }
  
- + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
+-+ (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
 -    return;
-     struct {
-         unsigned long flags;
-         unsigned long functions;
-@@ -356,8 +612,14 @@ static NSData *makeWindowIcon() {
+-    struct {
+-        unsigned long flags;
+-        unsigned long functions;
+-        unsigned long decorations;
+-        long input_mode;
+-        unsigned long status;
+-    } hints = {
+++ (void) setDecorations: (BOOL) decorated forWindow: (Window) w onDisplay: (Display *) dpy {
++    Atom prop = XInternAtom(dpy, "_MOTIF_WM_HINTS", False);
++    if (!decorated) {
++        struct {
++            unsigned long flags;
++            unsigned long functions;
++            unsigned long decorations;
++            long input_mode;
++            unsigned long status;
++        } hints = {
+             2, 0, 0, 0, 0,
+-    };
+-    XChangeProperty(dpy, w, XInternAtom(dpy, "_MOTIF_WM_HINTS", False),
+-                    XInternAtom(dpy, "_MOTIF_WM_HINTS", False), 32,
+-                    PropModeReplace, (const unsigned char *) &hints,
+-                    sizeof(hints) / sizeof(long));
++        };
++        XChangeProperty(dpy, w, prop, prop, 32,
++                        PropModeReplace, (const unsigned char *) &hints,
++                        sizeof(hints) / sizeof(long));
++    } else {
++        XDeleteProperty(dpy, w, prop);
++    }
++}
++
+++ (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
++    [self setDecorations: NO forWindow: w onDisplay: dpy];
+ }
  
  - (void) ensureMapped {
      if (!_mapped) {
@@ -5423,7 +5861,7 @@ index f4925b66..730d4692 100644
      }
  }
  
-@@ -377,15 +639,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +750,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -5456,7 +5894,7 @@ index f4925b66..730d4692 100644
      // TODO: background color
  }
  
-@@ -393,6 +667,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +778,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -5485,7 +5923,7 @@ index f4925b66..730d4692 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +717,392 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +828,404 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -5571,13 +6009,16 @@ index f4925b66..730d4692 100644
 +     * 60 Hz tick: opendir, readdir and stat/open/pread/close per slot file on the main thread. */
 +    if (!_remoteFrameMapping && now < _remoteFrameSelectionRefresh)
 +        return _remoteFrameValid;
-+    if (_remoteFrameMapping && now < _remoteFrameSelectionRefresh) {
++    if (_remoteFrameMapping && now < _remoteFrameSelectionRefresh &&
++        _remoteFrameWidth == (unsigned)frameTargets[0].width &&
++        _remoteFrameHeight == (unsigned)frameTargets[0].height) {
 +        snprintf(path, sizeof(path), "%s", _remoteFrameMappingPath);
 +        goto selectedFrame;
 +    }
 +    _remoteFrameSelectionRefresh = now + 0.25;
 +    bestPath[0] = bestBlackPath[0] = '\0';
 +    uint64_t bestMtime = 0, bestBlackMtime = 0;
++    BOOL bestIsRoot = NO, bestBlackIsRoot = NO;
 +    BOOL bestSoftware = NO;
 +
 +    char prefix[32];
@@ -5609,8 +6050,10 @@ index f4925b66..730d4692 100644
 +                head.dataSize == (uint64_t)head.bytesPerRow * head.height &&
 +                head.dataSize <= 64u * 1024u * 1024u);
 +            close(cfd);
-+            BOOL matchesWindow = NO;
-+            for (unsigned i = 0; i < frameTargetCount; ++i)
++            BOOL matchesRoot = (head.width == (unsigned)frameTargets[0].width &&
++                                head.height == (unsigned)frameTargets[0].height);
++            BOOL matchesWindow = matchesRoot;
++            for (unsigned i = 1; i < frameTargetCount && !matchesWindow; ++i)
 +                if (head.width == (unsigned)frameTargets[i].width &&
 +                    head.height == (unsigned)frameTargets[i].height)
 +                    matchesWindow = YES;
@@ -5641,15 +6084,22 @@ index f4925b66..730d4692 100644
 +
 +            if (hasPixels) {
 +                BOOL software = (head.pixelFormat & 0x80000000u) != 0;
-+                if ((software && !bestSoftware) ||
-+                    (software == bestSoftware && updateTime > bestMtime)) {
++                if (!bestPath[0] ||
++                    (matchesRoot && !bestIsRoot) ||
++                    (matchesRoot == bestIsRoot && ((software && !bestSoftware) || (software == bestSoftware && updateTime > bestMtime)))) {
++                    bestIsRoot = matchesRoot;
 +                    bestSoftware = software;
 +                    bestMtime = updateTime;
 +                    snprintf(bestPath, sizeof(bestPath), "%s", candidate);
 +                }
 +            } else if (updateTime > bestBlackMtime) {
-+                bestBlackMtime = updateTime;
-+                snprintf(bestBlackPath, sizeof(bestBlackPath), "%s", candidate);
++                if (!bestBlackPath[0] ||
++                    (matchesRoot && !bestBlackIsRoot) ||
++                    (matchesRoot == bestBlackIsRoot && updateTime > bestBlackMtime)) {
++                    bestBlackIsRoot = matchesRoot;
++                    bestBlackMtime = updateTime;
++                    snprintf(bestBlackPath, sizeof(bestBlackPath), "%s", candidate);
++                }
 +            }
 +        }
 +        closedir(dir);
@@ -5878,7 +6328,7 @@ index f4925b66..730d4692 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -470,14 +1152,32 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +1275,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -5912,7 +6362,7 @@ index f4925b66..730d4692 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1188,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1311,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -5938,7 +6388,7 @@ index f4925b66..730d4692 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -543,6 +1262,21 @@ static NSData *makeWindowIcon() {
+@@ -543,6 +1385,21 @@ static NSData *makeWindowIcon() {
  - (void) makeKey {
      [self ensureMapped];
      XRaiseWindow(_display, _window);
@@ -5960,8 +6410,8 @@ index f4925b66..730d4692 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1293,29 @@ static NSData *makeWindowIcon() {
-     XRaiseWindow(_display, _window);
+@@ -551,15 +1408,72 @@ static NSData *makeWindowIcon() {
+ - (void) captureEvents {
  }
  
 +/* darling-lol: AppKit asks every window whether it is miniaturized on every event poll (NSWindow
@@ -5971,6 +6421,50 @@ index f4925b66..730d4692 100644
 +#define RCLOL_MINI_SLOTS 32
 +static struct { Window window; uint64_t stamp; BOOL value; } rclolMini[RCLOL_MINI_SLOTS];
 +
+ - (void) miniaturize {
+     XIconifyWindow(_display, _window, DefaultScreen(_display));
++    unsigned slot = (unsigned) (_window % RCLOL_MINI_SLOTS);
++    rclolMini[slot].window = _window;
++    rclolMini[slot].stamp = mach_absolute_time();
++    rclolMini[slot].value = YES;
+ }
+ 
+ - (void) deminiaturize {
+-    XRaiseWindow(_display, _window);
++    [self ensureMapped];
++    XMapRaised(_display, _window);
++    Atom netActive = XInternAtom(_display, "_NET_ACTIVE_WINDOW", False);
++    XEvent act = {0};
++    act.xclient.type = ClientMessage;
++    act.xclient.window = _window;
++    act.xclient.message_type = netActive;
++    act.xclient.format = 32;
++    act.xclient.data.l[0] = 1; /* source: normal application */
++    act.xclient.data.l[1] = CurrentTime;
++    XSendEvent(_display, DefaultRootWindow(_display), False,
++               SubstructureRedirectMask | SubstructureNotifyMask, &act);
++    XFlush(_display);
++
++    unsigned slot = (unsigned) (_window % RCLOL_MINI_SLOTS);
++    rclolMini[slot].window = _window;
++    rclolMini[slot].stamp = mach_absolute_time();
++    rclolMini[slot].value = NO;
++}
++
++- (void) propertyNotifyNetWmState {
++    unsigned slot = (unsigned) (_window % RCLOL_MINI_SLOTS);
++    BOOL wasMini = (rclolMini[slot].window == _window && rclolMini[slot].stamp != 0) ? rclolMini[slot].value : NO;
++    rclolMini[slot].stamp = 0;
++    BOOL isMini = [self isMiniaturized];
++    if (wasMini != isMini) {
++        if (isMini && [_delegate respondsToSelector: @selector(platformWindowMiniaturized:)]) {
++            [_delegate platformWindowMiniaturized: self];
++        } else if (!isMini && [_delegate respondsToSelector: @selector(platformWindowDeminiaturized:)]) {
++            [_delegate platformWindowDeminiaturized: self];
++        }
++    }
+ }
+ 
  - (BOOL) isMiniaturized {
 +    static mach_timebase_info_data_t tb;
 +    if (tb.denom == 0) mach_timebase_info(&tb);
@@ -5990,20 +6484,28 @@ index f4925b66..730d4692 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -593,8 +1349,10 @@ static NSData *makeWindowIcon() {
+@@ -593,14 +1507,13 @@ static NSData *makeWindowIcon() {
      if (_cglContext == NULL) {
          CGLError error;
  
 -        if ((error = CGLCreateContext(NULL, NULL, &_cglContext)) !=
 -            kCGLNoError) {
+-            NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
 +        // An alpha surface needs a context from its own config.
 +        error = _hasAlpha ? CGLCreateContextForWindow(_cglWindow, &_cglContext)
 +                          : CGLCreateContext(NULL, NULL, &_cglContext);
 +        if (error != kCGLNoError) {
-             NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
++            NSLog(@"CGLCreateContext failed at %s %d with error %d (non-fatal)", __FILE__,
                    __LINE__, error);
- 
-@@ -615,6 +1373,12 @@ static NSData *makeWindowIcon() {
+-
+-            [NSException raise: NSGenericException
+-                        format: @"Failed to create GL context, CGL error %d",
+-                                error];
++            return;
+         }
+         if ((error = CGLContextMakeCurrentAndAttachToWindow(
+                      _cglContext, _cglWindow)) != kCGLNoError)
+@@ -615,6 +1528,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -6016,7 +6518,7 @@ index f4925b66..730d4692 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1416,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1571,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -6025,7 +6527,7 @@ index f4925b66..730d4692 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1430,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1585,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -6033,7 +6535,7 @@ index f4925b66..730d4692 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,19 +1475,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,19 +1630,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
@@ -6446,16 +6948,36 @@ index edb45627..581991d1 100644
  - (NSSize) convertSize: (NSSize) size toView: (NSView *) viewOrNil;
  - (NSRect) convertRect: (NSRect) rect fromView: (NSView *) viewOrNil;
 diff --git a/AppKit/include/AppKit/NSWindow.h b/AppKit/include/AppKit/NSWindow.h
-index a83c4d75..575c3581 100644
+index a83c4d75..de7bf559 100644
 --- a/AppKit/include/AppKit/NSWindow.h
 +++ b/AppKit/include/AppKit/NSWindow.h
-@@ -188,6 +188,16 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -43,6 +43,7 @@ enum {
+     NSMiniaturizableWindowMask = 0x04,
+     NSResizableWindowMask = 0x08,
+     NSTexturedBackgroundWindowMask = 0x100,
++    NSFullSizeContentViewWindowMask = 0x8000,
+ };
+ 
+ // New NSWindowStyleMask constants
+@@ -118,6 +119,11 @@ typedef NS_ENUM(NSUInteger, NSWindowSharingType) {
+     NSWindowSharingReadWrite = 0x02
+ };
+ 
++typedef NS_ENUM(NSInteger, NSWindowTitleVisibility) {
++    NSWindowTitleVisibilityVisible = 0,
++    NSWindowTitleVisibilityHidden = 1,
++};
++
+ typedef int NSSelectionDirection;
+ 
+ APPKIT_EXPORT const NSNotificationName NSWindowDidBecomeKeyNotification;
+@@ -188,6 +194,16 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      int _cursorRectsDisabled;
      int _flushDisabled;
  
 +    /* darling-lol M57: modern AppKit window properties Chromium reads. */
 +    BOOL _titlebarAppearsTransparent;
-+    NSInteger _titleVisibility;
++    NSWindowTitleVisibility _titleVisibility;
 +    BOOL _restorable;
 +    NSString *_subtitle;
 +    NSInteger _tabbingMode;
@@ -6466,7 +6988,7 @@ index a83c4d75..575c3581 100644
      BOOL _isOpaque;
      BOOL _isVisible;
      BOOL _isDocumentEdited;
-@@ -217,6 +227,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -217,6 +233,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      BOOL _showsToolbarButton;
      BOOL _ignoresMouseEvents;
      BOOL _isMovableByWindowBackground;
@@ -6474,7 +6996,7 @@ index a83c4d75..575c3581 100644
      BOOL _allowsToolTipsWhenApplicationIsInactive;
      BOOL _defaultButtonCellKeyEquivalentDisabled;
      BOOL _autorecalculatesKeyViewLoop;
-@@ -240,6 +251,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -240,6 +257,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      NSMutableArray *_drawers;
      NSToolbar *_toolbar;
      NSWindowAnimationContext *_animationContext;
@@ -6482,7 +7004,7 @@ index a83c4d75..575c3581 100644
  
      NSRect _savedFrame;
      NSPoint _mouseDownLocationInWindow;
-@@ -425,6 +437,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -425,6 +443,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (NSButton *) standardWindowButton: (NSWindowButton) value;
  - (NSButtonCell *) defaultButtonCell;
  - (NSWindow *) attachedSheet;
@@ -6490,15 +7012,17 @@ index a83c4d75..575c3581 100644
  
  - (id) windowController;
  - (NSArray *) drawers;
-@@ -450,6 +463,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -450,6 +469,9 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (BOOL) isMainWindow;
  - (BOOL) isMiniaturized;
  - (BOOL) isMovable;
 +- (void) performWindowDragWithEvent:(NSEvent *)event;
++- (BOOL) areStandardWindowButtonsHidden;
++- (void) updateDecorationsForStandardWindowButtons;
  - (BOOL) inLiveResize;
  - (BOOL) canBecomeKeyWindow;
  - (BOOL) canBecomeMainWindow;
-@@ -458,6 +472,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -458,6 +480,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  
  - (NSPoint) convertBaseToScreen: (NSPoint) point;
  - (NSPoint) convertScreenToBase: (NSPoint) point;
@@ -6509,8 +7033,8 @@ index a83c4d75..575c3581 100644
 +
 +- (BOOL) titlebarAppearsTransparent;
 +- (void) setTitlebarAppearsTransparent: (BOOL) value;
-+- (NSInteger) titleVisibility;
-+- (void) setTitleVisibility: (NSInteger) value;
++- (NSWindowTitleVisibility) titleVisibility;
++- (void) setTitleVisibility: (NSWindowTitleVisibility) value;
 +- (BOOL) movableByWindowBackground;
 +- (NSUInteger) occlusionState;
 +- (BOOL) isRestorable;
@@ -8847,7 +9371,7 @@ index 039d8c94..b518c961 100644
  #import <fontconfig/fontconfig.h>
  
 diff --git a/QuartzCore/CALayer.m b/QuartzCore/CALayer.m
-index 5dcac115..5de4f03f 100644
+index 5dcac115..ea5d8421 100644
 --- a/QuartzCore/CALayer.m
 +++ b/QuartzCore/CALayer.m
 @@ -1,8 +1,243 @@
@@ -9216,7 +9740,7 @@ index 5dcac115..5de4f03f 100644
      _transform = value;
  }
  
-@@ -236,6 +549,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -236,6 +549,16 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) dealloc {
@@ -9224,10 +9748,16 @@ index 5dcac115..5de4f03f 100644
 +        [child _setSuperLayer: nil];
 +        [child _setContext: nil];
 +    }
++    if (_backgroundColor) CGColorRelease(_backgroundColor);
++    if (_textureId && _context) [_context deleteTextureId: _textureId];
++    [_textureId release];
++    [_contents release];
++    [_contentsGravity release];
++    [_shadowPath release];
      [_sublayers release];
      [_animations release];
      [_minificationFilter release];
-@@ -258,6 +575,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -258,6 +581,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [self setSublayers: [_sublayers arrayByAddingObject: layer]];
  }
  
@@ -9261,7 +9791,7 @@ index 5dcac115..5de4f03f 100644
  - (void) replaceSublayer: (CALayer *) layer with: (CALayer *) other {
      NSMutableArray *layers = [_sublayers mutableCopy];
      NSUInteger index = [_sublayers indexOfObjectIdenticalTo: layer];
-@@ -298,9 +642,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -298,9 +648,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) removeFromSuperlayer {
@@ -9277,7 +9807,7 @@ index 5dcac115..5de4f03f 100644
  }
  
  - (void) setNeedsDisplay {
-@@ -319,6 +668,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -319,6 +674,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [_context startTimerIfNeeded];
  }
  
@@ -9297,7 +9827,7 @@ index 5dcac115..5de4f03f 100644
  - (CAAnimation *) animationForKey: (NSString *) key {
      return [_animations objectForKey: key];
  }
-@@ -364,4 +726,119 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -364,4 +732,125 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _textureId = value;
  }
  
@@ -9313,7 +9843,13 @@ index 5dcac115..5de4f03f 100644
 +- (void) setCornerRadius: (CGFloat) v { _cornerRadius = v; }
 +
 +- (CGColorRef) backgroundColor { return _backgroundColor; }
-+- (void) setBackgroundColor: (CGColorRef) v { _backgroundColor = v; }
++- (void) setBackgroundColor: (CGColorRef) v {
++    if (_backgroundColor != v) {
++        if (_backgroundColor) CGColorRelease(_backgroundColor);
++        _backgroundColor = v ? CGColorRetain(v) : NULL;
++        if (_context) [_context startTimerIfNeeded];
++    }
++}
 +
 +- (CGFloat) borderWidth { return _borderWidth; }
 +- (void) setBorderWidth: (CGFloat) v { _borderWidth = v; }
@@ -11181,3 +11717,754 @@ index 53bacc46..3c6adfb7 100644
  - (void) beginSheetForDirectory: (NSString *) path
                             file: (NSString *) name
                   modalForWindow: (NSWindow *) docWindow
+diff --git a/AppKit/NSStatusBar.m b/AppKit/NSStatusBar.m
+index a9989e14..55cc7c17 100644
+--- a/AppKit/NSStatusBar.m
++++ b/AppKit/NSStatusBar.m
+@@ -75,13 +75,31 @@ static NSStatusBar *_statusBar = nil;
+     return NO;
+ }
+ - (void) removeStatusItem: (NSStatusItem *) item {
++    [item _removeTrayIcon];
++    [_statusItems removeObjectIdenticalTo: item];
+ }
+ - (NSStatusItem *) statusItemWithLength: (CGFloat) length {
+     NSStatusItem *item = [[NSStatusItem alloc] init];
+     [item setLength: length];
+     [_statusItems addObject: item];
++#ifndef WIN32
++    [item _createTrayIcon];
++#endif
+     return [item autorelease];
+ }
++
++- (void) _dockAllStatusItems {
++    for (NSStatusItem *item in _statusItems) {
++        if ([item respondsToSelector: @selector(_ensureTrayDocked)]) {
++            [item _ensureTrayDocked];
++        }
++    }
++}
++
++- (NSArray *) statusItems {
++    return [[_statusItems copy] autorelease];
++}
++
+ - (CGFloat) thickness {
+ #ifdef WIN32
+     HWND hWnd = FindWindow("Shell_TrayWnd", "");
+@@ -97,8 +115,9 @@ static NSStatusBar *_statusBar = nil;
+         // Fall back to Windows XP's default taskbar height
+         return 30;
+     }
++#else
++    return 24.0;
+ #endif
+-    return 42;
+ }
+ 
+ #ifdef WIN32
+@@ -127,12 +146,10 @@ static NSStatusBar *_statusBar = nil;
+ #endif
+ 
+ - (void) handleApplicationClose {
+-#ifdef WIN32
+     for (int i = 0; i < _statusItems.count; i++) {
+         NSStatusItem *item = [_statusItems objectAtIndex: i];
+         [item _removeTrayIcon];
+     }
+-#endif
+ }
+ 
+ @end
+diff --git a/AppKit/NSStatusItem+Private.h b/AppKit/NSStatusItem+Private.h
+index e954fd7b..535e4c08 100644
+--- a/AppKit/NSStatusItem+Private.h
++++ b/AppKit/NSStatusItem+Private.h
+@@ -23,6 +23,11 @@
+                  intoMenu: (HMENU) menu;
+ HWND _eventhWnd;
+ NOTIFYICONDATA niData;
++#else
++- (void) _createTrayIcon;
++- (void) _removeTrayIcon;
++- (void) _drawTrayIcon;
++- (void) handleTrayXEvent: (void *) eventPtr;
+ #endif
+ - (void) _showContextMenu;
+ @end
+\ No newline at end of file
+diff --git a/AppKit/NSStatusItem.m b/AppKit/NSStatusItem.m
+index eb5c7a40..736a1705 100644
+--- a/AppKit/NSStatusItem.m
++++ b/AppKit/NSStatusItem.m
+@@ -26,12 +26,73 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSStatusItem+Private.h>
+ #import <AppKit/NSStatusItem.h>
+ #import <AppKit/NSWindow.h>
++#import <AppKit/NSEvent.h>
++#import <AppKit/NSApplication.h>
+ #ifdef WIN32
+ #import <AppKit/NSStatusBar_(Private).h>
+ #import <AppKit/Win32Window.h>
+ #import <Foundation/NSPlatform_win32.h>
++#else
++#import "X11Display.h"
++#import <X11/Xlib.h>
++#import <X11/Xatom.h>
++#import <X11/Xutil.h>
+ #endif
+ 
++@implementation NSStatusBarButton
++
++@synthesize appearsDisabled = _appearsDisabled;
++
++- (instancetype) initWithStatusItem: (NSStatusItem *) statusItem {
++    self = [super initWithFrame: NSMakeRect(0, 0, 24, 24)];
++    if (self) {
++        _statusItem = statusItem;
++    }
++    return self;
++}
++
++- (void) setImage: (NSImage *) image {
++    [super setImage: image];
++    if (_syncingToItem || !_statusItem) return;
++    _syncingToItem = YES;
++    [_statusItem setImage: image];
++    _syncingToItem = NO;
++}
++
++- (void) setTitle: (NSString *) title {
++    [super setTitle: title];
++    if (_syncingToItem || !_statusItem) return;
++    _syncingToItem = YES;
++    [_statusItem setTitle: title];
++    _syncingToItem = NO;
++}
++
++- (void) setTarget: (id) target {
++    [super setTarget: target];
++    if (_syncingToItem || !_statusItem) return;
++    _syncingToItem = YES;
++    [_statusItem setTarget: target];
++    _syncingToItem = NO;
++}
++
++- (void) setAction: (SEL) action {
++    [super setAction: action];
++    if (_syncingToItem || !_statusItem) return;
++    _syncingToItem = YES;
++    [_statusItem setAction: action];
++    _syncingToItem = NO;
++}
++
++- (void) setToolTip: (NSString *) toolTip {
++    [super setToolTip: toolTip];
++    if (_syncingToItem || !_statusItem) return;
++    _syncingToItem = YES;
++    [_statusItem setToolTip: toolTip];
++    _syncingToItem = NO;
++}
++
++@end
++
+ @implementation NSStatusItem
+ 
+ #pragma mark Private Methods
+@@ -258,20 +319,319 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
+ #endif
+ 
++#ifndef WIN32
++
++- (void) _ensureTrayDocked {
++    if (_x11TrayWindow == 0) {
++        [self _createTrayIcon];
++        return;
++    }
++    if (_x11TrayDocked) return;
++
++    X11Display *d = (X11Display *) [NSDisplay currentDisplay];
++    Display *dpy = [d display];
++    if (dpy == NULL) return;
++
++    int screen = DefaultScreen(dpy);
++    char tray_atom_name[32];
++    snprintf(tray_atom_name, sizeof(tray_atom_name), "_NET_SYSTEM_TRAY_S%d", screen);
++    Atom tray_atom = XInternAtom(dpy, tray_atom_name, False);
++    Window tray_manager = XGetSelectionOwner(dpy, tray_atom);
++
++    if (tray_manager != None) {
++        XClientMessageEvent dock_ev;
++        memset(&dock_ev, 0, sizeof(dock_ev));
++        dock_ev.type = ClientMessage;
++        dock_ev.window = tray_manager;
++        dock_ev.message_type = XInternAtom(dpy, "_NET_SYSTEM_TRAY_OPCODE", False);
++        dock_ev.format = 32;
++        dock_ev.data.l[0] = CurrentTime;
++        dock_ev.data.l[1] = 0; // SYSTEM_TRAY_REQUEST_DOCK
++        dock_ev.data.l[2] = (Window) _x11TrayWindow;
++        dock_ev.data.l[3] = 0;
++        dock_ev.data.l[4] = 0;
++
++        XSendEvent(dpy, tray_manager, False, StructureNotifyMask, (XEvent *) &dock_ev);
++        XSendEvent(dpy, tray_manager, False, NoEventMask, (XEvent *) &dock_ev);
++        XMapRaised(dpy, (Window) _x11TrayWindow);
++        XSync(dpy, False);
++        _x11TrayDocked = YES;
++    }
++}
++
++- (void) _drawTrayIcon {
++    if (_x11TrayWindow == 0) return;
++    X11Display *d = (X11Display *) [NSDisplay currentDisplay];
++    Display *dpy = [d display];
++    if (dpy == NULL) return;
++
++    if (!_x11TrayDocked) {
++        [self _ensureTrayDocked];
++    }
++
++    Window root_ret;
++    int x_ret = 0, y_ret = 0;
++    unsigned int width = 24, height = 24, border_ret = 0, depth_ret = 24;
++    XGetGeometry(dpy, (Window)_x11TrayWindow, &root_ret, &x_ret, &y_ret,
++                 &width, &height, &border_ret, &depth_ret);
++    if (width == 0 || height == 0) {
++        width = 24;
++        height = 24;
++    }
++
++    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
++    size_t bytesPerRow = width * 4;
++    CGContextRef context = CGBitmapContextCreate(
++            NULL, width, height, 8, bytesPerRow, colorSpace,
++            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
++    CGColorSpaceRelease(colorSpace);
++    if (context == NULL) return;
++
++    @autoreleasepool {
++        NSGraphicsContext *graphicsContext =
++                [NSGraphicsContext graphicsContextWithGraphicsPort: context
++                                                           flipped: NO];
++
++        [NSGraphicsContext saveGraphicsState];
++        [NSGraphicsContext setCurrentContext: graphicsContext];
++
++        CGContextClearRect(context, CGRectMake(0, 0, width, height));
++
++        NSImage *img = _image ? _image : [_button image];
++        if (img) {
++            NSSize imgSize = [img size];
++            CGFloat drawW = width;
++            CGFloat drawH = height;
++            if (imgSize.width > 0 && imgSize.height > 0) {
++                CGFloat aspect = imgSize.width / imgSize.height;
++                if (aspect >= 1.0) {
++                    drawH = width / aspect;
++                } else {
++                    drawW = height * aspect;
++                }
++            }
++            CGFloat pad = 2.0;
++            if (drawW > width - pad * 2) drawW = width - pad * 2;
++            if (drawH > height - pad * 2) drawH = height - pad * 2;
++            if (drawW < 1.0) drawW = 1.0;
++            if (drawH < 1.0) drawH = 1.0;
++
++            NSRect drawRect = NSMakeRect((width - drawW) / 2.0,
++                                         (height - drawH) / 2.0,
++                                         drawW, drawH);
++            [img drawInRect: drawRect
++                   fromRect: NSZeroRect
++                  operation: NSCompositeSourceOver
++                   fraction: 1.0];
++        }
++
++        [NSGraphicsContext restoreGraphicsState];
++    }
++
++    const uint8_t *rowBytes = CGBitmapContextGetData(context);
++    int screen = DefaultScreen(dpy);
++    Visual *visual = DefaultVisual(dpy, screen);
++
++    XImage *ximage = XCreateImage(dpy, visual, depth_ret, ZPixmap, 0,
++                                  (char *)rowBytes, width, height, 32, bytesPerRow);
++    if (ximage) {
++        GC gc = XCreateGC(dpy, (Window)_x11TrayWindow, 0, NULL);
++        XPutImage(dpy, (Window)_x11TrayWindow, gc, ximage, 0, 0, 0, 0, width, height);
++        XFreeGC(dpy, gc);
++        ximage->data = NULL;
++        XDestroyImage(ximage);
++    }
++
++    CGContextRelease(context);
++    XFlush(dpy);
++}
++
++- (void) _createTrayIcon {
++    if (_x11TrayWindow != 0) {
++        [self _ensureTrayDocked];
++        return;
++    }
++    X11Display *d = (X11Display *) [NSDisplay currentDisplay];
++    Display *dpy = [d display];
++    if (dpy == NULL) return;
++
++    int screen = DefaultScreen(dpy);
++
++    XSetWindowAttributes attr;
++    memset(&attr, 0, sizeof(attr));
++    attr.background_pixel = 0;
++    attr.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
++                      EnterWindowMask | LeaveWindowMask | StructureNotifyMask;
++
++    Window root = DefaultRootWindow(dpy);
++    Window tray_win = XCreateWindow(dpy, root, 0, 0, 24, 24, 0,
++                                    CopyFromParent, InputOutput, CopyFromParent,
++                                    CWBackPixel | CWEventMask, &attr);
++    if (tray_win == 0) return;
++
++    _x11TrayWindow = (unsigned long) tray_win;
++
++    long xembed_info[2] = { 0, 1 };
++    Atom xembed_atom = XInternAtom(dpy, "_XEMBED_INFO", False);
++    XChangeProperty(dpy, tray_win, xembed_atom, xembed_atom, 32, PropModeReplace,
++                    (unsigned char *) xembed_info, 2);
++
++    const char *name = _toolTip ? [_toolTip UTF8String] : (_title ? [_title UTF8String] : "DarlingTray");
++    XStoreName(dpy, tray_win, name);
++    XChangeProperty(dpy, tray_win, XInternAtom(dpy, "_NET_WM_NAME", False),
++                    XInternAtom(dpy, "UTF8_STRING", False), 8, PropModeReplace,
++                    (const unsigned char *) name, strlen(name));
++
++    [d setWindow: self forID: (XID) tray_win];
++
++    [self _ensureTrayDocked];
++    [self _drawTrayIcon];
++}
++
++- (void) _removeTrayIcon {
++    if (_x11TrayWindow != 0) {
++        X11Display *d = (X11Display *) [NSDisplay currentDisplay];
++        Display *dpy = [d display];
++        if (dpy) {
++            [d setWindow: nil forID: (XID) _x11TrayWindow];
++            XDestroyWindow(dpy, (Window) _x11TrayWindow);
++            XFlush(dpy);
++        }
++        _x11TrayWindow = 0;
++        _x11TrayDocked = NO;
++    }
++}
++
++- (void) _toggleAppWindows {
++    [NSApp activateIgnoringOtherApps: YES];
++    NSArray *windows = [NSApp windows];
++    BOOL anyVisible = NO;
++    for (NSWindow *w in windows) {
++        if ([w isVisible] && ![w isMiniaturized]) {
++            anyVisible = YES;
++            break;
++        }
++    }
++    for (NSWindow *w in windows) {
++        if (anyVisible) {
++            [w orderOut: nil];
++        } else {
++            if ([w isMiniaturized]) {
++                [w deminiaturize: nil];
++            }
++            [w makeKeyAndOrderFront: nil];
++        }
++    }
++}
++
++- (void) handleTrayXEvent: (void *) eventPtr {
++    XEvent *ev = (XEvent *) eventPtr;
++    X11Display *d = (X11Display *) [NSDisplay currentDisplay];
++    Display *dpy = [d display];
++
++    switch (ev->type) {
++    case Expose:
++        if (ev->xexpose.count == 0) {
++            [self _drawTrayIcon];
++        }
++        break;
++
++    case ConfigureNotify:
++    case ReparentNotify:
++        if (dpy && _x11TrayWindow != 0) {
++            XMapWindow(dpy, (Window) _x11TrayWindow);
++        }
++        [self _drawTrayIcon];
++        break;
++
++    case ClientMessage:
++        if (dpy) {
++            Atom xembed = XInternAtom(dpy, "_XEMBED", False);
++            if (ev->xclient.message_type == xembed) {
++                long message = ev->xclient.data.l[1];
++                if (message == 0 /* XEMBED_EMBEDDED_NOTIFY */) {
++                    _x11TrayDocked = YES;
++                    if (_x11TrayWindow != 0) {
++                        XMapWindow(dpy, (Window) _x11TrayWindow);
++                    }
++                    [self _drawTrayIcon];
++                }
++            }
++        }
++        break;
++
++    case ButtonRelease:
++        if (ev->xbutton.button == Button1) {
++            SEL act = _action;
++            id tgt = _target;
++            if (!act && _button) {
++                act = [_button action];
++                tgt = [_button target];
++            }
++            if (act) {
++                id sender = _button ? (id) _button : (id) self;
++                [NSApp sendAction: act to: tgt from: sender];
++            } else if (_menu) {
++                [self _showContextMenu];
++            } else {
++                [self _toggleAppWindows];
++            }
++        } else if (ev->xbutton.button == Button3) {
++            if (_menu) {
++                [self _showContextMenu];
++            } else {
++                SEL act = _action;
++                id tgt = _target;
++                if (!act && _button) {
++                    act = [_button action];
++                    tgt = [_button target];
++                }
++                if (act) {
++                    id sender = _button ? (id) _button : (id) self;
++                    [NSApp sendAction: act to: tgt from: sender];
++                }
++            }
++        }
++        break;
++
++    default:
++        break;
++    }
++}
++
++#endif
++
+ #pragma mark Public Methods
+ 
+ - (id) init {
+     self = [super init];
+     if (self) {
++        _enabled = YES;
+ #ifdef WIN32
+         _trayIcon = NULL;
+         _trayIconID = -1;
+         _win32Menu = NULL;
++#else
++        _x11TrayWindow = 0;
++        _x11TrayDocked = NO;
+ #endif
+     }
+     return self;
+ }
+ 
++- (void) dealloc {
++    [self _removeTrayIcon];
++    [_image release];
++    [_alternateImage release];
++    [_title release];
++    [_atrTitle release];
++    [_view release];
++    [_menu release];
++    [_toolTip release];
++    [_button release];
++    [super dealloc];
++}
++
+ - (NSStatusBar *) statusBar {
+     return [NSStatusBar systemStatusBar];
+ }
+@@ -281,6 +641,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ }
+ - (void) setAction: (SEL) action {
+     _action = action;
++    if (_button && !_syncingButton && [_button action] != _action) {
++        _syncingButton = YES;
++        [_button setAction: _action];
++        _syncingButton = NO;
++    }
+ }
+ - (SEL) doubleAction {
+     return _doubleAction;
+@@ -293,6 +658,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ }
+ - (void) setTarget: (id) target {
+     _target = target;
++    if (_button && !_syncingButton && [_button target] != _target) {
++        _syncingButton = YES;
++        [_button setTarget: _target];
++        _syncingButton = NO;
++    }
+ }
+ 
+ - (NSImage *) image {
+@@ -307,7 +677,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     if (_trayIconID <= -1) {
+         [self _createTrayIcon];
+     }
++#else
++    if (_x11TrayWindow == 0) {
++        [self _createTrayIcon];
++    } else {
++        [self _drawTrayIcon];
++    }
+ #endif
++    if (_button && !_syncingButton && [_button image] != _image) {
++        _syncingButton = YES;
++        [_button setImage: _image];
++        _syncingButton = NO;
++    }
+ }
+ - (NSImage *) alternateImage {
+     return _alternateImage;
+@@ -328,10 +709,48 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     [_title release];
+     _title = nil;
+     _title = [title copy];
++    if (_x11TrayWindow == 0) {
++        [self _createTrayIcon];
++    } else {
++        [self _drawTrayIcon];
++    }
+ #endif
++    if (_button && !_syncingButton && ![[_button title] isEqualToString: _title]) {
++        _syncingButton = YES;
++        [_button setTitle: _title];
++        _syncingButton = NO;
++    }
++}
++
++- (NSString *) toolTip {
++    return _toolTip;
+ }
++
+ - (void) setToolTip: (NSString *) toolTip {
++    [_toolTip release];
++    _toolTip = [toolTip copy];
++#ifndef WIN32
++    if (_x11TrayWindow != 0) {
++        X11Display *d = (X11Display *) [NSDisplay currentDisplay];
++        Display *dpy = [d display];
++        if (dpy) {
++            const char *name = _toolTip ? [_toolTip UTF8String] : "";
++            XStoreName(dpy, (Window)_x11TrayWindow, name);
++            XChangeProperty(dpy, (Window)_x11TrayWindow,
++                            XInternAtom(dpy, "_NET_WM_NAME", False),
++                            XInternAtom(dpy, "UTF8_STRING", False), 8, PropModeReplace,
++                            (const unsigned char *) name, strlen(name));
++            XFlush(dpy);
++        }
++    }
++#endif
++    if (_button && !_syncingButton && ![[_button toolTip] isEqualToString: _toolTip]) {
++        _syncingButton = YES;
++        [_button setToolTip: _toolTip];
++        _syncingButton = NO;
++    }
+ }
++
+ - (NSAttributedString *) attributedTitle {
+     return _atrTitle;
+ }
+@@ -350,7 +769,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     [_view release];
+     _view = nil;
+     _view = [view copy];
+-    // Start capture timer
+ }
+ 
+ - (BOOL) highlightMode {
+@@ -371,21 +789,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #ifdef WIN32
+     int traySizeX = GetSystemMetrics(SM_CXSMICON);
+     int traySizeY = GetSystemMetrics(SM_CYSMICON);
+-    // Make sure we return a value that will ensure icon will not be clipped
+-    // with non-standard tray icon sizes
+-    NSLog(@"X:%d Y:%d", traySizeX, traySizeY);
+     if (traySizeX > traySizeY) {
+         return traySizeY;
+     } else {
+         return traySizeX;
+     }
+-#endif
++#else
++    if (_length <= 0) {
++        return 24.0;
++    }
+     return _length;
++#endif
+ }
+ - (void) setLength: (CGFloat) len {
+-#ifndef WIN32
+     _length = len;
+-#endif
+ }
+ 
+ - (NSMenu *) menu {
+@@ -411,7 +828,54 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #endif
+ }
+ 
++- (NSStatusBarButton *) button {
++    if (_button == nil) {
++        _button = [[NSStatusBarButton alloc] initWithStatusItem: self];
++        _syncingButton = YES;
++        if (_image) [_button setImage: _image];
++        if (_title) [_button setTitle: _title];
++        if (_target) [_button setTarget: _target];
++        if (_action) [_button setAction: _action];
++        if (_toolTip) [_button setToolTip: _toolTip];
++        _syncingButton = NO;
++#ifndef WIN32
++        if (_x11TrayWindow == 0) {
++            [self _createTrayIcon];
++        }
++#endif
++    }
++    return _button;
++}
++
+ - (void) popUpStatusItemMenu: (NSMenu *) menu {
++    if (menu == nil) return;
++#ifndef WIN32
++    X11Display *d = (X11Display *) [NSDisplay currentDisplay];
++    Display *dpy = [d display];
++    if (dpy == NULL) return;
++
++    Window root_ret, child_ret;
++    int root_x = 0, root_y = 0, win_x = 0, win_y = 0;
++    unsigned int mask_ret = 0;
++    XQueryPointer(dpy, DefaultRootWindow(dpy), &root_ret, &child_ret,
++                  &root_x, &root_y, &win_x, &win_y, &mask_ret);
++
++    NSRect mouseRect = NSMakeRect(root_x, root_y, 1, 1);
++    NSRect cocoaRect = [d frameForRootRect: mouseRect];
++    NSPoint mouseLoc = cocoaRect.origin;
++
++    NSEvent *event = [NSEvent mouseEventWithType: NSRightMouseDown
++                                        location: mouseLoc
++                                   modifierFlags: 0
++                                       timestamp: [NSDate timeIntervalSinceReferenceDate]
++                                    windowNumber: 0
++                                         context: [NSGraphicsContext currentContext]
++                                     eventNumber: 0
++                                      clickCount: 1
++                                        pressure: 1.0];
++
++    [NSMenu popUpContextMenu: menu withEvent: event forView: nil];
++#endif
+ }
+ 
+ - (void) _showContextMenu {
+@@ -426,6 +890,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     } else {
+         NSLog(@"win32Menu is null!");
+     }
++#else
++    if (_menu) {
++        [self popUpStatusItemMenu: _menu];
++    }
+ #endif
+ }
+ 
+diff --git a/AppKit/include/AppKit/NSStatusBar.h b/AppKit/include/AppKit/NSStatusBar.h
+index 1bea8abf..fb9a833a 100644
+--- a/AppKit/include/AppKit/NSStatusBar.h
++++ b/AppKit/include/AppKit/NSStatusBar.h
+@@ -36,4 +36,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ - (void) removeStatusItem: (NSStatusItem *) item;
+ - (NSStatusItem *) statusItemWithLength: (CGFloat) length;
+ - (CGFloat) thickness;
++- (void) _dockAllStatusItems;
++- (NSArray *) statusItems;
+ @end
+diff --git a/AppKit/include/AppKit/NSStatusItem.h b/AppKit/include/AppKit/NSStatusItem.h
+index 3d80edb5..32fd6370 100644
+--- a/AppKit/include/AppKit/NSStatusItem.h
++++ b/AppKit/include/AppKit/NSStatusItem.h
+@@ -19,10 +19,22 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
+ #import <CoreFoundation/CFBase.h>
+ #import <Foundation/Foundation.h>
++#import <AppKit/NSButton.h>
+ #ifdef WIN32
+ #import <windows.h>
+ #endif
+-@class NSStatusBar, NSImage, NSAttributedString, NSMenu, NSView, NSWindow;
++
++@class NSStatusBar, NSImage, NSAttributedString, NSMenu, NSView, NSWindow, NSStatusItem;
++
++@interface NSStatusBarButton : NSButton {
++    BOOL _appearsDisabled;
++    NSStatusItem *_statusItem;
++    BOOL _syncingToItem;
++}
++@property BOOL appearsDisabled;
++- (instancetype) initWithStatusItem: (NSStatusItem *) statusItem;
++@end
++
+ @interface NSStatusItem : NSObject {
+     SEL _action;
+     SEL _doubleAction;
+@@ -41,10 +53,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     CGFloat _length;
+     NSMenu *_menu;
+     NSInteger _actionMask;
++    NSString *_toolTip;
++    NSStatusBarButton *_button;
++    BOOL _syncingButton;
+ #ifdef WIN32
+     int _trayIconID;
+     HICON _trayIcon;
+     HMENU _win32Menu;
++#else
++    unsigned long _x11TrayWindow;
++    BOOL _x11TrayDocked;
+ #endif
+ }
+ - (NSStatusBar *) statusBar;
+@@ -63,6 +81,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
+ - (NSString *) title;
+ - (void) setTitle: (NSString *) title;
++- (NSString *) toolTip;
+ - (void) setToolTip: (NSString *) toolTip;
+ - (NSAttributedString *) attributedTitle;
+ - (void) setAttributedTitle: (NSAttributedString *) title;
+@@ -82,10 +101,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ - (NSMenu *) menu;
+ - (void) setMenu: (NSMenu *) menu;
+ 
++- (NSStatusBarButton *) button;
++
+ - (void) popUpStatusItemMenu: (NSMenu *) menu;
+ - (NSInteger) sendActionOn: (NSInteger) mask;
+ 
+ - (void) drawStatusBarBackgroundInRect: (NSRect) rect
+                          withHighlight: (BOOL) highlight;
+ 
++- (void) _ensureTrayDocked;
++- (void) _createTrayIcon;
++- (void) _removeTrayIcon;
++- (void) _drawTrayIcon;
++- (void) handleTrayXEvent: (void *) eventPtr;
++
+ @end
