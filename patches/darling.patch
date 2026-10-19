@@ -4062,10 +4062,10 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..99e0a5494 100644
+index 3e9cba226..6a4e81aef 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,887 @@
+@@ -1,38 +1,908 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -4557,6 +4557,29 @@ index 3e9cba226..99e0a5494 100644
 +	return result;
 +}
 +
++static uint32_t getTargetRefreshRate(void) {
++	static uint32_t sTargetRate = 0;
++	if (!sTargetRate) {
++		const char *hz = getenv("RCLOL_REFRESH_HZ");
++		int rate = hz ? atoi(hz) : 0;
++		if (rate > 0 && rate <= 1000) {
++			sTargetRate = (uint32_t)rate;
++		} else {
++			CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
++			if (mode) {
++				double dRate = CGDisplayModeGetRefreshRate(mode);
++				CGDisplayModeRelease(mode);
++				if (dRate > 0.0 && dRate <= 1000.0) {
++					sTargetRate = (uint32_t)(dRate + 0.5);
++				}
++			}
++		}
++		if (sTargetRate < 1)
++			sTargetRate = 60;
++	}
++	return sTargetRate;
++}
++
 +static void rendererBeginTimerF(CFRunLoopTimerRef timer, void *info) {
 +	(void)timer;
 +	(void)info;
@@ -4575,7 +4598,8 @@ index 3e9cba226..99e0a5494 100644
 +	uint64_t sequence = ++state.sequence;
 +
 +	/* Chromium 108 release BeginFrameArgs: frame/deadline/interval,
-+	 * BeginFrameId, trace id, type and critical-path flag. */
++	 * BeginFrameId, trace id, type and critical-path flag.
++	 * Always paced at 60 Hz (16.6ms) for Chromium 108 CEF compatibility. */
 +	unsigned char args[128] = {};
 +	*(uint64_t *)(args + 0) = nowUs;
 +	*(uint64_t *)(args + 8) = nowUs + 16666ULL;
@@ -4601,6 +4625,7 @@ index 3e9cba226..99e0a5494 100644
 +}
 +
 +static void startRendererBeginTimer(void) {
++	/* Chromium 108 frame sink expects standard 60 Hz runloop timer cadence */
 +	CFRunLoopTimerRef timer = CFRunLoopTimerCreate(NULL,
 +		CFAbsoluteTimeGetCurrent() + 2.0, 1.0 / 60.0, 0, 0,
 +		rendererBeginTimerF, NULL);
@@ -4815,24 +4840,21 @@ index 3e9cba226..99e0a5494 100644
 +
 +static void displayLinkTickFromRec(CVLinkStateRec* rec) {
 +	CVDisplayLinkOutputCallback callback = (CVDisplayLinkOutputCallback) rec->callback;
-+	if (traceLog != NULL) {
-+		/* darling-lol M58d: full continuity logging while the begin-frame
-+		 * stall is under diagnosis (previously capped at 32 records). */
-+		traceLog("PUMP cb=%p ticks=%llu\n", (uint64_t) callback, rec->ticks);
-+	}
++	traceLog("PUMP cb=%p ticks=%llu\n", (uint64_t) callback, rec->ticks);
 +	if (callback != NULL && rec->running && rec->refs) {
 +		rec->ticks++;
 +		struct mach_timebase_info timebase;
 +		mach_timebase_info(&timebase);
-+		uint64_t periodNs = 1000000000ull / 60ull;
++		uint32_t targetRate = getTargetRefreshRate();
++		uint64_t periodNs = 1000000000ull / (uint64_t)targetRate;
 +		uint64_t periodMach = periodNs * timebase.denom / timebase.numer;
 +
 +		uint64_t hostTime = mach_absolute_time();
 +		CVTimeStamp now = {};
 +		now.version = 0;
 +		now.hostTime = hostTime;
-+		now.videoTime = hostTime / periodMach;
-+		now.videoTimeScale = 60;
++		now.videoTime = periodMach > 0 ? (hostTime / periodMach) : 0;
++		now.videoTimeScale = (int32_t)targetRate;
 +		now.videoRefreshPeriod = 1;
 +		now.flags = kCVTimeStampHostTimeValid | kCVTimeStampVideoTimeValid |
 +		    kCVTimeStampVideoRefreshPeriodValid;
@@ -4887,9 +4909,8 @@ index 3e9cba226..99e0a5494 100644
 +    if (__lolsys_syscall(1,(long)&deadline,0,0,0,0,228)<0) return NULL;
 +    static uint64_t cvIntervalNS = 0;
 +    if (!cvIntervalNS) {
-+        const char *hz = getenv("RCLOL_REFRESH_HZ");
-+        int rate = hz ? atoi(hz) : 0;
-+        cvIntervalNS = (rate > 0 && rate <= 1000) ? 1000000000ull / (uint64_t)rate : (1000000000ull / 60ull);
++        uint32_t rate = getTargetRefreshRate();
++        cvIntervalNS = 1000000000ull / (uint64_t)rate;
 +    }
 +    for (;;) {
 +        deadline.nsec += cvIntervalNS;
@@ -4961,7 +4982,7 @@ index 3e9cba226..99e0a5494 100644
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,35 +890,128 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,35 +911,128 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
@@ -5101,7 +5122,7 @@ index 3e9cba226..99e0a5494 100644
  	return kCVReturnSuccess;
  }
  
-@@ -91,7 +1033,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
+@@ -91,7 +1054,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
  			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
  			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
  
@@ -5110,7 +5131,7 @@ index 3e9cba226..99e0a5494 100644
  					forKey: kDirectDisplayArray];
  			return kCVReturnSuccess;
  		}
-@@ -117,14 +1059,31 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+@@ -117,36 +1080,65 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -5145,6 +5166,48 @@ index 3e9cba226..99e0a5494 100644
  	return kCVReturnSuccess;
  }
  
+ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONNULL displayLink )
+ {
+ 	CVTime time = { 0, 0, kCVTimeIsIndefinite };
+-	CGDirectDisplayID displayId = CVDisplayLinkGetCurrentCGDisplay(displayLink);
+-	if (displayId == kCGNullDirectDisplay)
++	if (!displayLink)
+ 		return time;
+ 
+-	CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayId);
+-	if (!mode)
+-		return time;
++	double rate = 0.0;
++	const char *hz = getenv("RCLOL_REFRESH_HZ");
++	if (hz) {
++		double envRate = atof(hz);
++		if (envRate > 0.0 && envRate <= 1000.0)
++			rate = envRate;
++	}
++
++	if (rate < 1.0) {
++		CGDirectDisplayID displayId = CVDisplayLinkGetCurrentCGDisplay(displayLink);
++		if (displayId != kCGNullDirectDisplay) {
++			CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayId);
++			if (mode) {
++				rate = CGDisplayModeGetRefreshRate(mode);
++				CGDisplayModeRelease(mode);
++			}
++		}
++	}
+ 
+-	double rate = CGDisplayModeGetRefreshRate(mode);
+ 	if (rate < 1.0)
+ 		rate = 60.0;
+ 
+ 	time.flags = 0;
+ 	time.timeValue = 1.0;
+-	time.timeScale = rate;
++	time.timeScale = (int32_t)rate;
+ 
+-	CGDisplayModeRelease(mode);
+ 	return time;
+ }
 diff --git a/src/frameworks/CoreVideo/src/constants.c b/src/frameworks/CoreVideo/src/constants.c
 index 02f06704e..5d4fd4b2d 100644
 --- a/src/frameworks/CoreVideo/src/constants.c
@@ -6765,7 +6828,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..f25fd9aa5 100644
+index ffd7fe054..7717ce300 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -6792,7 +6855,7 @@ index ffd7fe054..f25fd9aa5 100644
  
  // Try to get the right (generic) type definitions.
  // In particular, we really want EGLNativeDisplayType to be void *,
-@@ -22,8 +33,73 @@
+@@ -22,7 +33,125 @@
  #define APPLE
  #define __APPLE__
  
@@ -6821,15 +6884,58 @@ index ffd7fe054..f25fd9aa5 100644
 +static EGLBoolean (*p_eglDestroyContext)(EGLDisplay, EGLContext);
 +static EGLBoolean (*p_eglSwapBuffers)(EGLDisplay, EGLSurface);
 +static EGLBoolean (*p_eglSwapInterval)(EGLDisplay, EGLint);
++static EGLint (*p_eglGetError)(void);
 +
 +static int native_egl_loaded;
 +static pthread_mutex_t native_egl_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static void configure_egl_gpu_selector(void) {
++    char selector[256] = {0};
++    FILE *f = fopen("/tmp/metal-gpu", "r");
++    if (f) {
++        if (fgets(selector, sizeof(selector), f)) {
++            char *p = selector + strlen(selector);
++            while (p > selector && (p[-1] == '\n' || p[-1] == '\r' || p[-1] == ' ' || p[-1] == '\t'))
++                *(--p) = '\0';
++        }
++        fclose(f);
++    }
++    if (!selector[0]) {
++        const char *env = getenv("METAL_INDIUM_GPU");
++        if (env && env[0])
++            strncpy(selector, env, sizeof(selector) - 1);
++    }
++    int hasNvidia = (access("/dev/nvidia0", F_OK) == 0 || access("/proc/driver/nvidia", F_OK) == 0);
++    if (selector[0]) {
++        if (strcasestr(selector, "nvidia") || strcasestr(selector, "discrete") || strcmp(selector, "1") == 0) {
++            setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
++            setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
++            setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
++            if (access("/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json", F_OK) == 0)
++                setenv("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json", 0);
++        } else if (strcasestr(selector, "intel") || strcasestr(selector, "integrated") || strcasestr(selector, "mesa") || strcasestr(selector, "llvmpipe") || strcmp(selector, "0") == 0) {
++            unsetenv("__NV_PRIME_RENDER_OFFLOAD");
++            unsetenv("__GLX_VENDOR_LIBRARY_NAME");
++            unsetenv("__VK_LAYER_NV_optimus");
++            unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
++            if (access("/usr/share/vulkan/icd.d/intel_icd.x86_64.json", F_OK) == 0)
++                setenv("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/intel_icd.x86_64.json", 0);
++        } else if (strcasestr(selector, "amd") || strcasestr(selector, "radeon") || strcasestr(selector, "radv")) {
++            setenv("DRI_PRIME", "1", 1);
++        }
++    } else if (hasNvidia && getenv("__NV_PRIME_RENDER_OFFLOAD") == NULL) {
++        setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
++        setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
++        setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
++    }
++}
 +
 +static void ensure_native_egl(void) {
 +    if (native_egl_loaded)
 +        return;
 +    pthread_mutex_lock(&native_egl_mutex);
 +    if (!native_egl_loaded) {
++        configure_egl_gpu_selector();
 +        void *h = dlopen("/usr/lib/native/libEGL.dylib", RTLD_NOW | RTLD_LOCAL);
 +        if (h) {
 +            p_eglGetDisplay = (EGLDisplay (*)(EGLNativeDisplayType)) dlsym(h, "eglGetDisplay");
@@ -6846,6 +6952,7 @@ index ffd7fe054..f25fd9aa5 100644
 +            p_eglDestroyContext = (EGLBoolean (*)(EGLDisplay, EGLContext)) dlsym(h, "eglDestroyContext");
 +            p_eglSwapBuffers = (EGLBoolean (*)(EGLDisplay, EGLSurface)) dlsym(h, "eglSwapBuffers");
 +            p_eglSwapInterval = (EGLBoolean (*)(EGLDisplay, EGLint)) dlsym(h, "eglSwapInterval");
++            p_eglGetError = (EGLint (*)(void)) dlsym(h, "eglGetError");
 +            native_egl_loaded = 1;
 +        }
 +    }
@@ -6853,20 +6960,28 @@ index ffd7fe054..f25fd9aa5 100644
 +}
 +
  static EGLDisplay display;
- 
++static void *saved_native_display;
++
 +static EGLDisplay x11EGLDisplay(EGLNativeDisplayType native_display) {
 +    /* CGS/AppKit supply Xlib Display pointers. Mesa's automatic platform
 +     * selection can choose Wayland on a Wayland desktop and interpret the
 +     * Xlib pointer as a wl_display, crashing during eglInitialize. */
-+    if (p_eglGetPlatformDisplay)
-+        return p_eglGetPlatformDisplay(0x31D5 /* EGL_PLATFORM_X11 */, native_display, NULL);
-+    return p_eglGetDisplay(native_display);
++    if (p_eglGetPlatformDisplay) {
++        EGLDisplay d = p_eglGetPlatformDisplay(0x31D5 /* EGL_PLATFORM_X11 */, native_display, NULL);
++        if (d != EGL_NO_DISPLAY && d != NULL)
++            return d;
++    }
++    if (p_eglGetDisplay) {
++        EGLDisplay d = p_eglGetDisplay(native_display);
++        if (d != EGL_NO_DISPLAY && d != NULL)
++            return d;
++    }
++    return EGL_NO_DISPLAY;
 +}
-+
+ 
  static EGLConfig config;
  static int num_config;
- 
-@@ -48,10 +124,18 @@ struct _CGLContextObj {
+@@ -48,10 +186,18 @@ struct _CGLContextObj {
      GLuint retain_count;
      pthread_mutex_t lock;
      EGLContext egl_context;
@@ -6885,7 +7000,7 @@ index ffd7fe054..f25fd9aa5 100644
  };
  
  struct _CGLPixelFormatObj {
-@@ -59,6 +143,24 @@ struct _CGLPixelFormatObj {
+@@ -59,6 +205,24 @@ struct _CGLPixelFormatObj {
      CGLPixelFormatAttribute *attributes;
  };
  
@@ -6910,7 +7025,7 @@ index ffd7fe054..f25fd9aa5 100644
  static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
      switch (attr) {
      case kCGLPFAAuxBuffers:
-@@ -69,6 +171,9 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
+@@ -69,6 +233,9 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
      case kCGLPFAAccumSize:
      case kCGLPFARendererID:
      case kCGLPFADisplayMask:
@@ -6920,20 +7035,32 @@ index ffd7fe054..f25fd9aa5 100644
          return 1;
      default:
          return 0;
-@@ -78,6 +183,7 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
+@@ -78,6 +245,18 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
  __attribute__((constructor))
  static void _CGLInitialize(void)
  {
++    /* A parent that spawns us with 0-2 closed lets the first socket/device
++     * open land on a stdio number. Reserve them first. */
++    for (int fd = 0; fd <= 2; ++fd) {
++        if (fcntl(fd, F_GETFD) == -1) {
++            int nfd = open("/dev/null", O_RDWR);
++            if (nfd >= 0 && nfd != fd) {
++                dup2(nfd, fd);
++                close(nfd);
++            }
++        }
++    }
 +    ensure_native_egl();
      g_displays = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
  }
  
-@@ -93,41 +199,71 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
+@@ -93,41 +272,68 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
  
  CGLError CGLRegisterNativeDisplay(void *native_display) {
  
 -    display = eglGetDisplay(native_display);
 +    ensure_native_egl();
++    saved_native_display = native_display;
 +    display = x11EGLDisplay(native_display);
  
      if (display == EGL_NO_DISPLAY) {
@@ -6962,16 +7089,12 @@ index ffd7fe054..f25fd9aa5 100644
 +
 +    void *nativeDisplay=_CGSNativeDisplay(CGSMainConnectionID());
 +    EGLDisplay disp = x11EGLDisplay(nativeDisplay?nativeDisplay:EGL_DEFAULT_DISPLAY);
-+    if (disp == EGL_NO_DISPLAY) {
-+        fprintf(stderr, "M58DG ensureDefaultDisplay: eglGetDisplay(DEFAULT)=NO_DISPLAY (p_eglGetDisplay=%p)\n", (void*) p_eglGetDisplay);
++    if (disp == EGL_NO_DISPLAY)
 +        return;
-+    }
 +
 +    EGLConfig cfg = NULL;
 +    EGLBoolean m58dg_ini = p_eglInitialize(disp, NULL, NULL);
 +    EGLBoolean m58dg_ch = p_eglChooseConfig(disp, attribute_list, &cfg, 1, &num_config);
-+    fprintf(stderr, "M58DG ensureDefaultDisplay: disp=%p eglInitialize=%d eglChooseConfig=%d cfg=%p num_config=%d\n",
-+        (void*) disp, (int) m58dg_ini, (int) m58dg_ch, (void*) cfg, num_config);
 +    if (m58dg_ini && m58dg_ch && cfg != NULL) {
 +        display = disp;
 +        config = cfg;
@@ -7008,7 +7131,7 @@ index ffd7fe054..f25fd9aa5 100644
  
          pthread_mutex_lock(&g_displaysMutex);
          CFDictionaryAddValue(g_displays, (const void*)(unsigned long) cid, rv);
-@@ -139,6 +275,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
+@@ -139,6 +345,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
  
  CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid)
  {
@@ -7017,7 +7140,7 @@ index ffd7fe054..f25fd9aa5 100644
      struct _CGLDisplay* disp = getCGLDisplay(cid);
      if (!disp)
          return kCGLBadConnection;
-@@ -152,7 +290,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -152,7 +360,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
      if (!window)
          return kCGLBadWindow;
  
@@ -7026,7 +7149,7 @@ index ffd7fe054..f25fd9aa5 100644
      if (gl->egl_surface == EGL_NO_SURFACE)
          return kCGLBadState;
      return kCGLNoError;
-@@ -161,7 +299,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -161,7 +369,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
  CGLWindowRef CGLGetWindow(void *native_window) {
  
      EGLNativeWindowType window = (EGLNativeWindowType) native_window;
@@ -7035,7 +7158,7 @@ index ffd7fe054..f25fd9aa5 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -170,15 +308,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +378,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
      return (CGLWindowRef) surface;
  }
  
@@ -7091,7 +7214,7 @@ index ffd7fe054..f25fd9aa5 100644
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +374,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +444,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -7139,7 +7262,7 @@ index ffd7fe054..f25fd9aa5 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +423,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +493,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -7154,7 +7277,7 @@ index ffd7fe054..f25fd9aa5 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +453,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +523,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -7165,7 +7288,7 @@ index ffd7fe054..f25fd9aa5 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -303,37 +509,98 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -303,37 +579,151 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
      return pixelFormat->retain_count;
  }
  
@@ -7202,21 +7325,75 @@ index ffd7fe054..f25fd9aa5 100644
 +    } else if (profile && profile != 0x1000 && profile != 0x3200) {
 +        return kCGLBadValue;
 +    }
-+    EGLContext egl_context = p_eglCreateContext(contextDisplay, contextConfig, egl_share,
-+        profile == 0x3200 || profile == 0x4100 ? contextAttributes : NULL);
++    EGLint const *attribs = (profile == 0x3200 || profile == 0x4100) ? contextAttributes : NULL;
++    EGLContext egl_context = p_eglCreateContext(contextDisplay, contextConfig, egl_share, attribs);
  
      if (egl_context == EGL_NO_CONTEXT) {
-+        fprintf(stderr, "M58DG CGLCreateContext FAILED: display=%p config=%p share=%p p_eglCreateContext=%p\n",
-+            (void*) display, (void*) config, (void*) egl_share, (void*) p_eglCreateContext);
-         return kCGLBadContext;
+-        return kCGLBadContext;
++        EGLint err = p_eglGetError ? p_eglGetError() : 0;
++        if (err == 0x3008 /* EGL_BAD_DISPLAY */ || err == 0x3001 /* EGL_NOT_INITIALIZED */) {
++            void *nativeDisplay = saved_native_display ? saved_native_display : _CGSNativeDisplay(CGSMainConnectionID());
++            EGLDisplay newDisp = nativeDisplay ? x11EGLDisplay(nativeDisplay) : EGL_NO_DISPLAY;
++            if (newDisp == EGL_NO_DISPLAY) {
++                typedef void *(*XOpenDisplayFn)(const char *);
++                XOpenDisplayFn xopen = (XOpenDisplayFn)dlsym(RTLD_DEFAULT, "XOpenDisplay");
++                if (!xopen) {
++                    void *xh = dlopen("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
++                    if (!xh) xh = dlopen("/usr/lib/native/libX11.dylib", RTLD_NOW | RTLD_LOCAL);
++                    if (xh) xopen = (XOpenDisplayFn)dlsym(xh, "XOpenDisplay");
++                }
++                /* Open the fallback X11 connection at most once per process;
++                 * repeated XOpenDisplay(NULL) calls on every failure leak FDs. */
++                static void *fallback_x11_display = NULL;
++                static int fallback_x11_tried = 0;
++                if (xopen && !fallback_x11_tried) {
++                    fallback_x11_tried = 1;
++                    fallback_x11_display = xopen(NULL);
++                }
++                if (fallback_x11_display) {
++                    newDisp = x11EGLDisplay(fallback_x11_display);
++                    if (newDisp != EGL_NO_DISPLAY)
++                        saved_native_display = fallback_x11_display;
++                }
++            }
++            EGLConfig newCfg = NULL;
++            EGLBoolean ini_ok = 0, ch_ok = 0;
++            EGLint ini_err = 0, ch_err = 0;
++            if (newDisp != EGL_NO_DISPLAY) {
++                ini_ok = p_eglInitialize(newDisp, NULL, NULL);
++                ini_err = p_eglGetError ? p_eglGetError() : 0;
++                if (ini_ok) {
++                    ch_ok = p_eglChooseConfig(newDisp, attribute_list, &newCfg, 1, &num_config);
++                    ch_err = p_eglGetError ? p_eglGetError() : 0;
++                }
++            }
++            if (ini_ok && ch_ok && newCfg) {
++                display = newDisp;
++                config = newCfg;
++                contextDisplay = display;
++                contextConfig = config;
++                p_eglBindAPI(EGL_OPENGL_API);
++                egl_context = p_eglCreateContext(contextDisplay, contextConfig, egl_share, attribs);
++            }
++        }
++        if (egl_context == EGL_NO_CONTEXT && !attribs) {
++            egl_context = p_eglCreateContext(contextDisplay, contextConfig, egl_share, contextAttributes);
++            if (egl_context != EGL_NO_CONTEXT) {
++            } else {
++                EGLint compatAttrs[] = {
++                    0x3098 /* EGL_CONTEXT_MAJOR_VERSION */, 3,
++                    0x30FB /* EGL_CONTEXT_MINOR_VERSION */, 0,
++                    EGL_NONE
++                };
++                egl_context = p_eglCreateContext(contextDisplay, contextConfig, egl_share, compatAttrs);
++                if (egl_context != EGL_NO_CONTEXT) {
++                }
++            }
++        }
++        if (egl_context == EGL_NO_CONTEXT)
++            return kCGLBadContext;
      }
  
-+    {
-+        static int m58dg_ok = 0;
-+        if (m58dg_ok++ < 5)
-+            fprintf(stderr, "M58DG CGLCreateContext OK display=%p config=%p ctx=%p\n",
-+                (void*) display, (void*) config, (void*) egl_context);
-+    }
 +
      CGLContextObj context = malloc(sizeof(struct _CGLContextObj));
  
@@ -7267,7 +7444,7 @@ index ffd7fe054..f25fd9aa5 100644
      return context;
  }
  
-@@ -342,11 +609,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +732,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -7288,7 +7465,7 @@ index ffd7fe054..f25fd9aa5 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +627,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +750,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -7301,7 +7478,7 @@ index ffd7fe054..f25fd9aa5 100644
  
      free(context);
  }
-@@ -383,9 +660,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +783,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
      return kCGLNoError;
  }
  
@@ -7634,7 +7811,7 @@ index ffd7fe054..f25fd9aa5 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -394,8 +992,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -394,8 +1115,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
  
      if (parameter == kCGLCPSwapInterval)
      {
@@ -7645,7 +7822,7 @@ index ffd7fe054..f25fd9aa5 100644
          if (success)
              context->swap_interval = v;
          return success ? kCGLNoError : kCGLBadValue;
-@@ -417,14 +1016,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1139,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -9206,7 +9383,7 @@ new file mode 100644
 +}
 diff --git a/src/frameworks/OpenGL/CGLAsyncPresent.inc b/src/frameworks/OpenGL/CGLAsyncPresent.inc
 new file mode 100644
-index 000000000..e5363c06a
+index 000000000..353cdad35
 --- /dev/null
 +++ b/src/frameworks/OpenGL/CGLAsyncPresent.inc
 @@ -0,0 +1,204 @@
@@ -9416,6 +9593,7 @@ index 000000000..e5363c06a
 +}
 diff --git a/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h b/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h
 new file mode 100644
+index 000000000..20313c6fc
 --- /dev/null
 +++ b/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h
 @@ -0,0 +1,11 @@
