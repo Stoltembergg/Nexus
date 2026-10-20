@@ -38,17 +38,46 @@ def any_server_running(proc_root=Path('/proc')):
             pass
     return False
 
+def _matching_pids(kind, proc_root):
+    """Find same-user candidates by guest executable; this does not establish ownership."""
+    uid = os.getuid()
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if proc.stat().st_uid != uid:
+                continue
+            argv = (proc / 'cmdline').read_bytes()
+            if kind == 'launchd':
+                matches = argv.rstrip(b'\0') == b'/sbin/launchd'
+            else:
+                executable = argv.split(b'\0', 1)[0].decode(errors='replace')
+                matches = (proc / 'comm').read_text().startswith('chrome_crashpad') and any(
+                    bundle in executable for bundle in (
+                        '/Riot Client.app/', '/League of Legends.app/',
+                        '/League of Legends (TM) Client.app/'))
+            if matches:
+                yield proc.name
+        except (OSError, ValueError):
+            continue
+
+
 def stop_orphaned_launchd(proc_root=Path('/proc')):
-    """Preserve launchd: guest names and UIDs do not prove prefix ownership."""
-    print('Automatic launchd cleanup disabled: prefix ownership cannot be proved. '
-          'If setup is blocked, shut down the original Darling session or inspect '
-          'the leftover process manually.', file=sys.stderr, flush=True)
+    """Warn about launchd candidates without assuming prefix ownership or signalling them."""
+    pids = list(_matching_pids('launchd', proc_root))
+    if pids:
+        print(f'Preserving launchd candidate PIDs {", ".join(pids)}: prefix ownership '
+              'cannot be proved. If setup is blocked, shut down the original Darling '
+              'session or inspect the leftover processes manually.', file=sys.stderr, flush=True)
+
 
 def stop_riot_crashpad(proc_root=Path('/proc')):
-    """Preserve crashpad: identical guest paths can belong to different prefixes."""
-    print('Automatic Riot crashpad cleanup disabled: prefix ownership cannot be proved. '
-          'Use the original session to shut down leftover helpers.',
-          file=sys.stderr, flush=True)
+    """Warn about Riot crashpad candidates without assuming prefix ownership or signalling them."""
+    pids = list(_matching_pids('crashpad', proc_root))
+    if pids:
+        print(f'Preserving Riot crashpad candidate PIDs {", ".join(pids)}: prefix ownership '
+              'cannot be proved. Use the original session to shut down leftover helpers.',
+              file=sys.stderr, flush=True)
 
 def remove_owned(paths):
     uid = os.getuid()

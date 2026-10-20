@@ -60,6 +60,33 @@ class RuntimeCleanupScopeTests(unittest.TestCase):
         self.cleanup.stop_riot_crashpad(self.proc)
         self.kill.assert_not_called()
         self.assertIn('prefix ownership', self.stderr.getvalue())
+        self.assertIn('launchd candidate PIDs 101', self.stderr.getvalue())
+        self.assertIn('Riot crashpad candidate PIDs 102', self.stderr.getvalue())
+
+    def test_clean_start_is_silent(self):
+        self.cleanup.main()
+        self.assertEqual(self.stderr.getvalue(), '')
+        self.kill.assert_not_called()
+
+    def test_unrelated_processes_are_silent(self):
+        self.process(110, comm='chrome_crashpad', argv=(
+            '/opt/google/chrome/chrome_crashpad_handler', '--annotation=riot'))
+        self.process(111, comm='unrelated', argv=('/usr/bin/tool', '/sbin/launchd'))
+        self.process(112, comm='unrelated', argv=('/usr/bin/tool',
+            '/Applications/Riot Client.app/chrome_crashpad_handler'))
+        self.cleanup.main()
+        self.assertEqual(self.stderr.getvalue(), '')
+        self.kill.assert_not_called()
+
+    def test_foreign_owned_candidates_are_silent(self):
+        self.process(113)
+        self.process(114, comm='chrome_crashpad', argv=(
+            '/Applications/Riot Client.app/chrome_crashpad_handler',))
+        with patch.object(Path, 'stat', return_value=Mock(st_uid=os.getuid() + 1)):
+            self.cleanup.stop_orphaned_launchd(self.proc)
+            self.cleanup.stop_riot_crashpad(self.proc)
+        self.assertEqual(self.stderr.getvalue(), '')
+        self.kill.assert_not_called()
 
     def test_main_preserves_processes_from_another_prefix_without_a_server(self):
         self.process(101)
