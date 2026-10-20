@@ -9,6 +9,22 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$runner_dir/runtime-paths.sh"
+# The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
+# AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
+export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
+python3 "$runner_dir/ensure-darling-runtime.py"
+python3 "$runner_dir/ensure-darling-service-accounts.py"
+python3 "$runner_dir/ensure-league-runtime-layout.py"
+# Security's system trust domain (SecTrustSettingsCopyCertificates) needs a root keychain and
+# trust record built from the host CA bundle. Only a changed bundle starts Darling.
+# Do not start the client or optional session helpers when provisioning fails.
+cert_status=0
+python3 "$runner_dir/ensure-darling-root-certificates.py" || cert_status=$?
+if [ "$cert_status" -ne 0 ]; then
+ echo 'Darling system root certificate preflight failed; refusing to launch the client.' >&2
+ echo "See docs/TROUBLESHOOTING.md; rerun the certificate helper in this runtime environment: $runner_dir/ensure-darling-root-certificates.py" >&2
+ exit "$cert_status"
+fi
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
 fi
@@ -19,17 +35,6 @@ fi
 if [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
  python3 "$runner_dir/close-league-client-in-game.py" --detach &
 fi
-# The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
-# AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
-export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
-python3 "$runner_dir/ensure-darling-runtime.py"
-python3 "$runner_dir/ensure-darling-service-accounts.py"
-python3 "$runner_dir/ensure-league-runtime-layout.py"
-# Security's system trust domain (SecTrustSettingsCopyCertificates) needs a root keychain and
-# trust record built from the host CA bundle. Only a changed bundle starts Darling; a failure
-# is reported but does not stop the launch.
-python3 "$runner_dir/ensure-darling-root-certificates.py" ||
- echo 'Continuing without a Darling system root store; TLS clients may report untrusted roots' >&2
 # Discard argument-rewriting settings from the former injected shim.
 unset RCLOL_APP_ARGS RCLOL_APP_ARGS_SLOT RCLOL_APP_ARG2 RCLOL_APP_ARG2_SLOT
 unset RCLOL_APP_ARG3 RCLOL_APP_ARG3_SLOT RCLOL_UX_ARG1 RCLOL_UX_ARG1_SLOT

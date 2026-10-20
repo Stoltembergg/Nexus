@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def check():
+    """Exercise launch isolation and certificate failure gates using inert commands."""
     (ROOT / "build").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="riot-launcher-offline-", dir=ROOT / "build") as directory:
         folder = Path(directory)
@@ -40,6 +41,8 @@ if record["command"] == "darling":
          "WAYLAND_DISPLAY", "XAUTHORITY", "DRI_PRIME", "MESA_NO_ERROR", "__GL_THREADED_OPTIMIZATIONS", "SHELL")}}
 with open({str(log)!r}, "a") as output:
     output.write(json.dumps(record) + "\\n")
+if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "ensure-darling-root-certificates.py":
+    sys.exit(int(os.environ.get("STUB_ROOT_CERTS_FAIL", "0")))
 '''
         for name in ("python3", "darling"):
             path = binary_folder / name
@@ -127,7 +130,27 @@ with open({str(log)!r}, "a") as output:
         assert filtered["WAYLAND_DISPLAY"] is None and filtered["SHELL"] == "/bin/zsh", "host session metadata survived"
         assert (filtered["XAUTHORITY"], filtered["DRI_PRIME"]) == ("/tmp/xauth", "1"), "X11/GPU selection lost"
         assert (filtered["MESA_NO_ERROR"], filtered["__GL_THREADED_OPTIMIZATIONS"]) == ("1", "0"), "launcher GPU tuning lost"
-        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved inherited_fds=closed host_env_filter=PASS")
+        # Both launch modes must stop at a failed certificate bootstrap, before
+        # the client or opt-in recovery/watch helpers can run.
+        for installer in (False, True):
+            for fail_code in (1, 127):
+                log.unlink()
+                failed_env = dict(env, STUB_ROOT_CERTS_FAIL=str(fail_code),
+                                  RCLOL_RECOVER_HIDDEN_CLIENT="1", RCLOL_CLOSE_CLIENT_IN_GAME="1")
+                if installer:
+                    failed_env["RIOT_LAUNCHER_HOST"] = str(folder / "installer.app")
+                failed = subprocess.run(["sh", str(launcher)], env=failed_env,
+                                        capture_output=True, text=True, timeout=15)
+                assert failed.returncode == fail_code, f"certificate failure status lost: {failed.returncode}"
+                assert "Darling system root certificate preflight failed" in failed.stderr, failed.stderr
+                assert "docs/TROUBLESHOOTING.md" in failed.stderr, "missing recovery guidance"
+                records = [json.loads(line) for line in log.read_text().splitlines()]
+                assert not any(r["command"] == "darling" for r in records), "client started after certificate failure"
+                helpers = [Path(r["args"][0]).name for r in records if r["command"] == "python3"]
+                assert helpers == ["runtime_paths.py", "ensure-darling-runtime.py",
+                                   "ensure-darling-service-accounts.py", "ensure-league-runtime-layout.py",
+                                   "ensure-darling-root-certificates.py"], helpers
+        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS cert_preflight_fail_closed=PASS inherited_injection=absent runtime=preserved inherited_fds=closed host_env_filter=PASS")
 
 
 if __name__ == "__main__":

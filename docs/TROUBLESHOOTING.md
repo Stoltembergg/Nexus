@@ -237,6 +237,33 @@ RCLOL_CDN_IPV4_ONLY=0 ./scripts/run.sh
 The resolver change requires a rebuilt/installed base runtime. The environment
 flag alone cannot alter an older Libinfo binary.
 
+## Darling system root certificate preflight failed
+
+The launcher now stops if `ensure-darling-root-certificates.py` reports failure,
+before starting Riot Client or the optional recovery/watch helpers. Issue #31
+reported a Chromium fallback that assumed all roots were trusted when system
+trust settings could not be read. Continuing after a known provisioning error
+is not a safe recovery strategy.
+
+Read the helper's preceding error for the failing path. Check that the host CA
+bundle is installed and readable and that the selected prefix is writable.
+To retry provisioning, use the **same runtime environment and prefix** as the
+launcher:
+
+```sh
+python3 tools/ensure-darling-root-certificates.py
+```
+
+For a Nix installation, enter `darling-lol --shell` first and run the command
+there; preserve any custom `DPREFIX` selection. The helper also accepts
+`--bundle /absolute/path/to/ca-bundle.pem` for diagnosis and `--force` to rebuild
+an existing store. Do not disable certificate verification as a workaround.
+
+A successful helper exit only establishes that its provisioning checks passed;
+it does not verify every guest TLS stack, code-signing policy, or account safety.
+Other maintenance helpers may already have started Darling before the check;
+this gate does not stop an existing session or roll back earlier maintenance.
+
 ## Riot closes after a network lookup is cancelled
 
 Two local crashes were traced to `CFNetwork::_HostCancel` calling `CFRetain(NULL)`.
