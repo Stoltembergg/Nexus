@@ -2,7 +2,7 @@
 """Clear a dead Darling server's stale PID marker, and stale shared buffers once no server runs."""
 import os
 from pathlib import Path
-import signal
+import sys
 import time
 def recover_marker(prefix):
     marker = prefix / '.init.pid'
@@ -39,38 +39,16 @@ def any_server_running(proc_root=Path('/proc')):
     return False
 
 def stop_orphaned_launchd(proc_root=Path('/proc')):
-    """A guest launchd that outlived its darlingserver cannot be shut down with `darling shutdown`
-    and makes the base install (tools/shutdown-user.sh) refuse to continue."""
-    uid = os.getuid()
-    for proc in proc_root.iterdir():
-        if not proc.name.isdigit():
-            continue
-        try:
-            if proc.stat().st_uid != uid or (proc / 'cmdline').read_bytes().rstrip(b'\0') != b'/sbin/launchd':
-                continue
-            os.kill(int(proc.name), signal.SIGKILL)
-            print(f'Stopped orphaned Darling launchd PID {proc.name}', flush=True)
-        except (OSError, ValueError):
-            pass
+    """Preserve launchd: guest names and UIDs do not prove prefix ownership."""
+    print('Automatic launchd cleanup disabled: prefix ownership cannot be proved. '
+          'If setup is blocked, shut down the original Darling session or inspect '
+          'the leftover process manually.', file=sys.stderr, flush=True)
 
 def stop_riot_crashpad(proc_root=Path('/proc')):
-    """A Riot crash handler outliving its server holds the old session's ports; spare every other app's."""
-    uid = os.getuid()
-    for proc in proc_root.iterdir():
-        if not proc.name.isdigit():
-            continue
-        try:
-            if not (proc / 'comm').read_text().startswith('chrome_crashpad') or proc.stat().st_uid != uid:
-                continue
-            argv = (proc / 'cmdline').read_bytes().split(b'\0')
-            executable = argv[0].decode(errors='replace')
-            # Match the executable's bundle, not arbitrary arguments (a browser may mention Riot).
-            if any(bundle in executable for bundle in (
-                '/Riot Client.app/', '/League of Legends.app/', '/League of Legends (TM) Client.app/'
-            )):
-                os.kill(int(proc.name), signal.SIGTERM)
-        except (OSError, ValueError):
-            pass
+    """Preserve crashpad: identical guest paths can belong to different prefixes."""
+    print('Automatic Riot crashpad cleanup disabled: prefix ownership cannot be proved. '
+          'Use the original session to shut down leftover helpers.',
+          file=sys.stderr, flush=True)
 
 def remove_owned(paths):
     uid = os.getuid()
