@@ -9,6 +9,10 @@ try:
 except (OSError, subprocess.CalledProcessError):
     files=[str(p.relative_to(ROOT)) for p in ROOT.rglob('*') if p.is_file() and not any(part.startswith('.') or part in ['build','__pycache__'] for part in p.relative_to(ROOT).parts)]
 errors=[]
+approved_png_assets={
+    'assets/icons/darling-lol-league-of-legends.png',
+    'assets/icons/darling-lol-riot-client.png',
+}
 secret_patterns=[r'gh[pousr]_[A-Za-z0-9]{30,}',r'AKIA[0-9A-Z]{16}',r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}',r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----']
 for name in filter(None,files):
     p=ROOT/name;data=p.read_bytes()
@@ -16,6 +20,8 @@ for name in filter(None,files):
     if name == 'darling-lol.png' and data.startswith(b'\x89PNG\r\n\x1a\n'):
         continue
     if data.startswith((b'\x7fELF',b'MZ',b'\xcf\xfa\xed\xfe',b'\xca\xfe\xba\xbe')) or b'\0' in data:
+        if name in approved_png_assets and data.startswith(b'\x89PNG\r\n\x1a\n') and len(data)<=256*1024:
+            continue
         errors.append(name+': binary content is not part of this source package');continue
     try:text=data.decode()
     except UnicodeDecodeError:errors.append(name+': non-UTF8 content');continue
