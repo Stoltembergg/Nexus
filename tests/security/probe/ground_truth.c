@@ -17,7 +17,6 @@
  * failure.
  */
 
-#include <sys/codesign.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -30,6 +29,26 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/*
+ * csops operations from bsd/sys/codesign.h. The macOS SDK does not ship that
+ * header (it lives in the XNU tree), so the ABI constants are defined here.
+ */
+#define CS_OPS_STATUS 0
+#define CS_OPS_MARKINVALID 1
+#define CS_OPS_MARKHARD 2
+#define CS_OPS_MARKKILL 3
+#define CS_OPS_CDHASH 5
+#define CS_OPS_PIDOFFSET 6
+#define CS_OPS_ENTITLEMENTS_BLOB 7
+#define CS_OPS_MARKRESTRICT 8
+#define CS_OPS_SET_STATUS 9
+#define CS_OPS_BLOB 10
+#define CS_OPS_IDENTITY 11
+#define CS_OPS_CLEARINSTALLER 12
+#define CS_OPS_CLEARPLATFORM 13
+#define CS_OPS_TEAMID 14
+#define CS_OPS_CLEAR_LV 15
 
 #ifndef CS_CDHASH_LEN
 #define CS_CDHASH_LEN 20
@@ -98,6 +117,31 @@ static csr_check_fn csr_check_sym(void)
 	return fn;
 }
 
+typedef int (*csops_fn)(pid_t, unsigned int, void *, size_t);
+
+static csops_fn csops_symbol(void)
+{
+	static csops_fn fn;
+
+	if (!fn) {
+		void *h = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY);
+		if (h)
+			fn = (csops_fn)dlsym(h, "csops");
+	}
+	return fn;
+}
+
+static int x_csops(pid_t pid, unsigned int op, void *addr, size_t size)
+{
+	csops_fn fn = csops_symbol();
+
+	if (!fn) {
+		errno = ENOSYS;
+		return -1;
+	}
+	return fn(pid, op, addr, size);
+}
+
 static void print_hex(const unsigned char *p, size_t n)
 {
 	for (size_t i = 0; i < n; i++)
@@ -133,7 +177,7 @@ static int read_blob(pid_t pid, unsigned int op, unsigned char **out, size_t *ou
 		return -1;
 	memset(buf, 0, cap);
 	errno = 0;
-	if (csops(pid, op, buf, cap) != 0) {
+	if (x_csops(pid, op, buf, cap) != 0) {
 		int e = errno;
 		free(buf);
 		errno = e;
@@ -158,7 +202,7 @@ static void probe_self(void)
 	printf("    \"pid\": %d,\n", (int)getpid());
 
 	errno = 0;
-	r = csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
+	r = x_csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
 	printf("    \"status\": {\"rc\": %d, \"errno\": %d, \"flags\": \"0x%08x\", "
 	       "\"valid\": %s, \"adhoc\": %s, \"runtime\": %s, \"require_lv\": %s, "
 	       "\"get_task_allow\": %s, \"hard\": %s, \"kill\": %s, \"restrict\": %s},\n",
@@ -174,7 +218,7 @@ static void probe_self(void)
 
 	memset(cdhash, 0, sizeof(cdhash));
 	errno = 0;
-	r = csops(getpid(), CS_OPS_CDHASH, cdhash, sizeof(cdhash));
+	r = x_csops(getpid(), CS_OPS_CDHASH, cdhash, sizeof(cdhash));
 	printf("    \"cdhash\": {\"rc\": %d, \"errno\": %d, \"value\": \"", r, r ? errno : 0);
 	if (r == 0)
 		print_hex(cdhash, sizeof(cdhash));
@@ -182,7 +226,7 @@ static void probe_self(void)
 
 	memset(teamid, 0, sizeof(teamid));
 	errno = 0;
-	r = csops(getpid(), CS_OPS_TEAMID, teamid, sizeof(teamid));
+	r = x_csops(getpid(), CS_OPS_TEAMID, teamid, sizeof(teamid));
 	printf("    \"teamid\": {\"rc\": %d, \"errno\": %d, \"value\": ", r, r ? errno : 0);
 	if (r == 0) {
 		teamid[sizeof(teamid) - 1] = '\0';
@@ -203,7 +247,7 @@ static void probe_self(void)
 	}
 
 	errno = 0;
-	r = csops(getpid(), CS_OPS_PIDOFFSET, &pidoffset, sizeof(pidoffset));
+	r = x_csops(getpid(), CS_OPS_PIDOFFSET, &pidoffset, sizeof(pidoffset));
 	printf("    \"pidoffset\": {\"rc\": %d, \"errno\": %d, \"value\": %u}\n",
 	       r, r ? errno : 0, pidoffset);
 
@@ -230,13 +274,13 @@ static void probe_child(void)
 	char teamid[CS_MAX_TEAMID_LEN];
 
 	errno = 0;
-	int rs = csops(child, CS_OPS_STATUS, &flags, sizeof(flags));
+	int rs = x_csops(child, CS_OPS_STATUS, &flags, sizeof(flags));
 	int es = errno;
 	errno = 0;
-	int rc = csops(child, CS_OPS_CDHASH, cdhash, sizeof(cdhash));
+	int rc = x_csops(child, CS_OPS_CDHASH, cdhash, sizeof(cdhash));
 	int ec = errno;
 	errno = 0;
-	int rt = csops(child, CS_OPS_TEAMID, teamid, sizeof(teamid));
+	int rt = x_csops(child, CS_OPS_TEAMID, teamid, sizeof(teamid));
 	int et = errno;
 
 	printf("  \"child_query\": {\n");
