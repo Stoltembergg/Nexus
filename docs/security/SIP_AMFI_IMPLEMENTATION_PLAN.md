@@ -303,6 +303,12 @@ in `tests/security/fixtures/README.md`:
   hash type unknown, `codeLimit` beyond EOF, duplicate blob types.
 - Acceptance: parser accepts the macOS fixtures and rejects every fuzz seed;
   `dc_codesign_selftest` runs in CI.
+- **Prototype (this branch):** `tools/dc-codesign/` implements the bounded
+  parser and a CLI (`info|verify|cdhash|entitlements|blobs`). `make test`
+  cross-checks SHA-1/SHA-256 of the CodeDirectory, the effective cdhash, page
+  hashes, tamper rejection, entitlements and malformed inputs against
+  `rcodesign` on a real Mach-O. Still open: the fuzz harness, fat binaries and
+  the macOS-derived fixture matrix.
 
 ### M2 — Loader gate in `mldr` (2 w)
 
