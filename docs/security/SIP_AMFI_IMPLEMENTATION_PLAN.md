@@ -324,14 +324,23 @@ in `tests/security/fixtures/README.md`:
 ### M2 — Loader gate in `mldr` (2 w)
 
 - Hook after `LC_CODE_SIGNATURE` is read and before segments are mapped.
-- Modes: `off` (today), `warn` (log `dc: reject <path>: <reason>`, continue),
-  `enforce` (abort exec with `EBADEXEC`, or kill per `CS_HARD`/`CS_KILL`).
+- Modes: `off` (today), `warn` (log `mldr: codesign warning: <path>: <reason>`,
+  continue), `enforce` (abort exec with `ENOEXEC`, or kill per
+  `CS_HARD`/`CS_KILL`).
 - Verify from the same fd used for mapping (no path re-open) to avoid TOCTOU;
   record `dev/ino/size/mtime`.
 - Cache by cdhash; never cache by path alone.
 - Acceptance: signed image loads; tampered page aborts under `enforce` and
   only logs under `warn`; unsigned image aborts; missing `LC_CODE_SIGNATURE`
   behaves like unsigned (not like valid).
+- **Prototype (this branch):** `src/startup/mldr/mldr.c` calls a gate before
+  `load()`; the parser is vendored from `tools/dc-codesign/` by the patch.
+  Policy: `DARLING_CODESIGN_ENFORCE=off|warn|enforce` (default off), verbose
+  success logging with `DARLING_CODESIGN_VERBOSE=1`. An unknown policy fails
+  closed. `tests/security/test_mldr_gate.sh` covers off/warn/enforce, unsigned,
+  signed, tampered, unknown policy and parser drift: 11/11 passing.
+  Known limit: the gate opens the path itself, so the TOCTOU window against the
+  loader's own open remains until the loader hands over its fd.
 - Risk: breaks the runtime if M0/M7 prerequisites are skipped. Ship with
   `off` default and a documented `warn` soak period.
 
