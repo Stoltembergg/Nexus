@@ -39,7 +39,7 @@ roots=""
 explicit=0
 
 usage() {
-	sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n "2,/^$/p" "$0" | sed 's/^# \{0,1\}//'
 	exit 2
 }
 
