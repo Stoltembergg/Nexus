@@ -1,0 +1,539 @@
+# Code signing, SIP and AMFI: implementation plan
+
+Status: **design / proposal**. Companion to issue #49 and the draft tracking PR
+#50 (which carries `docs/security/SIP_AMFI_ENFORCEMENT.md`). This document is
+the engineering plan: it names the code seams, the data model, the phases, the
+acceptance tests and the honest limits. Nothing here is implemented until its
+acceptance test exists and passes.
+
+Author: fork maintainers (`obrientatsuya/darling-lol`).
+
+---
+
+## 1. Scope and non-goals
+
+**In scope**
+
+- Verify Mach-O code signatures (ad-hoc, Developer ID, Apple platform) on disk
+  and at load time.
+- Give every guest task a real, task-owned signing state that `csops(2)`
+  reports truthfully.
+- Enforce signing at `exec` and `dlopen`, with hardened-runtime and library
+  validation semantics.
+- Protect running code pages against later modification.
+- Enforce entitlements that Darling can actually enforce (`get-task-allow`,
+  JIT, library validation, dyld environment).
+- Provide a Darwin-shaped, **local** trust store with a real authentication
+  chain (not Apple's keys, and never presented as such).
+- Implement real SIP configuration and protected-path enforcement inside the
+  emulation layer, plus task-port / debug restrictions.
+- Keep the existing "never fabricate state" principle: if a check did not run,
+  the answer is an error or zero flags, never `CS_VALID`.
+
+**Out of scope (explicit)**
+
+- Spoofing Apple identities, Apple-signed trust caches, or notarization
+  tickets. A local pin list is not an Apple trust cache.
+- Making any third-party anti-cheat or DRM system "trust" the environment.
+  This work is about OS compatibility fidelity and correctness; it makes no
+  claim about detection outcomes and must not be sold as an anti-detection
+  feature.
+- CPUID trapping / hardware identity (tracked separately in
+  `docs/reviews/pr41-cpuid-security-validation.md`).
+- Kernel-grade isolation. See §2.
+
+---
+
+## 2. The honest security model
+
+Darling is not a kernel. A guest Mach-O process shares the Linux kernel with
+Darling and can issue raw Linux syscalls (`syscall` instruction) without going
+through `libsystem_kernel`. Therefore:
+
+1. Everything in this plan is **cooperative enforcement**. It gives
+   well-behaved macOS software the security semantics it expects; it cannot
+   contain a hostile guest the way XNU contains a hostile process.
+2. "Kernel-enforced SIP" in Darling means "enforced in the one syscall path
+   that conforming software uses, with no user-space override". We will say
+   exactly that in docs and code comments, and never claim XNU equivalence.
+3. Any acceptance test that could pass by fabrication (e.g. simply returning
+   `CS_VALID`) is invalid by construction. Every positive test needs a
+   corresponding negative (tampered/unsigned/wrong-entitlement) test.
+
+This is consistent with the project's ban-risk stance: real enforcement is
+compatibility work. It is not, and will not be described as, a way to satisfy
+or evade an anti-cheat.
+
+---
+
+## 3. How macOS does it (ground truth we are matching)
+
+### 3.1 `exec`
+
+1. Kernel resolves the binary, reads `LC_CODE_SIGNATURE`.
+2. `amfi`/`amfid` validates the `CS_SuperBlob`: `CodeDirectory` page hashes,
+   CMS signature chain, designated requirement, entitlements, notarization
+   ticket (Gatekeeper policy is consulted for quarantined files).
+3. On success the kernel attaches a `cs_blob` to the `proc`/`task`: cdhash,
+   team ID, platform-binary flag, entitlements blob, flags (`CS_VALID`,
+   `CS_HARD`, `CS_KILL`, `CS_RESTRICT`, `CS_REQUIRE_LV`, `CS_RUNTIME`, …).
+4. On failure the exec is denied (or the process is killed later, depending on
+   `CS_HARD`/`CS_KILL`).
+
+### 3.2 `dlopen`
+
+`dyld` asks the kernel/`amfid` to validate the image, then enforces library
+validation: a loaded image must share the main executable's team ID or be an
+Apple platform binary, unless the main binary carries
+`com.apple.security.cs.disable-library-validation`.
+
+### 3.3 `csops(2)`
+
+`csops(pid, op, buf, size)` exposes the task's signing state:
+`CS_OPS_STATUS` (flags), `CS_OPS_CDHASH` (20-byte cdhash),
+`CS_OPS_ENTITLEMENTS_BLOB` (XML plist), `CS_OPS_TEAMID`, `CS_OPS_BLOB`,
+`CS_OPS_IDENTITY`, plus setters (`MARKINVALID`, `MARKHARD`, `MARKKILL`,
+`MARKRESTRICT`, `SET_STATUS`, `CLEARINSTALLER`, `CLEAR_LINKAGE`). The `audit
+token` variant resolves the target through a task port.
+
+> The numeric values of these operations are ABI. Take them from the pinned
+> XNU `bsd/sys/codesign.h` at the revision in `upstream/manifest.json`; do not
+> hardcode numbers in Darling sources.
+
+### 3.4 AMFI
+
+`AppleMobileFileIntegrity` is a kernel component plus the `amfid` user-space
+daemon. Guest code reaches it through `__mac_syscall("AMFI", call, arg)`
+(policy name `"AMFI"`). Calls cover device/proc state, team IDs, and
+per-process flags. Unknown calls must fail, not succeed.
+
+### 3.5 SIP
+
+`csrctl(2)` reports the active configuration (`CSR_ALLOW_*` bits:
+`UNTRUSTED_KEXTS 0x1`, `UNRESTRICTED_FS 0x2`, `TASK_FOR_PID 0x4`,
+`KERNEL_DEBUGGER 0x8`, `APPLE_INTERNAL 0x10`, `UNRESTRICTED_DTRACE 0x20`,
+`UNRESTRICTED_NVRAM 0x40`, `DEVICE_CONFIGURATION 0x80`, `ANY_RECOVERY_OS 0x100`,
+`UNAPPROVED_KEXTS 0x200`, `EXECUTABLE_POLICY_OVERRIDE 0x400`,
+`UNAUTHENTICATED_ROOT 0x800`). The VFS then denies protected-path mutations
+(`/System`, `/bin`, `/sbin`, `/usr` except `/usr/local`, `/private/etc`,
+`/private/var/db` selected stores, …) and privileged operations
+(`task_for_pid`, debugger attach, NVRAM writes, kext loads).
+
+### 3.6 Gatekeeper / notarization
+
+`syspolicyd` + `trustd` evaluate quarantine (`com.apple.quarantine` xattr),
+signature validity and the stapled notarization ticket. This is the least
+documented layer; the exact ticket container and the private `SecAssessment`
+surface must be confirmed against a real macOS install before implementation
+(see §12).
+
+---
+
+## 4. Current state audit
+
+Measured on `main` at the time of writing (paths relative to
+`build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation/`):
+
+| # | Seam | Current behavior | Problem |
+|---|---|---|---|
+| 1 | `src/xnu_syscall/bsd/impl/misc/csops.c` | `CS_OPS_STATUS` returns `CS_VALID` unconditionally; `BLOB`/`ENTITLEMENTS_BLOB`/`IDENTITY` zero-fill; everything else `ENOSYS` | Fabricates validity; no task state |
+| 2 | `src/xnu_syscall/bsd/impl/misc/mac_syscall.c` | `Seatbelt` and `AMFI` policies print and return `0` | Fabricates AMFI success |
+| 3 | `src/xnu_syscall/bsd/impl/misc/csrctl.c` | `CHECK` returns 0; `GET_ACTIVE_CONFIG` returns `CSR_VALID_FLAGS` | Reports SIP fully disabled and every request allowed |
+| 4 | `src/startup/mldr/mldr.c` | Parses/maps Mach-O; no `LC_CODE_SIGNATURE` verification | No load gate |
+| 5 | `Security.framework` (`libsecurity_codesigning`) | Vendored Apple implementation is present (`StaticCode.cpp`, `codedirectory.cpp`, `reqparser.cpp`) | Not wired into exec/dlopen or task state |
+| 6 | `darlingserver` `duct-tape/xnu/osfmk/arm/trustcache.c` | XNU trust-cache code present, arm64-oriented | No authenticated store for x86-64 guests; unused |
+| 7 | Build | `build/src/tools/codesign` is produced by cctools-port | Not used by the install/runtime steps |
+
+Note: PR #48 already makes several of these *truthful* (errors instead of fake
+success) on its branch. This plan assumes that lands first; the audit above is
+the `main` baseline.
+
+---
+
+## 5. Target architecture
+
+```
+            +-----------------------------------------------+
+ guest      | mldr (exec/dlopen)                            |
+            |   parse LC_CODE_SIGNATURE                     |
+            |   verify -> dc_cs_blob                        |
+            |   set per-process state                       |
+            +---------------------+-------------------------+
+                                  | RPC (pid -> state)
+            +---------------------v-------------------------+
+            | darlingserver: dc_cs_state per guest process  |
+            +---------------------+-------------------------+
+                                  |
+            +---------------------v-------------------------+
+            | libsystem_kernel                              |
+            |   csops.c      -> reads state (no fabrication) |
+            |   mac_syscall  -> AMFI dispatch / fail closed  |
+            |   csrctl.c     -> real CSR config              |
+            |   VFS wrappers -> SIP path policy              |
+            +---------------------+-------------------------+
+                                  |
+            +---------------------v-------------------------+
+            | dc_codesign (new lib)                         |
+            |   SuperBlob/CodeDirectory parser (bounded)    |
+            |   page hashes, special slots, cdhash          |
+            |   entitlements (XML + DER)                    |
+            |   CMS via vendored libsecurity_codesigning    |
+            |   policy engine (off|warn|enforce)            |
+            +-----------------------------------------------+
+```
+
+Design rules:
+
+- **One verifier.** `mldr`, `csops`, the CLI and the build-time signer all call
+  the same `dc_codesign` API. No second implementation of cdhash math.
+- **The loader is the only writer** of a task's signing state. `csops` is a
+  reader (same process: in-process state; other process: `darlingserver`).
+- **Policy lives in one file**, `$prefix/etc/darling/security.plist`, with an
+  environment override for tests (`DARLING_SECURITY_POLICY=off|warn|enforce`).
+- **Fail closed in `enforce`**, and log a machine-readable reason in `warn`.
+
+---
+
+## 6. Data model
+
+New public header `dc_codesign.h` (names illustrative):
+
+```c
+#define DC_CDHASH_LEN 20
+#define DC_TEAMID_LEN 64
+
+struct dc_cs_blob {
+    uint8_t  cdhash[DC_CDHASH_LEN];
+    uint8_t  full_hash[32];        /* SHA-256 of CodeDirectory, not truncated */
+    char     teamid[DC_TEAMID_LEN];
+    uint32_t flags;                /* CS_VALID | CS_ADHOC | CS_RUNTIME | ... */
+    uint8_t *entitlements;         /* XML plist, NUL-terminated */
+    size_t   entitlements_len;
+    uint8_t *der_entitlements;     /* CSMAGIC_EMBEDDED_DER_ENTITLEMENTS */
+    size_t   der_entitlements_len;
+    bool     platform_binary;
+    bool     notarized;            /* only if a real ticket was validated */
+    uint32_t hash_type;            /* 1=SHA1 2=SHA256 3=SHA256-trunc 4=SHA384 */
+    uint32_t page_size;            /* 1 << pageSize, 4096 or 16384 */
+    uint64_t code_limit;
+};
+
+struct dc_cs_state {
+    bool     verified;             /* a verifier ran for this task */
+    bool     valid;                /* verification succeeded */
+    uint32_t flags;                /* reported by CS_OPS_STATUS */
+    struct dc_cs_blob blob;
+    char     image_path[PATH_MAX];
+    uint64_t image_dev, image_ino, image_size, image_mtime;
+};
+```
+
+`struct dc_cs_state` is owned by `darlingserver` per guest pid. In-process,
+`libsystem_kernel` keeps a pointer/copy set by `mldr` before `main`, so
+`csops(getpid(), ...)` is a local read.
+
+Flags map 1:1 to `CS_*` from `bsd/sys/codesign.h`. `CS_VALID` is set **only**
+when `state.valid && state.verified`.
+
+---
+
+## 7. Build-system prerequisites
+
+Enforcement is impossible while the runtime itself is unsigned. Order matters:
+
+1. Add a post-build signing step that ad-hoc signs every Mach-O installed by
+   Darling (`darlingserver`, `mldr`, `launchd`, `dyld`, frameworks, helpers)
+   using the in-tree `codesign -s -`. Do it at `cmake --install` time and in
+   `scripts/install-runtime.sh` for per-user overlays.
+2. Ship entitlement plists per component under
+   `tools/entitlements/<component>.plist`; the signer applies them.
+3. Record the resulting cdhashes in the local trust store at install time
+   (§M6). Re-provision after every rebuild; stale entries must be rejected.
+4. Make signing deterministic (no timestamps in ad-hoc signatures) so rebuilds
+   are reproducible and cache keys stay stable.
+
+Acceptance: `codesign -dvvv` on every installed binary shows a cdhash; the
+verifier accepts all of them and rejects a byte-flipped copy.
+
+---
+
+## 8. Phases
+
+Each phase lands behind a policy flag, has a positive and a negative
+acceptance test, and is revertible by config. Estimates are person-weeks for
+one experienced engineer, including tests.
+
+### M0 — Ground truth and fixtures (1 w)
+
+- Capture, on a real macOS (oldest supported version and current), the exact
+  `csops` results, entitlements blobs, cdhashes and `codesign -dvvv` output for:
+  Apple platform binary, Developer ID app, notarized app, ad-hoc signed tool,
+  unsigned tool, hardened-runtime app, JIT app.
+- Store as `tests/security/fixtures/` with a README stating provenance and
+  redaction. Binaries must be redistributable or generated by us.
+- Decide the pinned XNU revision for all constants.
+- Deliverable: fixture manifest + `docs/security/GROUND_TRUTH.md`.
+
+### M1 — `dc_codesign` parser (2 w)
+
+- Implement bounded parsing of `CS_SuperBlob`: magic/endianness/length checks,
+  `CS_BlobIndex` bounds, `CodeDirectory` v0..v0x20400+ fields, special slots
+  (negative indices), page hashes, `codeLimit` vs file size, `hashType`.
+- Compute cdhash exactly as XNU does (hash of `CodeDirectory` up to
+  `cdLength`, truncated to 20 bytes) and the full SHA-256.
+- Parse XML entitlements and DER entitlements (fail closed on malformed).
+- Reuse `libsecurity_codesigning` for CMS/requirement evaluation rather than
+  reimplementing crypto policy; wrap it behind `dc_verify_cms()`.
+- Fuzz targets: truncated blob, length wrap, slot out of range, page size 0/31,
+  hash type unknown, `codeLimit` beyond EOF, duplicate blob types.
+- Acceptance: parser accepts the macOS fixtures and rejects every fuzz seed;
+  `dc_codesign_selftest` runs in CI.
+
+### M2 — Loader gate in `mldr` (2 w)
+
+- Hook after `LC_CODE_SIGNATURE` is read and before segments are mapped.
+- Modes: `off` (today), `warn` (log `dc: reject <path>: <reason>`, continue),
+  `enforce` (abort exec with `EBADEXEC`, or kill per `CS_HARD`/`CS_KILL`).
+- Verify from the same fd used for mapping (no path re-open) to avoid TOCTOU;
+  record `dev/ino/size/mtime`.
+- Cache by cdhash; never cache by path alone.
+- Acceptance: signed image loads; tampered page aborts under `enforce` and
+  only logs under `warn`; unsigned image aborts; missing `LC_CODE_SIGNATURE`
+  behaves like unsigned (not like valid).
+- Risk: breaks the runtime if M0/M7 prerequisites are skipped. Ship with
+  `off` default and a documented `warn` soak period.
+
+### M3 — Task-owned state + truthful `csops` (2 w)
+
+- Replace `csops.c` stub: read `dc_cs_state`; implement `STATUS`, `CDHASH`,
+  `ENTITLEMENTS_BLOB`, `TEAMID`, `BLOB`, `IDENTITY`, `PIDPATH`, `PIDOFFSET`.
+- Setters (`MARKINVALID`, `MARKHARD`, `MARKKILL`, `MARKRESTRICT`,
+  `SET_STATUS`, `CLEARINSTALLER`) require the same privilege as macOS (root or
+  `get-task-allow`); otherwise `EPERM`.
+- Cross-process queries: `darlingserver` RPC keyed by pid, with a generation
+  counter to avoid stale pid reuse.
+- Acceptance: `csops` reflects the loader's real result; a process whose image
+  failed verification reports zero flags; pid reuse cannot return a previous
+  process's blob; entitlements blob byte-identical to the fixture.
+- Risk: Chromium probes may change behavior once they see truth. Audit call
+  sites (`tools/riot-mvg-dependency-trace.c` is a starting point) and keep the
+  `warn` mode for a release cycle.
+
+### M4 — `dlopen`, library validation, hardened runtime (3 w)
+
+- Verify every image handed to `dlopen`/`dyld`; enforce `CS_REQUIRE_LV`:
+  same `teamid` as the main executable, or Apple platform binary, unless
+  `com.apple.security.cs.disable-library-validation`.
+- Enforce `CS_RUNTIME` dyld environment rules (strip `DYLD_*` unless
+  `com.apple.security.cs.allow-dyld-environment-variables`).
+- Enforce `get-task-allow` for debugger attach (§M8).
+- Acceptance: unsigned dylib into a hardened process is refused; same-team
+  dylib loads; `disable-library-validation` flips the result; `DYLD_INSERT_*`
+  is ignored under hardened runtime and honored when entitled.
+- Risk: Darling's own runtime libraries are loaded from per-user overrides;
+  they must be signed and either share the main team ID or carry the
+  entitlement. Publish a migration note.
+
+### M5 — Running-page integrity (3 w)
+
+- Seal `__TEXT`/`__LINKEDIT` (or the signed ranges) after mapping:
+  `mprotect(PROT_READ)` plus `mseal()` where available (Linux ≥ 6.10; probe at
+  startup and fall back to `mprotect` + `mmap`/`mprotect` interception).
+- Deny later `mprotect(PROT_WRITE)`, `mmap(MAP_FIXED)` over sealed ranges,
+  `ptrace`/`process_vm_writev` cross-process writes, and writes through
+  `/proc/<pid>/mem` by unprivileged peers.
+- Options: verify page hashes eagerly at load (simple, slower) or lazily on
+  first exec of a page (needs per-page dirty tracking). Start eager for
+  correctness, measure, then optimize.
+- Acceptance: writing to a sealed text page fails (`EPERM`/`SIGSEGV`), the
+  unmodified image runs, and a page modified before sealing is detected.
+- Risk: JIT and self-modifying runtimes (Chromium V8) legitimately need
+  `MAP_JIT`; `allow-jit` must gate an explicit, audited exception.
+
+### M6 — Local authenticated trust store (2 w)
+
+- Store: `$prefix/var/db/darling/trustcache` with a versioned header, a
+  monotonically increasing generation, and a signature by a **Darling-local**
+  key created at install time (Ed25519), not Apple's.
+- CLI: `dc_trustcache list|add|remove|verify`; adding requires root-equivalent
+  local policy (admin group).
+- Entries: 20-byte cdhash + flags, matching the shape used by the vendored
+  `trustcache.c`, with an explicit header field
+  `issuer = "darling-local"` so nothing can mistake it for Apple's.
+- Acceptance: entry added by the local key is accepted; entry forged without
+  the key is rejected; generation rollback is rejected; deleting the signature
+  fails closed.
+- Non-goal restated: this is **not** an Apple trust cache and must never be
+  reported as one.
+
+### M7 — SIP configuration and path enforcement (4 w)
+
+- `csrctl`: return the configured bits; `SET_ACTIVE_CONFIG` requires
+  root-equivalent local policy and logs the change. `CHECK` answers for a
+  concrete operation, not "yes".
+- Define the protected set once, in `dc_sip_paths.c`:
+  `/System`, `/bin`, `/sbin`, `/usr` (except `/usr/local`), `/private/etc`,
+  `/private/var/db` (selected), `/Library/Apple`, plus the emulated equivalents
+  under the prefix. Support the `rootless` redirect to `/System/Volumes/Data`
+  semantics if Darling models it.
+- Hook the guest VFS wrappers used by `open(O_CREAT|O_TRUNC|O_WRONLY)`,
+  `rename`, `renameat`, `unlink`, `rmdir`, `link`, `symlink`, `mkdir`,
+  `chmod`, `chown`, `utimes`, `setxattr`, `mmap(PROT_WRITE)`, `truncate`.
+  Enforce after canonicalization (resolve symlinks, `..`, and the prefix
+  mapping) and re-check the final path — never only the user-supplied string.
+- Privileged operations: deny `task_for_pid` on non-entitled targets, debugger
+  attach, writes to NVRAM equivalents, and kext-style loads when the
+  corresponding `CSR_ALLOW_*` bit is clear.
+- Acceptance: under SIP on, every mutation of a protected path fails with
+  `EPERM`; the same operation under `/usr/local` succeeds; symlink and
+  hardlink escapes fail; turning the bit on in config flips behavior without
+  a rebuild; `csrctl(GET)` matches the file.
+- Risk: path canonicalization bugs are the classic escape. Test with symlink
+  chains, `..`, bind-mount-like prefix mappings, and case-insensitive hosts.
+
+### M8 — Debug/injection restrictions and AMFI dispatch (2 w)
+
+- Replace the blanket `mac_syscall` success with a dispatcher: known AMFI
+  calls answer from real state; unknown calls return `ENOTSUP`. Seatbelt
+  policy keeps its own truthful answers.
+- Enforce `get-task-allow` for `ptrace`, `task_for_pid`, `process_vm_*`,
+  `mach_vm_write` on another task, and `DYLD_INSERT_LIBRARIES` inheritance.
+- Acceptance: entitled process can be debugged; non-entitled cannot; unknown
+  AMFI call is an error (not success).
+- Risk: Chromium's sandbox probes previously depended on the fake success;
+  the `warn` mode and an audit list are mandatory.
+
+### M9 — Gatekeeper / notarization compatibility (2–4 w, research-heavy)
+
+- First deliverable is a written answer, from a real macOS, to: where the
+  stapled ticket lives, which `SecAssessment`/`syspolicyd` surface is public
+  enough to reproduce, and what a quarantine-flagged app does at first launch.
+- Then implement only what is documented and testable: quarantine xattr
+  handling, ticket presence check, and a truthful `notarized` flag.
+- Hard rule: if no real ticket was validated, `notarized` is false. No
+  heuristic "looks notarized".
+- Acceptance: notarized fixture reports true; stripped-ticket fixture reports
+  false; quarantine flow matches the documented behavior.
+
+### M10 — Default switch and soak (2 w)
+
+- Run the full runtime with `enforce` for a release cycle; collect failures.
+- Update `docs/`, `README` and the launcher diagnostics; keep `warn` one flag
+  away.
+- Replace callers that relied on fabricated success (audit list from M3/M8).
+- Acceptance: full match test on the reference machine with enforcement on
+  and zero verification failures in the logs; documented rollback works.
+
+**Total: ~24–30 person-weeks.** M0–M3 are the useful, low-risk core
+(~7 weeks); M4–M7 deliver the actual security properties; M9 is optional.
+
+---
+
+## 9. Test strategy
+
+```
+tests/security/
+  fixtures/            signed corpus + manifest (provenance, redaction)
+  fuzz/                libFuzzer seeds for the parser
+  test_parser.py       cdhash/hash-type/slot cases
+  test_loader_gate.sh  exec: good/bad/unsigned/tampered, warn vs enforce
+  test_csops.c         status/cdhash/entitlements/teamid, pid reuse
+  test_lv.sh           library validation + disable-library-validation
+  test_runtime.sh      hardened runtime dyld env, get-task-allow
+  test_seal.sh         mseal/mprotect/mmap/ptrace negative cases
+  test_trustcache.sh   local signed entries, forged entry, rollback
+  test_sip.sh          protected paths, symlink/hardlink/.. escapes
+  test_amfi.sh         known/unknown calls, entitlement checks
+```
+
+Rules:
+
+- Every test has a negative twin. A phase is done only when both pass.
+- Tests run without Apple credentials: use a local test CA and our `codesign`.
+- CI runs the parser + fixture suite on every PR; loader/SIP suites run on the
+  self-hosted machine because they need the runtime.
+- Keep a `tests/security/README.md` mapping test → requirement (#49 matrix).
+
+---
+
+## 10. Performance
+
+- Hash each image once at load; cache the `dc_cs_blob` by cdhash and by
+  `(dev, ino, size, mtime)` for the on-disk check.
+- Page hashing is O(size); budget ≤ 8 ms per 10 MB image on the reference
+  machine, measured. If eager hashing is too slow for large frameworks, switch
+  to lazy verification with a dirty-page bitmap.
+- No hashing on `csops` reads; the state is precomputed.
+- SIP path checks add two `realpath`-class operations per protected syscall;
+  cache canonicalized prefixes, not user paths.
+
+---
+
+## 11. Security review checklist (per phase)
+
+- [ ] Fails closed: parse error, I/O error, missing file, short read → deny.
+- [ ] No fabrication: nothing sets `CS_VALID`/`notarized` without a verifier.
+- [ ] TOCTOU: verify and map the same fd; re-check `fstat` identity.
+- [ ] Path canonicalization: symlinks, `..`, hardlinks, case folding, prefix
+      mapping, trailing slashes, NUL/embedded separators.
+- [ ] pid reuse: generation counter with the state.
+- [ ] fork/exec inheritance: child state derived from its own image, never
+      inherited wholesale.
+- [ ] Cross-process writes: `ptrace`, `process_vm_writev`, `/proc/pid/mem`.
+- [ ] No new attack surface: parser bounds-checked, no unbounded allocation,
+      no recursion on attacker-controlled depth.
+- [ ] Logging: reasons are stable identifiers (for tests), paths redacted when
+      they may contain user data.
+- [ ] Rollback: config flag restores previous behavior without a rebuild.
+
+---
+
+## 12. Open questions (must be answered on real macOS)
+
+1. Exact `csops` op numbers and struct layouts for the pinned XNU revision.
+2. AMFI `mac_syscall` call numbers and payload layouts; which ones are
+   observable from user space.
+3. Trust-cache module format and whether the vendored `trustcache.c` is
+   reusable on x86-64 guests.
+4. Notarization ticket location and the minimal `syspolicyd` surface needed
+   for a truthful `notarized` bit.
+5. SIP protected-path list per macOS version (it changes), and how rootless
+   redirects are modeled in Darling's prefix.
+6. Which CoreFoundation/Security APIs the League client actually calls, so we
+   can bound the surface instead of implementing all of Gatekeeper.
+
+Until each is answered, the corresponding item stays "not implemented" in the
+requirement matrix.
+
+---
+
+## 13. Rollout and rollback
+
+| Stage | Default | Rollback |
+|---|---|---|
+| M2 loader gate | `off`, then `warn` | config to `off` |
+| M3 csops | on (truthful state) | state reports zero flags (old behavior was worse) |
+| M4 library validation | `warn` | config to `off` |
+| M5 page sealing | `warn` | config to `off` |
+| M6 trust cache | `off` until signed runtime exists | remove store, regenerate |
+| M7 SIP | `off` | config to `off` |
+| M10 default | `enforce` after soak | config to `warn` |
+
+Nothing in this plan requires a rebuild to turn off; that is a hard
+requirement for field debugging.
+
+---
+
+## 14. References
+
+- Issue #49 — remaining work and requirement list.
+- PR #50 / `docs/security/SIP_AMFI_ENFORCEMENT.md` — short design note.
+- `docs/reviews/pr41-cpuid-security-validation.md` — current truthful-API state.
+- Apple: Code Signing Guide; System Integrity Protection Guide; trust caches
+  (Platform Security Guide).
+- XNU: `bsd/sys/codesign.h`, `bsd/kern/kern_cs.c`, `osfmk/kern/task.c`
+  (cs_blob attachment), `osfmk/arm/trustcache.c`.
+- Apple open source: `Security` (`libsecurity_codesigning`), `dyld`.
+- Darling: `src/startup/mldr/mldr.c`,
+  `src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/{csops,mac_syscall,csrctl}.c`,
+  `src/external/darlingserver/duct-tape/`, `build/src/tools/codesign`.
