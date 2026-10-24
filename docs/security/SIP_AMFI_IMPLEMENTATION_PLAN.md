@@ -339,6 +339,10 @@ in `tests/security/fixtures/README.md`:
   success logging with `DARLING_CODESIGN_VERBOSE=1`. An unknown policy fails
   closed. `tests/security/test_mldr_gate.sh` covers off/warn/enforce, unsigned,
   signed, tampered, unknown policy and parser drift: 11/11 passing.
+  Confirmed inside the real runtime: `darling shell /usr/bin/true` with `warn`
+  logs `bash`, `path_helper` and `true` as unsigned, so the gate sits on the
+  actual exec path. Cost: ~4 ms to verify a 4.8 MB dylib including process
+  startup; no measurable change in `darling shell` startup.
   Known limit: the gate opens the path itself, so the TOCTOU window against the
   loader's own open remains until the loader hands over its fd.
 - Risk: breaks the runtime if M0/M7 prerequisites are skipped. Ship with
