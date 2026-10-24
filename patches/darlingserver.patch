@@ -1770,7 +1770,7 @@ index e35221c..65d4582 100755
  
  ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..7834066 100644
+index cc10f1d..092558e 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
 @@ -18,27 +18,101 @@
@@ -2017,7 +2017,7 @@ index cc10f1d..7834066 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
-@@ -1040,6 +1222,216 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+@@ -1040,6 +1222,215 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
  	_sendReply(code, fullLength);
  }
  
@@ -2202,9 +2202,8 @@ index cc10f1d..7834066 100644
 +			CsImageInfo target;
 +			std::string error;
 +			valid = verifyCsImageFd(_body.fd, _body.offset, &target, &error) ? 1 : 0;
++			/* Only report coverage actually verified by the parser. */
 +			coveredLength = target.state.code_limit;
-+			if (coveredLength == 0 && target.state.image_size > _body.offset)
-+				coveredLength = target.state.image_size - _body.offset;
 +			flags = target.state.flags;
 +
 +			if (_body.check_lv) {
@@ -2772,7 +2771,7 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..d50945d 100644
+index 9cd7b81..57320fa 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,9 +25,16 @@
@@ -3094,7 +3093,7 @@ index 9cd7b81..d50945d 100644
  
  		info.protection = 0;
  
-@@ -607,6 +810,67 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +810,71 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
@@ -3147,6 +3146,10 @@ index 9cd7b81..d50945d 100644
 +	std::unique_lock lock(_csMutex);
 +	uint32_t flags = (_csState.flags | setFlags) & ~clearFlags;
 +
++	if (setFlags & DC_CS_REQUIRE_LV)
++		_csState.lv_required = 1;
++	if (clearFlags & (DC_CS_REQUIRE_LV | DC_CS_FORCED_LV))
++		_csState.lv_required = 0;
 +	if (valid == 0) {
 +		_csState.valid = 0;
 +		flags &= ~DC_CS_VALID;
@@ -3162,7 +3165,7 @@ index 9cd7b81..d50945d 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +921,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +925,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -3460,10 +3463,10 @@ index e502e28..8d1cf2b 100644
  };
 diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
 new file mode 100644
-index 0000000..949c37e
+index 0000000..80259dd
 --- /dev/null
 +++ b/include/darlingserver/cs_state.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,111 @@
 +/*
 + * cs_state.h - code-signing state shared by mldr, libsystem_kernel and
 + * darlingserver.
@@ -3526,11 +3529,18 @@ index 0000000..949c37e
 +#define DC_CS_DEV_CODE 0x40000000u
 +#define DC_CS_DATAVAULT_CONTROLLER 0x80000000u
 +
++/* Parsed entitlement bits (mldr is the only XML parser). */
++#define DC_CS_ENT_ALLOW_DYLD_ENV 0x00000001u
++#define DC_CS_ENT_DISABLE_LV 0x00000002u
++#define DC_CS_ENT_CLEAR_LV 0x00000004u
++
 +struct dc_cs_state {
 +	uint32_t version;
 +	uint32_t verified; /* a verifier ran for this task */
 +	uint32_t valid;    /* verification succeeded */
 +	uint32_t flags;
++	uint32_t darling_entitlements; /* DC_CS_ENT_* */
++	uint32_t lv_required;          /* effective library-validation policy */
 +
 +	uint32_t hash_type;
 +	uint32_t page_size_log2;
@@ -3619,10 +3629,10 @@ index 0000000..6eedb66
 +#endif
 diff --git a/src/cs_verify.cpp b/src/cs_verify.cpp
 new file mode 100644
-index 0000000..e7f0881
+index 0000000..6fc896c
 --- /dev/null
 +++ b/src/cs_verify.cpp
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,300 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -3634,7 +3644,6 @@ index 0000000..e7f0881
 +#include <darlingserver/cs_verify.hpp>
 +#include <darlingserver/server.hpp>
 +
-+#include <sys/mman.h>
 +#include <sys/stat.h>
 +#include <unistd.h>
 +
@@ -3657,6 +3666,7 @@ index 0000000..e7f0881
 +		uint64_t ino;
 +		uint64_t size;
 +		uint64_t mtime;
++		uint64_t ctime;
 +		uint64_t offset;
 +
 +		bool operator<(const CacheKey& other) const {
@@ -3664,6 +3674,7 @@ index 0000000..e7f0881
 +			if (ino != other.ino) return ino < other.ino;
 +			if (size != other.size) return size < other.size;
 +			if (mtime != other.mtime) return mtime < other.mtime;
++			if (ctime != other.ctime) return ctime < other.ctime;
 +			return offset < other.offset;
 +		}
 +	};
@@ -3726,7 +3737,7 @@ index 0000000..e7f0881
 +bool DarlingServer::verifyCsImageFd(int fd, uint64_t offset, CsImageInfo* info, std::string* error) {
 +	struct stat st;
 +	CacheKey key;
-+	void* map;
++	std::vector<uint8_t> data;
 +	struct dc_image img;
 +	char err[512];
 +	int result;
@@ -3747,7 +3758,8 @@ index 0000000..e7f0881
 +	key.dev = (uint64_t) st.st_dev;
 +	key.ino = (uint64_t) st.st_ino;
 +	key.size = (uint64_t) st.st_size;
-+	key.mtime = (uint64_t) st.st_mtime;
++	key.mtime = (uint64_t) st.st_mtim.tv_sec * 1000000000ull + (uint64_t) st.st_mtim.tv_nsec;
++	key.ctime = (uint64_t) st.st_ctim.tv_sec * 1000000000ull + (uint64_t) st.st_ctim.tv_nsec;
 +	key.offset = offset;
 +
 +	{
@@ -3761,14 +3773,41 @@ index 0000000..e7f0881
 +		}
 +	}
 +
-+	map = mmap(nullptr, (size_t) st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-+	if (map == MAP_FAILED) {
-+		if (error) *error = "cannot map image";
++	/* Read a private snapshot instead of mmap()ing the caller's file: a
++	 * concurrent truncate would otherwise deliver SIGBUS to the server. */
++	if ((uint64_t) st.st_size > 512ull * 1024ull * 1024ull) {
++		if (error) *error = "image is too large to verify";
 +		return false;
++	}
++	data.resize((size_t) st.st_size);
++	{
++		size_t done = 0;
++		while (done < data.size()) {
++			ssize_t got = pread(fd, data.data() + done, data.size() - done, (off_t) done);
++			if (got <= 0) {
++				if (error) *error = "cannot read image";
++				return false;
++			}
++			done += (size_t) got;
++		}
++	}
++
++	/* The descriptor may name a file that changed while it was read. */
++	{
++		struct stat after;
++		if (fstat(fd, &after) != 0 || after.st_size != st.st_size ||
++		    after.st_dev != st.st_dev || after.st_ino != st.st_ino ||
++		    after.st_mtim.tv_sec != st.st_mtim.tv_sec ||
++		    after.st_mtim.tv_nsec != st.st_mtim.tv_nsec ||
++		    after.st_ctim.tv_sec != st.st_ctim.tv_sec ||
++		    after.st_ctim.tv_nsec != st.st_ctim.tv_nsec) {
++			if (error) *error = "image changed while it was read";
++			return false;
++		}
 +	}
 +
 +	err[0] = '\0';
-+	result = dc_parse((const uint8_t*) map + offset, (size_t) st.st_size - (size_t) offset,
++	result = dc_parse(data.data() + offset, data.size() - (size_t) offset,
 +	    &img, err, sizeof(err));
 +	if (result == 0)
 +		result = dc_verify_pages(&img, err, sizeof(err));
@@ -3780,7 +3819,7 @@ index 0000000..e7f0881
 +	parsed.state.image_dev = (uint64_t) st.st_dev;
 +	parsed.state.image_ino = (uint64_t) st.st_ino;
 +	parsed.state.image_size = (uint64_t) st.st_size;
-+	parsed.state.image_mtime = (uint64_t) st.st_mtime;
++	parsed.state.image_mtime = key.mtime;
 +	parsed.state.image_offset = offset;
 +	{
 +		char linkPath[64];
@@ -3814,8 +3853,6 @@ index 0000000..e7f0881
 +		parsed.state.flags = 0;
 +	}
 +
-+	munmap(map, (size_t) st.st_size);
-+
 +	{
 +		std::lock_guard<std::mutex> lock(cacheMutex);
 +		cache[key] = parsed;
@@ -3832,25 +3869,37 @@ index 0000000..e7f0881
 +	return keyIsTrue(xml.empty() ? nullptr : xml.data(), xml.size(), key);
 +}
 +
++static bool startsWith(const char* path, const std::string& prefix) {
++	return prefix.size() <= strlen(path) &&
++	       strncmp(path, prefix.c_str(), prefix.size()) == 0;
++}
++
 +static bool darlingRuntimePath(const char* path) {
-+	/* Darling's own runtime libraries are ad-hoc signed and live in the SDK
-+	 * or a per-user prefix. They are trusted as platform images for M4; M6
-+	 * replaces this with a real local trust store. Anchor the check to the
-+	 * configured prefix instead of accepting any path containing ".darling". */
-+	static const char* const systemPrefixes[] = {
++	/* Darling's own runtime libraries are ad-hoc signed. Trust only the
++	 * known library/framework locations, not every file under the prefix. */
++	static const char* const systemRoots[] = {
 +		"/usr/local/libexec/darling/",
 +		"/usr/libexec/darling/",
 +	};
 +	std::string prefix = DarlingServer::Server::sharedInstance().prefix();
 +	size_t i;
 +
-+	if (!prefix.empty()) {
-+		prefix += '/';
-+		if (strncmp(path, prefix.c_str(), prefix.size()) == 0)
++	for (i = 0; i < sizeof(systemRoots) / sizeof(systemRoots[0]); i++) {
++		std::string root = systemRoots[i];
++		if (startsWith(path, root + "usr/lib/") ||
++		    startsWith(path, root + "System/Library/Frameworks/") ||
++		    startsWith(path, root + "System/Library/PrivateFrameworks/"))
 +			return true;
 +	}
-+	for (i = 0; i < sizeof(systemPrefixes) / sizeof(systemPrefixes[0]); i++) {
-+		if (strncmp(path, systemPrefixes[i], strlen(systemPrefixes[i])) == 0)
++	if (!prefix.empty()) {
++		prefix += '/';
++		if (startsWith(path, prefix + "usr/lib/") ||
++		    startsWith(path, prefix + "System/Library/Frameworks/") ||
++		    startsWith(path, prefix + "System/Library/PrivateFrameworks/"))
++			return true;
++		if (startsWith(path, prefix + "Users/") &&
++		    (strstr(path, "/RuntimeLibraries/") != nullptr ||
++		     strstr(path, "/RuntimeFrameworks/") != nullptr))
 +			return true;
 +	}
 +	return false;
@@ -3863,7 +3912,7 @@ index 0000000..e7f0881
 +	    entitlementIsTrue(mainEntitlements, "com.apple.security.cs.disable-library-validation"))
 +		return true;
 +
-+	if (!(mainState.flags & (DC_CS_REQUIRE_LV | DC_CS_RUNTIME)))
++	if (!mainState.lv_required)
 +		return true;
 +
 +	if (!target.state.valid) {
@@ -3886,10 +3935,10 @@ index 0000000..e7f0881
 +}
 diff --git a/src/dc_codesign.c b/src/dc_codesign.c
 new file mode 100644
-index 0000000..1a46ff9
+index 0000000..d075704
 --- /dev/null
 +++ b/src/dc_codesign.c
-@@ -0,0 +1,582 @@
+@@ -0,0 +1,595 @@
 +/*
 + * dc_codesign.c - bounded Mach-O code signature parser.
 + *
@@ -4307,6 +4356,8 @@ index 0000000..1a46ff9
 +	}
 +	if (code_limit == 0)
 +		code_limit = code_limit32;
++	if (code_limit == 0)
++		return fail(err, errlen, "code limit is zero (no signed executable content)");
 +	if (code_limit > img->size)
 +		return fail(err, errlen, "code limit %llu beyond file size %zu",
 +			    (unsigned long long)code_limit, img->size);
@@ -4432,6 +4483,17 @@ index 0000000..1a46ff9
 +
 +	if (!img || !img->cd)
 +		return fail(err, errlen, "image not parsed");
++
++	/* Re-check the special slots here as well: callers that parse once and
++	 * verify later must not use entitlements that are not bound to the
++	 * CodeDirectory. */
++	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
++				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
++				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
++				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
++		return -1;
 +
 +	page_size = 1ull << img->page_size_log2;
 +	hash_off = be32(img->cd + 16);

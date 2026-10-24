@@ -77,6 +77,7 @@ main_hard=$tmp/main-hard
 main_nolv=$tmp/main-nolv
 main_allowenv=$tmp/main-allowenv
 main_team=$tmp/main-team
+main_clear=$tmp/main-clear
 target_unsigned=$tmp/libtarget-unsigned.dylib
 target_adhoc=$tmp/libtarget-adhoc.dylib
 target_team_a=$tmp/libtarget-team-a.dylib
@@ -104,12 +105,14 @@ cp "$main_unsigned" "$main_hard"
 cp "$main_unsigned" "$main_nolv"
 cp "$main_unsigned" "$main_allowenv"
 cp "$main_unsigned" "$main_team"
+cp "$main_unsigned" "$main_clear"
 cp "$target_unsigned" "$target_adhoc"
 cp "$target_unsigned" "$target_team_a"
 cp "$target_unsigned" "$target_team_b"
 
 disable_lv=$tmp/disable-lv.plist
 allow_env=$tmp/allow-env.plist
+clear_lv=$tmp/clear-lv.plist
 cat >"$disable_lv" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -122,6 +125,13 @@ cat >"$allow_env" <<'EOF'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+</dict></plist>
+EOF
+cat >"$clear_lv" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.private.security.clear-library-validation</key><true/>
 </dict></plist>
 EOF
 
@@ -193,6 +203,14 @@ if ! sign --pem-source "$certs/team-b.crt" --pem-source "$certs/team-b.key" \
 	finish
 	exit $?
 fi
+if ! sign --pem-source "$certs/team-a.crt" --pem-source "$certs/team-a.key" \
+    --team-name TEAMA --binary-identifier lv-main-clear \
+    --code-signature-flags runtime --code-signature-flags library \
+    --entitlements-xml-file "$clear_lv" "$main_clear"; then
+	miss "failed to sign the clear-library-validation main"
+	finish
+	exit $?
+fi
 
 guest_root=/Volumes/SystemRoot
 run_guest() { # output args...
@@ -233,6 +251,10 @@ expect "same-team dylib loads" "$out" "DLOPEN_OK"
 out=$(run_guest "$guest_root$main_team" "$guest_root$target_team_b")
 expect "different-team dylib is refused" "$out" "DLOPEN_FAIL"
 expect "different-team refusal names the team ID" "$out" "different team ID"
+
+out=$(run_guest "$guest_root$main_clear" --clear-lv "$guest_root$target_team_b")
+expect "clear-library-validation clears the effective LV policy" "$out" "CLEAR_LV_OK"
+expect "cleared-LV process loads a different-team dylib" "$out" "DLOPEN_OK"
 
 out=$(run_guest env "DYLD_INSERT_LIBRARIES=$guest_root$insert" "$guest_root$main_hard" "$guest_root$target_adhoc")
 reject "hardened process ignores DYLD_INSERT_LIBRARIES" "$out" "INSERTED"

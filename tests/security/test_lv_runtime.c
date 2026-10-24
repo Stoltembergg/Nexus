@@ -23,6 +23,13 @@ int main(int argc, char** argv) {
 		}
 		printf("SET_LV_OK\n");
 		argv++;
+	} else if (argc > 2 && strcmp(argv[1], "--clear-lv") == 0) {
+		if (csops(0, CS_OPS_CLEAR_LV, NULL, 0) != 0) {
+			printf("CLEAR_LV_FAIL\n");
+			return 3;
+		}
+		printf("CLEAR_LV_OK\n");
+		argv++;
 	}
 
 	if (argc < 2)

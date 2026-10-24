@@ -415,6 +415,8 @@ static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
 	}
 	if (code_limit == 0)
 		code_limit = code_limit32;
+	if (code_limit == 0)
+		return fail(err, errlen, "code limit is zero (no signed executable content)");
 	if (code_limit > img->size)
 		return fail(err, errlen, "code limit %llu beyond file size %zu",
 			    (unsigned long long)code_limit, img->size);
@@ -540,6 +542,17 @@ int dc_verify_pages(struct dc_image *img, char *err, size_t errlen)
 
 	if (!img || !img->cd)
 		return fail(err, errlen, "image not parsed");
+
+	/* Re-check the special slots here as well: callers that parse once and
+	 * verify later must not use entitlements that are not bound to the
+	 * CodeDirectory. */
+	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
+				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
+	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
+				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
+	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
+				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
+		return -1;
 
 	page_size = 1ull << img->page_size_log2;
 	hash_off = be32(img->cd + 16);

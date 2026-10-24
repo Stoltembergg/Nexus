@@ -6201,7 +6201,7 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root_len = prefix_path_len;
  							}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-index f1ce3d3..30a23d8 100644
+index f1ce3d3..94ce20c 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 @@ -1,38 +1,359 @@
@@ -6235,7 +6235,7 @@ index f1ce3d3..30a23d8 100644
 +
 +/* Darling-private read-only extension: entitlement bits for dyld bootstrap.
 + * bit 0: com.apple.security.cs.allow-dyld-environment-variables */
-+#define CS_OPS_DARLING_ENTITLEMENT_BITS 16
++#define CS_OPS_DARLING_ENTITLEMENT_BITS 0x100
 +
 +#define CS_SETTABLE_FLAGS \
 +	(CS_HARD | CS_EXEC_SET_HARD | CS_KILL | CS_EXEC_SET_KILL | CS_RESTRICT | \

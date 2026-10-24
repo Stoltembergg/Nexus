@@ -432,7 +432,8 @@ in `tests/security/fixtures/README.md`:
   own overlays.
   `tests/security/test_lv_runtime.sh` covers unsigned refusal, ad-hoc and
   same-team loads, different-team refusal, `disable-library-validation`, and
-  `DYLD_INSERT_LIBRARIES` with and without the entitlement: 12/12 passing.
+  `DYLD_INSERT_LIBRARIES` with and without the entitlement, and
+  `CS_OPS_CLEAR_LV` followed by a different-team load: 14/14 passing.
   Known limits: CMS/Developer ID chains are not verified yet (M1 open item),
   the runtime-path exemption is broader than the future trust store, and
   `DYLD_*` path/root variables remain usable in hardened processes to keep
