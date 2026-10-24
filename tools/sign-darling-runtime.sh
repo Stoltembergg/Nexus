@@ -11,14 +11,17 @@
 #   --force           re-sign files that already have a signature
 #   --verify          verify after signing (default)
 #   --no-verify       skip the post-signing dc-codesign verify
+#   --no-thin         do not thin single-architecture x86_64 fat binaries
 #   --allow-running   permit signing while darlingserver is running
 #   --quiet           only print the summary
 #
 # With no DIR and no --sdk/--prefix, both defaults are used.
 #
 # Idempotent: files that already carry a CodeDirectory are skipped unless
-# --force. Fat binaries and relocatable objects (MH_OBJECT) are skipped: the
-# guest target is thin x86-64 and MH_OBJECT is not a loadable image.
+# --force. Relocatable objects (MH_OBJECT) are skipped because they are not
+# loadable images. A fat binary whose only slice is x86_64 is thinned in place
+# (the guest target is thin x86-64) and then signed; multi-architecture fat
+# binaries are skipped.
 #
 # Exit: 0 all good, 1 some file failed, 2 usage/setup error.
 
@@ -30,10 +33,12 @@ RCODESIGN=${RCODESIGN:-$(command -v rcodesign 2>/dev/null || true)}
 if [ -z "$RCODESIGN" ] && [ -x "${HOME:-/nonexistent}/.local/bin/rcodesign" ]; then
 	RCODESIGN="$HOME/.local/bin/rcodesign"
 fi
+LIPO=${LIPO:-$(command -v llvm-lipo 2>/dev/null || command -v lipo 2>/dev/null || true)}
 
 dry=0
 force=0
 verify=1
+thin=1
 allow_running=0
 quiet=0
 roots=""
@@ -56,6 +61,7 @@ while [ $# -gt 0 ]; do
 	--force) force=1 ;;
 	--verify) verify=1 ;;
 	--no-verify) verify=0 ;;
+	--no-thin) thin=0 ;;
 	--allow-running) allow_running=1 ;;
 	--quiet) quiet=1 ;;
 	-h|--help) usage ;;
@@ -113,7 +119,7 @@ is_macho() { # path -> prints thin|fat|object|no
 	esac
 }
 
-signed=0; skipped=0; failed=0; fat=0; object=0; total=0
+signed=0; skipped=0; failed=0; fat=0; thinned=0; object=0; total=0
 
 for root in $roots; do
 	if [ ! -d "$root" ]; then
@@ -127,10 +133,45 @@ for root in $roots; do
 		kind=$(is_macho "$f")
 		[ "$kind" = no ] && continue
 		total=$((total + 1))
+		backup=""
 		if [ "$kind" = fat ]; then
-			fat=$((fat + 1))
-			[ "$quiet" -eq 1 ] || echo "skip fat: $f"
-			continue
+			archs=""
+			[ -n "$LIPO" ] && archs=$("$LIPO" -archs "$f" 2>/dev/null | tr -d '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+			if [ "$thin" -eq 1 ] && [ "$archs" = x86_64 ]; then
+				if [ "$dry" -eq 1 ]; then
+					thinned=$((thinned + 1))
+					[ "$quiet" -eq 1 ] || echo "would thin: $f"
+				else
+					backup="$tmp/fat-backup.$$"
+					rm -f "$backup"
+					cp -a "$f" "$backup" || {
+						echo "thin FAILED (backup): $f" >&2
+						failed=$((failed + 1))
+						continue
+					}
+					tmpf=$(mktemp "$(dirname "$f")/.dc-thin.XXXXXX") || {
+						echo "thin FAILED (temp): $f" >&2
+						rm -f "$backup"
+						failed=$((failed + 1))
+						continue
+					}
+					if ! "$LIPO" -thin x86_64 "$f" -output "$tmpf"; then
+						rm -f "$tmpf" "$backup"
+						echo "thin FAILED: $f" >&2
+						failed=$((failed + 1))
+						continue
+					fi
+					chmod --reference="$f" "$tmpf" 2>/dev/null || true
+					chown --reference="$f" "$tmpf" 2>/dev/null || true
+					mv -f "$tmpf" "$f"
+					thinned=$((thinned + 1))
+					[ "$quiet" -eq 1 ] || echo "thinned: $f"
+				fi
+			else
+				fat=$((fat + 1))
+				[ "$quiet" -eq 1 ] || echo "skip fat${archs:+ ($archs)}: $f"
+				continue
+			fi
 		fi
 		if [ "$kind" = object ]; then
 			object=$((object + 1))
@@ -139,6 +180,7 @@ for root in $roots; do
 		fi
 		if [ "$force" -eq 0 ] && "$DCC" info "$f" >/dev/null 2>&1; then
 			skipped=$((skipped + 1))
+			[ -n "$backup" ] && rm -f "$backup"
 			continue
 		fi
 		if [ "$dry" -eq 1 ]; then
@@ -149,20 +191,29 @@ for root in $roots; do
 		if "$RCODESIGN" sign --binary-identifier "$(basename "$f")" "$f" >/dev/null 2>&1; then
 			if [ "$verify" -eq 1 ] && ! "$DCC" verify "$f" >/dev/null 2>&1; then
 				echo "verify FAILED: $f" >&2
+				if [ -n "$backup" ]; then
+					cp -a "$backup" "$f"
+					rm -f "$backup"
+				fi
 				failed=$((failed + 1))
 				continue
 			fi
 			signed=$((signed + 1))
+			[ -n "$backup" ] && rm -f "$backup"
 			[ "$quiet" -eq 1 ] || echo "signed: $f"
 		else
 			echo "sign FAILED: $f" >&2
+			if [ -n "$backup" ]; then
+				cp -a "$backup" "$f"
+				rm -f "$backup"
+			fi
 			failed=$((failed + 1))
 		fi
 	done < "$tmp/files"
 done
 
 printf -- '----\n'
-printf 'total=%d signed=%d skipped=%d fat=%d object=%d failed=%d%s\n' \
-	"$total" "$signed" "$skipped" "$fat" "$object" "$failed" \
+printf 'total=%d signed=%d skipped=%d fat=%d thinned=%d object=%d failed=%d%s\n' \
+	"$total" "$signed" "$skipped" "$fat" "$thinned" "$object" "$failed" \
 	"$([ "$dry" -eq 1 ] && echo ' (dry-run)')"
 [ "$failed" -eq 0 ]

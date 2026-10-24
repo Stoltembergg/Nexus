@@ -249,12 +249,14 @@ Enforcement is impossible while the runtime itself is unsigned. Order matters:
    detects thin Mach-O by magic, signs with `rcodesign`, verifies every result
    with `dc-codesign`, skips already-signed files (idempotent), refuses to run
    while `darlingserver` is alive, and supports `--dry-run`, `--force`,
-   `--sdk`, `--prefix`. Fat binaries and relocatable objects (`MH_OBJECT`) are
-   skipped. The three universal wrappers with a single x86_64 slice
-   (`CoreFoundation`, `Foundation`, `Security`) were thinned with
-   `llvm-lipo -thin x86_64` and then signed. Final installed SDK: 1275 Mach-O,
-   1274 thin loadable, 1 object; signing verified 1274, skipped 1 object, 0
-   failed. `sw_vers` (which loads CoreFoundation) and Python 2.7 still run.
+   `--sdk`, `--prefix`. Relocatable objects (`MH_OBJECT`) are skipped. A fat
+   binary whose only slice is x86_64 is thinned in place with
+   `llvm-lipo -thin x86_64` and then signed; `--no-thin` opts out and
+   multi-architecture fat binaries are skipped. Final installed SDK: 1275
+   Mach-O, 1274 thin loadable, 1 object; signing verified 1274, skipped 1
+   object, 0 failed. `tests/security/test_sign_runtime.sh` covers thinning,
+   idempotence, multi-architecture rejection and `--no-thin`: 6/6 passing.
+   `sw_vers` (which loads CoreFoundation) and Python 2.7 still run.
    Confirmed: Darling executes an ad-hoc signed copy of `/usr/bin/true`
    (`mldr: codesign ok` and exit 0), so the loader accepts re-signed images.
 2. Ship entitlement plists per component under
