@@ -9,6 +9,7 @@
 #                     RuntimeFrameworks) under ~/.darling
 #   --dry-run         list what would be signed
 #   --force           re-sign files that already have a signature
+#   --verify          verify after signing (default)
 #   --no-verify       skip the post-signing dc-codesign verify
 #   --allow-running   permit signing while darlingserver is running
 #   --quiet           only print the summary
@@ -52,6 +53,7 @@ while [ $# -gt 0 ]; do
 		explicit=1 ;;
 	--dry-run) dry=1 ;;
 	--force) force=1 ;;
+	--verify) verify=1 ;;
 	--no-verify) verify=0 ;;
 	--allow-running) allow_running=1 ;;
 	--quiet) quiet=1 ;;
