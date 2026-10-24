@@ -62,7 +62,7 @@ redistributing Apple-signed software.
 
 `tests/security/probe/ground_truth.c` is a read-only probe of `csops`, `csrctl`
 and the running task's signing state. `.github/workflows/security-ground-truth.yml`
-runs it on GitHub's macOS runners (Intel + arm64) and uploads JSON artifacts.
+runs it on GitHub's arm64 macOS runners (Intel hosts can run it manually) and uploads JSON artifacts.
 
 This is the only tier that can answer "what does macOS actually return?".
 It requires no Apple hardware ownership: a public repository gets free macOS

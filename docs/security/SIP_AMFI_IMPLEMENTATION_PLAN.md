@@ -277,10 +277,12 @@ in `tests/security/fixtures/README.md`:
   compare cdhash and blob layout against `rcodesign compute-code-hashes`.
 - **Behavioural truth** comes from
   `.github/workflows/security-ground-truth.yml`, which builds and runs
-  `tests/security/probe/ground_truth.c` on GitHub's macOS runners (Intel
-  `macos-13`, arm64 `macos-14/15`) and uploads JSON artifacts. The probe is
-  read-only: `csops` status/cdhash/teamid/entitlements, a forked child query
-  (cross-process semantics), and the `csrctl` configuration.
+  `tests/security/probe/ground_truth.c` on GitHub's arm64 macOS runners
+  (`macos-14`, `macos-15`) and uploads JSON artifacts. Intel hosts can run the
+  same probe manually (the GitHub Intel labels are retired or persistently
+  queued). The probe is read-only: `csops` status/cdhash/teamid/entitlements,
+  a forked child query (cross-process semantics), and the `csrctl`
+  configuration.
 - **Policy truth** (Developer ID chains, notarization) uses public signed
   releases fetched by pinned URL + SHA-256 at test time; never vendored.
 - **Volunteer Mac** fallback: issue #31 has a contributor offering a real Mac;

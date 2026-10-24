@@ -19,15 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-          - os: macos-15
-          # Intel runner: deprecated by GitHub at some point; keep it
-          # non-blocking so the arm64 data is still produced.
-          - os: macos-13
-            optional: true
+        # arm64 runners. Intel hosts can run the same probe manually; the
+        # GitHub Intel labels are retired or persistently queued.
+        os: [macos-14, macos-15]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.optional || false }}
     steps:
       - uses: actions/checkout@v4
 
