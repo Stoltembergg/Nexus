@@ -35,6 +35,9 @@ if [ -z "$RCODESIGN" ]; then
 	exit 2
 fi
 
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
 input=${1:-${DC_TEST_INPUT:-}}
 if [ -z "$input" ]; then
 	input=$(find "$repo/build/darling-src/build" -type f -name '*.dylib' 2>/dev/null | while IFS= read -r f; do
@@ -44,8 +47,12 @@ if [ -z "$input" ]; then
 		fi
 	done)
 fi
+if [ -z "$input" ] && command -v python3 >/dev/null 2>&1; then
+	input="$tmp/minimal.dylib"
+	python3 "$here/minimal_macho.py" "$input" || input=""
+fi
 if [ -z "$input" ] || [ ! -f "$input" ]; then
-	miss "no Mach-O input (pass one as \$1 or set DC_TEST_INPUT)"
+	miss "no Mach-O input (pass one as \$1, set DC_TEST_INPUT, or install python3)"
 	echo "----"
 	echo "pass=$pass fail=$fail skip=$skip"
 	exit 0

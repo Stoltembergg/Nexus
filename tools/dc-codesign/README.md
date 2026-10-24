@@ -64,3 +64,24 @@ self-signed team id, truncated and non-Mach-O inputs.
 
 If no Mach-O is passed and no Darling build tree is present, the script reports
 `SKIP` instead of failing.
+
+## Fuzzing
+
+```sh
+make fuzz                 # clang -fsanitize=fuzzer,address,undefined
+./fuzz/run.sh 60          # builds a corpus from a signed Mach-O, runs 60s
+./fuzz/run.sh 300 path/to/binary
+```
+
+`fuzz/run.sh` seeds the corpus with an unsigned Mach-O, ad-hoc and SHA-1
+signatures, an entitlements signature, truncations and arbitrary bytes, then
+runs the parser under ASan/UBSan. The harness also verifies page hashes and
+touches both ends of every located blob, so OOB reads in either path abort.
+
+Reference run (Ryzen 7 5800H-class, 12 threads): 7,046,007 executions in 61 s,
+115k exec/s, 480 new corpus units, no findings.
+
+CI (`.github/workflows/dc-codesign.yml`) runs `make test` and a 30 s fuzz
+smoke on every change under `tools/dc-codesign/`. When no Darling build tree is
+present, both scripts generate a minimal signable Mach-O with
+`minimal_macho.py`.
