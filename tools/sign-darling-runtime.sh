@@ -17,7 +17,8 @@
 # With no DIR and no --sdk/--prefix, both defaults are used.
 #
 # Idempotent: files that already carry a CodeDirectory are skipped unless
-# --force. Fat binaries are skipped (the guest target is thin x86-64).
+# --force. Fat binaries and relocatable objects (MH_OBJECT) are skipped: the
+# guest target is thin x86-64 and MH_OBJECT is not a loadable image.
 #
 # Exit: 0 all good, 1 some file failed, 2 usage/setup error.
 
@@ -90,16 +91,29 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-is_macho() { # path -> prints thin|fat|no
+is_macho() { # path -> prints thin|fat|object|no
 	magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
 	case "$magic" in
-	cffaedfe|feedfacf|cefaedfe|feedface) echo thin ;;
-	cafebabe|bebafeca|bebafeca) echo fat ;;
+	cffaedfe|cefaedfe)
+		# Little-endian 32/64-bit Mach-O; MH_OBJECT has filetype 1 at $12.
+		if [ "$(od -An -tx1 -j12 -N4 "$1" 2>/dev/null | tr -d ' \n')" = 01000000 ]; then
+			echo object
+		else
+			echo thin
+		fi ;;
+	feedfacf|feedface)
+		# Big-endian 32/64-bit Mach-O.
+		if [ "$(od -An -tx1 -j12 -N4 "$1" 2>/dev/null | tr -d ' \n')" = 00000001 ]; then
+			echo object
+		else
+			echo thin
+		fi ;;
+	cafebabe|bebafeca) echo fat ;;
 	*) echo no ;;
 	esac
 }
 
-signed=0; skipped=0; failed=0; fat=0; total=0
+signed=0; skipped=0; failed=0; fat=0; object=0; total=0
 
 for root in $roots; do
 	if [ ! -d "$root" ]; then
@@ -116,6 +130,11 @@ for root in $roots; do
 		if [ "$kind" = fat ]; then
 			fat=$((fat + 1))
 			[ "$quiet" -eq 1 ] || echo "skip fat: $f"
+			continue
+		fi
+		if [ "$kind" = object ]; then
+			object=$((object + 1))
+			[ "$quiet" -eq 1 ] || echo "skip object: $f"
 			continue
 		fi
 		if [ "$force" -eq 0 ] && "$DCC" info "$f" >/dev/null 2>&1; then
@@ -143,7 +162,7 @@ for root in $roots; do
 done
 
 printf -- '----\n'
-printf 'total=%d signed=%d skipped=%d fat=%d failed=%d%s\n' \
-	"$total" "$signed" "$skipped" "$fat" "$failed" \
+printf 'total=%d signed=%d skipped=%d fat=%d object=%d failed=%d%s\n' \
+	"$total" "$signed" "$skipped" "$fat" "$object" "$failed" \
 	"$([ "$dry" -eq 1 ] && echo ' (dry-run)')"
 [ "$failed" -eq 0 ]

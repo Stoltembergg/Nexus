@@ -249,8 +249,10 @@ Enforcement is impossible while the runtime itself is unsigned. Order matters:
    detects thin Mach-O by magic, signs with `rcodesign`, verifies every result
    with `dc-codesign`, skips already-signed files (idempotent), refuses to run
    while `darlingserver` is alive, and supports `--dry-run`, `--force`,
-   `--sdk`, `--prefix`. Fat binaries are skipped. Dry-run on the installed SDK:
-   1272 Mach-O, 1269 thin, 3 fat.
+   `--sdk`, `--prefix`. Fat binaries and relocatable objects (`MH_OBJECT`) are
+   skipped. On the installed SDK: 1275 Mach-O, 1271 thin loadable, 3 fat, 1
+   object; full run signed and verified 1271, skipped 3 fat + 1 object, 0
+   failed.
    Confirmed: Darling executes an ad-hoc signed copy of `/usr/bin/true`
    (`mldr: codesign ok` and exit 0), so the loader accepts re-signed images.
 2. Ship entitlement plists per component under
