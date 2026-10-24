@@ -249,6 +249,7 @@ static void probe_self(void)
 	r = x_csops(getpid(), CS_OPS_TEAMID, teamid, sizeof(teamid));
 	printf("    \"teamid\": {\"rc\": %d, \"errno\": %d, \"value\": ", r, r ? errno : 0);
 	if (r == 0 && blob_length((unsigned char *)teamid, sizeof(teamid)) > 8) {
+		teamid[sizeof(teamid) - 1] = '\0';
 		print_json_string(teamid + 8);
 	} else if (r == 0) {
 		print_json_string("");
@@ -258,7 +259,9 @@ static void probe_self(void)
 	printf("},\n");
 
 	if (read_blob(getpid(), CS_OPS_ENTITLEMENTS_BLOB, &ents, &ents_len) == 0) {
-		size_t total = blob_length(ents, ents_len);
+		size_t total;
+		ents[ents_len - 1] = '\0';
+		total = blob_length(ents, ents_len);
 		size_t payload = total > 8 ? total - 8 : 0;
 		printf("    \"entitlements\": {\"rc\": 0, \"length\": %zu, \"xml\": ", payload);
 		if (payload > 0)
@@ -318,6 +321,7 @@ static void probe_child(void)
 	printf("\"},\n");
 	printf("    \"teamid\": {\"rc\": %d, \"errno\": %d, \"value\": ", rt, rt ? et : 0);
 	if (rt == 0 && blob_length((unsigned char *)teamid, sizeof(teamid)) > 8) {
+		teamid[sizeof(teamid) - 1] = '\0';
 		print_json_string(teamid + 8);
 	} else if (rt == 0) {
 		print_json_string("");
