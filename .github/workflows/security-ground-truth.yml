@@ -1,0 +1,65 @@
+name: security-ground-truth
+
+# Collects read-only code-signing / SIP observations from real macOS hosts.
+# Used by docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (phase M0).
+# No game, no account, no mutation: the probe only reads csops/csr state.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tests/security/probe/**"
+      - ".github/workflows/security-ground-truth.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+          - os: macos-15
+          # Intel runner: deprecated by GitHub at some point; keep it
+          # non-blocking so the arm64 data is still produced.
+          - os: macos-13
+            optional: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional || false }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build probe
+        run: clang -O2 -Wall -Wextra -o ground_truth tests/security/probe/ground_truth.c
+
+      - name: Run probe
+        run: ./ground_truth > "ground-truth-${{ matrix.os }}.json"
+
+      - name: Static signing and SIP info
+        run: |
+          out="codesign-${{ matrix.os }}.txt"
+          {
+            echo "### sw_vers"; sw_vers
+            echo "### uname"; uname -a
+            echo "### csrutil"; csrutil status
+            echo "### spctl"; spctl --status
+          } > "$out" 2>&1 || true
+          for p in \
+            /bin/ls \
+            /usr/bin/true \
+            /usr/lib/dyld \
+            /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation \
+            /System/Applications/Safari.app ; do
+            echo "### $p" >> "$out"
+            codesign -dvvv "$p" >> "$out" 2>&1 || true
+            codesign -d --entitlements - "$p" >> "$out" 2>&1 || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ground-truth-${{ matrix.os }}
+          path: |
+            ground-truth-*.json
+            codesign-*.txt
