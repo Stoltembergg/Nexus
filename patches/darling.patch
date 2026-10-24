@@ -8526,7 +8526,7 @@ index fee1bde8..14733ac4 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82..d8828002 100644
+index 6617ef82..b878c2b2 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -42,6 +42,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -8538,7 +8538,7 @@ index 6617ef82..d8828002 100644
  
  #ifndef PAGE_SIZE
  #	define PAGE_SIZE	4096
-@@ -106,6 +108,192 @@ void* __mldr_main_stack_top = NULL;
+@@ -106,6 +108,198 @@ void* __mldr_main_stack_top = NULL;
  static int kernel_major = -1;
  static int kernel_minor = -1;
  
@@ -8695,6 +8695,12 @@ index 6617ef82..d8828002 100644
 +				state->entitlements_len = (uint32_t) img.entitlements_len;
 +			}
 +		}
++		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.security.cs.allow-dyld-environment-variables"))
++			state->darling_entitlements |= DC_CS_ENT_ALLOW_DYLD_ENV;
++		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.security.cs.disable-library-validation"))
++			state->darling_entitlements |= DC_CS_ENT_DISABLE_LV;
++		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.private.security.clear-library-validation"))
++			state->darling_entitlements |= DC_CS_ENT_CLEAR_LV;
 +		if (img.der_entitlements_len > 0 && img.der_entitlements_len <= DC_CS_MAX_DER_ENTITLEMENTS) {
 +			uint8_t* copy = malloc(img.der_entitlements_len);
 +			if (copy != NULL) {
@@ -8731,7 +8737,7 @@ index 6617ef82..d8828002 100644
  int main(int argc, char** argv, char** envp)
  {
  	void** sp;
-@@ -154,10 +342,15 @@ int main(int argc, char** argv, char** envp)
+@@ -154,10 +348,15 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -8748,7 +8754,7 @@ index 6617ef82..d8828002 100644
  #ifdef __i386__
  	load(filename, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
  #else
-@@ -563,6 +756,16 @@ static socket_bitmap_t socket_bitmap = {
+@@ -563,6 +762,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -8765,7 +8771,7 @@ index 6617ef82..d8828002 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +851,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +857,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -8777,7 +8783,7 @@ index 6617ef82..d8828002 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +881,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +887,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -8792,7 +8798,7 @@ index 6617ef82..d8828002 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +899,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +905,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -8818,7 +8824,7 @@ index 6617ef82..d8828002 100644
  		}
  	}
  
-@@ -698,6 +920,22 @@ out:
+@@ -698,6 +926,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -8841,7 +8847,7 @@ index 6617ef82..d8828002 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +945,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +951,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -8861,7 +8867,7 @@ index 6617ef82..d8828002 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +1003,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1009,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -8880,7 +8886,7 @@ index 6617ef82..d8828002 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1114,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1120,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  

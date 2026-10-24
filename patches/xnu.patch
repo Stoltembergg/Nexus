@@ -6201,15 +6201,14 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root_len = prefix_path_len;
  							}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-index f1ce3d3..18f4c40 100644
+index f1ce3d3..4a91539 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-@@ -1,38 +1,382 @@
+@@ -1,38 +1,361 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
  
  #include <stdint.h>
 +#include <stddef.h>
-+#include <stdio.h>
 +#include <string.h>
 +#include <errno.h>
 +#include <signal.h>
@@ -6233,6 +6232,10 @@ index f1ce3d3..18f4c40 100644
 +#ifndef CS_OPS_PIDPATH
 +#define CS_OPS_PIDPATH 4
 +#endif
++
++/* Darling-private read-only extension: entitlement bits for dyld bootstrap.
++ * bit 0: com.apple.security.cs.allow-dyld-environment-variables */
++#define CS_OPS_DARLING_ENTITLEMENT_BITS 16
 +
 +#define CS_SETTABLE_FLAGS \
 +	(CS_HARD | CS_EXEC_SET_HARD | CS_KILL | CS_EXEC_SET_KILL | CS_RESTRICT | \
@@ -6362,42 +6365,6 @@ index f1ce3d3..18f4c40 100644
 +	return (state->flags & CS_GET_TASK_ALLOW) != 0;
 +}
 +
-+static const uint8_t* find_bytes(const uint8_t* haystack, size_t haystack_len, const char* needle) {
-+	size_t needle_len = strlen(needle);
-+	size_t i;
-+
-+	if (needle_len == 0 || haystack_len < needle_len)
-+		return NULL;
-+	for (i = 0; i + needle_len <= haystack_len; i++) {
-+		if (memcmp(haystack + i, needle, needle_len) == 0)
-+			return haystack + i;
-+	}
-+	return NULL;
-+}
-+
-+static int local_has_entitlement(const char* key) {
-+	const struct dc_cs_local_state* local = local_state();
-+	char needle[320];
-+	const char* match;
-+	const char* end;
-+	size_t needle_len;
-+
-+	if (local == NULL || local->entitlements == NULL || local->state.entitlements_len == 0)
-+		return 0;
-+	if (snprintf(needle, sizeof(needle), "<key>%s</key>", key) >= (int) sizeof(needle))
-+		return 0;
-+	needle_len = strlen(needle);
-+	match = (const char*) find_bytes(local->entitlements, local->state.entitlements_len, needle);
-+	if (match == NULL)
-+		return 0;
-+	match += needle_len;
-+	end = (const char*) local->entitlements + local->state.entitlements_len;
-+	while (match < end && (*match == ' ' || *match == '\t' || *match == '\r' || *match == '\n'))
-+		match++;
-+	return (end - match >= 7 && memcmp(match, "<true/>", 7) == 0) ||
-+	       (end - match >= 8 && memcmp(match, "<true />", 8) == 0);
-+}
-+
 +static int state_is_valid(const struct dc_cs_state* state) {
 +	return (state->flags & (CS_VALID | CS_DEBUGGED)) != 0;
 +}
@@ -6433,13 +6400,25 @@ index f1ce3d3..18f4c40 100644
 +	default:
 +		break;
 +	}
++
++	switch (ops) {
++	case CS_OPS_DARLING_ENTITLEMENT_BITS: {
++		uint32_t bits = state.darling_entitlements;
++		if (!self)
++			return -EPERM;
++		if (useraddr == NULL)
++			return -EFAULT;
++		if (usersize < sizeof(bits))
++			return -ERANGE;
++		memcpy(useraddr, &bits, sizeof(bits));
++		return 0;
++	}
  
 -		case CS_OPS_BLOB:
 -		case CS_OPS_ENTITLEMENTS_BLOB:
 -		case CS_OPS_IDENTITY: {
 -			memset(useraddr, 0, usersize);
 -		} break;
-+	switch (ops) {
 +	case CS_OPS_STATUS:
 +		if (useraddr != NULL) {
 +			if (usersize < sizeof(uint32_t))
@@ -6447,7 +6426,11 @@ index f1ce3d3..18f4c40 100644
 +			memcpy(useraddr, &state.flags, sizeof(state.flags));
 +		}
 +		return 0;
-+
+ 
+-		// all other operations are completely unsupported
+-		default: {
+-			ret = -ENOSYS;
+-		} break;
 +	case CS_OPS_CDHASH:
 +		if (usersize != DC_CS_CDHASH_LEN || state.cdhash_len != DC_CS_CDHASH_LEN)
 +			return -EINVAL;
@@ -6466,11 +6449,7 @@ index f1ce3d3..18f4c40 100644
 +
 +	case CS_OPS_PIDPATH:
 +		return copy_identity(state.image_path, strlen(state.image_path), useraddr, usersize);
- 
--		// all other operations are completely unsupported
--		default: {
--			ret = -ENOSYS;
--		} break;
++
 +	case CS_OPS_ENTITLEMENTS_BLOB: {
 +		if (!state_is_valid(&state))
 +			return -EINVAL;
@@ -6568,7 +6547,7 @@ index f1ce3d3..18f4c40 100644
 +
 +	case CS_OPS_CLEAR_LV:
 +		if (!self || !(state.flags & (CS_REQUIRE_LV | CS_FORCED_LV)) ||
-+		    !local_has_entitlement("com.apple.private.security.clear-library-validation"))
++		    !(state.darling_entitlements & DC_CS_ENT_CLEAR_LV))
 +			return -EPERM;
 +		return update_state(pid, self, 0, CS_REQUIRE_LV | CS_FORCED_LV, -1, NULL);
 +
@@ -6608,3 +6587,85 @@ index f1ce3d3..18f4c40 100644
 +
 +	return csops_common(pid, ops, useraddr, usersize);
  }
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
+index 49bac54..cdac7ff 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
+@@ -2,6 +2,9 @@
+ 
+ #include <sys/errno.h>
+ #include <sys/fcntl.h>
++#include <string.h>
++
++#include <darlingserver/rpc.h>
+ 
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
+ #include <darling/emulation/common/base.h>
+@@ -65,6 +68,16 @@ static int cmd_bsd_to_linux(int bsd) {
+ 	};
+ };
+ 
++static long verify_code_signature(int fd, uint64_t offset, int check_lv,
++    char* error_message, size_t error_message_size,
++    int32_t* valid, int32_t* lv_ok, uint64_t* covered_length, uint32_t* flags) {
++	int ret = dserver_rpc_verify_cs_image(fd, offset, check_lv,
++	    error_message, error_message_size, valid, lv_ok, covered_length, flags);
++	if (ret > 0)
++		return -ret;
++	return ret;
++}
++
+ long sys_fcntl(int fd, int cmd, long arg)
+ {
+ 	CANCELATION_POINT();
+@@ -78,8 +91,49 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
+ 
+ 	switch (cmd)
+ 	{
+-		case F_CHECK_LV:
++		case F_ADDFILESIGS_RETURN:
++		case F_ADDFILESIGS: {
++			fsignatures_t* signatures = (fsignatures_t*) arg;
++			int32_t valid = 0, lv_ok = 1;
++			uint64_t covered_length = 0;
++			uint32_t flags = 0;
++
++			if (signatures == NULL)
++				return -EINVAL;
++			ret = verify_code_signature(fd, (uint64_t) signatures->fs_file_start, 0,
++			    NULL, 0, &valid, &lv_ok, &covered_length, &flags);
++			if (ret != 0)
++				return ret;
++			if (!valid)
++				return -EPERM;
++			signatures->fs_file_start = (off_t) covered_length;
+ 			return 0;
++		}
++		case F_CHECK_LV: {
++			fchecklv_t* lv = (fchecklv_t*) arg;
++			int32_t valid = 0, lv_ok = 1;
++			uint64_t covered_length = 0;
++			uint32_t flags = 0;
++			char message[256] = { 0 };
++
++			if (lv == NULL)
++				return -EINVAL;
++			ret = verify_code_signature(fd, (uint64_t) lv->lv_file_start, 1,
++			    message, sizeof(message), &valid, &lv_ok, &covered_length, &flags);
++			if (ret != 0)
++				return ret;
++			if (!lv_ok) {
++				if (lv->lv_error_message != NULL && lv->lv_error_message_size > 0) {
++					size_t len = strlen(message);
++					if (len >= lv->lv_error_message_size)
++						len = lv->lv_error_message_size - 1;
++					memcpy(lv->lv_error_message, message, len);
++					((char*) lv->lv_error_message)[len] = '\0';
++				}
++				return -EPERM;
++			}
++			return 0;
++		}
+ 		case F_SETFD:
+ 			if (arg & ~FD_CLOEXEC)
+ 				return -EINVAL;

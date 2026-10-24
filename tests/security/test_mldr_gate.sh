@@ -93,9 +93,11 @@ expect "enforce: tampered loader refuses" "$tmp/enforce-tampered.log" "refusing 
 run bogus "$tmp/signed.dylib" "$tmp/bogus.log"
 expect "unknown policy fails closed" "$tmp/bogus.log" "unknown policy"
 
-# The patch vendors a copy of the parser; it must match the canonical tool.
+# The patches vendor copies of the parser; they must match the canonical tool.
 if cmp -s "$repo/tools/dc-codesign/dc_codesign.c" "$repo/build/darling-src/src/startup/mldr/dc_codesign.c" \
-   && cmp -s "$repo/tools/dc-codesign/dc_codesign.h" "$repo/build/darling-src/src/startup/mldr/dc_codesign.h"; then
+   && cmp -s "$repo/tools/dc-codesign/dc_codesign.h" "$repo/build/darling-src/src/startup/mldr/dc_codesign.h" \
+   && cmp -s "$repo/tools/dc-codesign/dc_codesign.c" "$repo/build/darling-src/src/external/darlingserver/src/dc_codesign.c" \
+   && cmp -s "$repo/tools/dc-codesign/dc_codesign.h" "$repo/build/darling-src/src/external/darlingserver/src/dc_codesign.h"; then
 	ok "vendored parser matches tools/dc-codesign"
 else
 	bad "vendored parser drifted from tools/dc-codesign"

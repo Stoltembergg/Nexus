@@ -3,8 +3,8 @@
 Status: **implementation in progress**. Companion to issue #49 and the draft
 tracking PR #50 (which carries `docs/security/SIP_AMFI_ENFORCEMENT.md`). This
 document is the engineering plan: it names the code seams, the data model, the
-phases, the acceptance tests and the honest limits. M0–M3 have prototypes on
-this branch, each behind its acceptance tests; M4–M10 remain design. Nothing
+phases, the acceptance tests and the honest limits. M0–M4 have prototypes on
+this branch, each behind its acceptance tests; M5–M10 remain design. Nothing
 further is implemented until its acceptance test exists and passes.
 
 Author: fork maintainers (`obrientatsuya/darling-lol`).
@@ -413,6 +413,26 @@ in `tests/security/fixtures/README.md`:
 - Risk: Darling's own runtime libraries are loaded from per-user overrides;
   they must be signed and either share the main team ID or carry the
   entitlement. Publish a migration note.
+- **Prototype (this branch):** dyld's existing `F_ADDFILESIGS_RETURN` /
+  `F_CHECK_LV` fcntl path is wired to a new `verify_cs_image` RPC. The server
+  maps the file descriptor, parses the slice at the supplied fat offset with
+  the same `dc_codesign` parser, verifies page hashes and caches by
+  `(dev, ino, size, mtime, offset)`. Library validation allows a target when
+  the main executable does not require it, has
+  `disable-library-validation`, shares its team ID, is a platform image, or
+  both sides are ad-hoc with no team ID. Darling's own SDK/prefix libraries
+  are treated as platform images until M6 provides a real trust store.
+  Hardened-runtime handling is in dyld: `DYLD_INSERT_LIBRARIES` is ignored
+  unless the process carries `allow-dyld-environment-variables`; Darling's
+  root/library path variables remain available so the runtime can load its
+  own overlays.
+  `tests/security/test_lv_runtime.sh` covers unsigned refusal, ad-hoc and
+  same-team loads, different-team refusal, `disable-library-validation`, and
+  `DYLD_INSERT_LIBRARIES` with and without the entitlement: 12/12 passing.
+  Known limits: CMS/Developer ID chains are not verified yet (M1 open item),
+  the runtime-path exemption is broader than the future trust store, and
+  `DYLD_*` path/root variables remain usable in hardened processes to keep
+  Darling's runtime loadable.
 
 ### M5 — Running-page integrity (3 w)
 
@@ -516,9 +536,9 @@ tests/security/
   fixtures/            signed corpus + manifest (provenance, redaction)
   fuzz/                libFuzzer seeds for the parser
   test_parser.py       cdhash/hash-type/slot cases
-  test_loader_gate.sh  exec: good/bad/unsigned/tampered, warn vs enforce
-  test_csops.c         status/cdhash/entitlements/teamid, pid reuse
-  test_lv.sh           library validation + disable-library-validation
+  test_mldr_gate.sh    exec: good/bad/unsigned/tampered, warn vs enforce
+  test_csops.sh        status/cdhash/entitlements/teamid, pid reuse
+  test_lv_runtime.sh   library validation + disable-library-validation
   test_runtime.sh      hardened runtime dyld env, get-task-allow
   test_seal.sh         mseal/mprotect/mmap/ptrace negative cases
   test_trustcache.sh   local signed entries, forged entry, rollback

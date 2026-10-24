@@ -113,8 +113,20 @@
    "modified_files": 36,
    "new_files": [
     "duct-tape/src/fileport.c",
-    "include/darlingserver/cs_state.h"
+    "include/darlingserver/cs_state.h",
+    "internal-include/darlingserver/cs_verify.hpp",
+    "src/cs_verify.cpp",
+    "src/dc_codesign.c",
+    "src/dc_codesign.h"
    ]
+  },
+  {
+   "path": "src/external/dyld",
+   "revision": "63f667cf06d7ed59553adebb0c8d70a117135ac9",
+   "repository": "https://github.com/darlinghq/darling-dyld.git",
+   "patch": "patches/dyld.patch",
+   "modified_files": 1,
+   "new_files": []
   },
   {
    "path": "src/external/foundation",
@@ -277,7 +289,7 @@
    "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
    "repository": "https://github.com/darlinghq/darling-xnu.git",
    "patch": "patches/xnu.patch",
-   "modified_files": 66,
+   "modified_files": 67,
    "new_files": [
     "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
     "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
