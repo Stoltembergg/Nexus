@@ -37,12 +37,16 @@ Exit codes: `0` ok, `1` parse/verification failure, `2` usage/IO error.
   `nCodeSlots == ceil(codeLimit / pageSize)`.
 - cdhash = H(CodeDirectory blob) truncated to 20 bytes, per hash type.
 - Every page hash, including the short last page.
-- XML and DER entitlements are located and returned, not interpreted.
+- Special slots `-2` (requirements), `-5` (XML entitlements) and `-7` (DER
+  entitlements): each present blob is hashed in full with the CodeDirectory
+  hash type and compared with its slot; an absent blob must have a zero slot.
+- XML and DER entitlements are located, slot-verified and returned, not
+  interpreted.
 
 ## What is *not* checked yet
 
 - CMS/PKI chains, designated requirements, notarization, Apple policy.
-- Special slots (Info.plist, requirements, resource envelope) — they need the
+- Info.plist, resource-dir and application special slots — they need the
   bundle, not just the Mach-O.
 - Fat/universal binaries.
 - Fat Mach-O slices and `LC_CODE_SIGNATURE` in non-first slices.
@@ -59,7 +63,8 @@ make test
 
 `test.sh` cross-checks against [`rcodesign`](https://github.com/indygreg/apple-platform-rs),
 an independent implementation: SHA-1/SHA-256 of the CodeDirectory, effective
-cdhash, page verification, tamper rejection, entitlements round-trip,
+cdhash, page verification, tamper rejection, entitlements round-trip and
+slot tamper rejection,
 self-signed team id, truncated and non-Mach-O inputs.
 
 If no Mach-O is passed and no Darling build tree is present, the script reports

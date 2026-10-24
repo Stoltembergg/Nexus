@@ -279,6 +279,59 @@ static int parse_superblob(struct dc_image *img, char *err, size_t errlen)
 	return 0;
 }
 
+static int verify_special_blob(struct dc_image *img, uint32_t blob_type,
+			       uint32_t slot, uint32_t magic,
+			       char *err, size_t errlen)
+{
+	const struct dc_blob *blob = NULL;
+	const uint8_t *blob_data;
+	const uint8_t *slot_hash;
+	uint8_t digest[EVP_MAX_MD_SIZE];
+	size_t digest_len = 0;
+	uint32_t i;
+
+	if (!img->cd)
+		return fail(err, errlen, "CodeDirectory not parsed");
+
+	for (i = 0; i < img->blob_count; i++) {
+		if (img->blobs[i].type != blob_type)
+			continue;
+		if (blob != NULL)
+			return fail(err, errlen, "duplicate blob type %u", blob_type);
+		blob = &img->blobs[i];
+	}
+
+	if (slot > img->n_special_slots) {
+		/* The CodeDirectory does not reserve this slot. */
+		return blob == NULL ? 0 : fail(err, errlen, "special slot -%u missing", slot);
+	}
+	if ((uint64_t)slot * img->hash_size > img->hash_off)
+		return fail(err, errlen, "special slot -%u outside hash area", slot);
+
+	slot_hash = img->cd + img->hash_off - slot * img->hash_size;
+	if (blob == NULL) {
+		for (i = 0; i < img->hash_size; i++) {
+			if (slot_hash[i] != 0)
+				return fail(err, errlen,
+					    "special slot -%u is set but the blob is absent", slot);
+		}
+		return 0;
+	}
+
+	if (blob->magic != magic)
+		return fail(err, errlen, "special blob type %u has magic 0x%08x",
+			    blob_type, blob->magic);
+	blob_data = img->data + img->sig_offset + blob->offset;
+	if (be32(blob_data + 4) != blob->length)
+		return fail(err, errlen, "special blob type %u length mismatch", blob_type);
+	if (hash_data(img->hash_type, blob_data, blob->length, digest,
+		      sizeof(digest), &digest_len) != 0 ||
+	    digest_len != img->hash_size ||
+	    memcmp(digest, slot_hash, img->hash_size) != 0)
+		return fail(err, errlen, "special slot -%u hash mismatch", slot);
+	return 0;
+}
+
 static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
 {
 	const uint8_t *cd = NULL;
@@ -317,6 +370,7 @@ static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
 	code_limit32 = be32(cd + 32);
 	img->hash_size = cd[36];
 	img->hash_type = cd[37];
+	img->hash_off = hash_off;
 	img->page_size_log2 = cd[39];
 	img->n_special_slots = n_special;
 	img->n_code_slots = n_code;
@@ -424,6 +478,17 @@ static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
 	if (hash_data(DC_HASHTYPE_SHA256, cd, cd_len, img->cd_sha256,
 		      sizeof(img->cd_sha256), NULL) != 0)
 		return fail(err, errlen, "failed to compute SHA-256 of CodeDirectory");
+
+	/* Special slots bind requirements and entitlement blobs to the
+	 * CodeDirectory. Verify the complete blob (including its 8-byte
+	 * generic header) and reject a non-zero slot with no blob. */
+	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
+				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
+	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
+				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
+	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
+				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
+		return -1;
 
 	/* Embedded entitlements, both XML (type 5) and DER (type 7). */
 	for (uint32_t i = 0; i < img->blob_count; i++) {

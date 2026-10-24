@@ -55,8 +55,10 @@ URL, verifies a pinned SHA-256, and uses the `.app` only as a read-only vector.
 }
 ```
 
-These answer "does a real Apple-signed image parse and validate?" without
-redistributing Apple-signed software.
+These answer "does a real Apple-signed image parse and page-verify?" without
+redistributing Apple-signed software. They do **not** yet verify CMS chains,
+Developer ID chain trust, notarization tickets, or Apple policy; those remain
+unverified until `dc_verify_cms()` and a real trust/ticket check exist.
 
 ## Tier 3 — behavioural ground truth (real macOS, via CI)
 
@@ -94,6 +96,7 @@ The probe's own cdhash changes per build, so the golden file records its
 | Question | Tier |
 |---|---|
 | SuperBlob/CodeDirectory parsing, cdhash, special slots | 1 |
-| Developer ID chains, notarization tickets, Apple policy | 2 |
+| Real Apple/Developer ID binary parsing and page hashes | 2 |
+| Developer ID chain trust, notarization tickets, Apple policy | not verified |
 | `csops`/`csrctl` semantics, flags, cross-process behaviour | 3 |
 | SIP path enforcement | 3 + runtime tests |

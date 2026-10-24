@@ -1589,10 +1589,19 @@ index 708f3f3..fd46ab8 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..a1a1dbc 100644
+index c97be30..48f5ad2 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
-@@ -32,6 +32,7 @@
+@@ -21,6 +21,8 @@
+ #define _DARLINGSERVER_PROCESS_HPP_
+ 
+ #include <sys/types.h>
++#include <atomic>
++#include <limits>
+ #include <memory>
+ #include <vector>
+ #include <mutex>
+@@ -32,6 +34,7 @@
  #include <darlingserver/utility.hpp>
  #include <darlingserver/kqchan.hpp>
  #include <darlingserver/rpc.h>
@@ -1600,7 +1609,15 @@ index c97be30..a1a1dbc 100644
  #include <darlingserver/logging.hpp>
  #include <darlingserver/registry.hpp>
  
-@@ -94,6 +95,13 @@ namespace DarlingServer {
+@@ -86,6 +89,7 @@ namespace DarlingServer {
+ 	private:
+ 		pid_t _pid;
+ 		pid_t _nspid;
++		std::atomic<uid_t> _uid{std::numeric_limits<uid_t>::max()};
+ 		EternalID _eid;
+ 		std::shared_ptr<FD> _pidfd;
+ 		mutable std::shared_mutex _rwlock;
+@@ -94,6 +98,13 @@ namespace DarlingServer {
  		std::shared_ptr<FD> _vchrootDescriptor;
  		dtape_task_t* _dtapeTask;
  		std::weak_ptr<Process> _parentProcess;
@@ -1614,7 +1631,7 @@ index c97be30..a1a1dbc 100644
  		bool _startSuspended = false;
  		bool _pendingReplacement = false;
  		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
-@@ -102,6 +110,16 @@ namespace DarlingServer {
+@@ -102,6 +113,16 @@ namespace DarlingServer {
  		Architecture _architecture;
  		std::weak_ptr<Process> _tracerProcess;
  		std::string _executablePath;
@@ -1631,10 +1648,13 @@ index c97be30..a1a1dbc 100644
  		bool _dead = false;
  		std::shared_ptr<Process> _selfReference = nullptr;
  		std::vector<uint32_t> _groups;
-@@ -194,6 +212,16 @@ namespace DarlingServer {
+@@ -194,6 +215,19 @@ namespace DarlingServer {
  		std::string executablePath() const;
  		void setExecutablePath(std::string path);
  
++		uid_t uid() const;
++		void setUid(uid_t uid);
++
 +		void setCsState(const struct dc_cs_state& state,
 +		    const uint8_t* blob, size_t blobLen,
 +		    const uint8_t* entitlements, size_t entitlementsLen,
@@ -1750,7 +1770,7 @@ index e35221c..65d4582 100755
  
  ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..b4b7dbd 100644
+index cc10f1d..7834066 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
 @@ -18,27 +18,101 @@
@@ -1902,7 +1922,16 @@ index cc10f1d..b4b7dbd 100644
  
  	if (header->number == dserver_callnum_s2c) {
  		// this is an S2C reply
-@@ -694,6 +802,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
+@@ -521,6 +629,8 @@ void DarlingServer::Call::Uidgid::processCall() {
+ 			// HACK
+ 			// we shouldn't need to access _dtapeTask; Process should provide a method for this (but it doesn't yet because i'm not sure how to make that API feel at-home in C++)
+ 			dtape_task_uidgid(process->_dtapeTask, _body.new_uid, _body.new_gid, &uid, &gid);
++			if (_body.new_uid >= 0)
++				process->setUid((uid_t) _body.new_uid);
+ 		} else {
+ 			code = -ESRCH;
+ 		}
+@@ -694,6 +804,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
  	_sendReply(code, socket);
  };
  
@@ -1963,7 +1992,7 @@ index cc10f1d..b4b7dbd 100644
  void DarlingServer::Call::ForkWaitForChild::processCall() {
  	int code = 0;
  
-@@ -714,6 +876,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
+@@ -714,6 +878,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
  	int code = 0;
  	int newBSDSignal = 0;
  
@@ -1988,7 +2017,7 @@ index cc10f1d..b4b7dbd 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
-@@ -1040,6 +1220,183 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+@@ -1040,6 +1222,216 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
  	_sendReply(code, fullLength);
  }
  
@@ -2112,14 +2141,47 @@ index cc10f1d..b4b7dbd 100644
 +}
 +
 +void DarlingServer::Call::UpdateCsState::processCall() {
++	static constexpr uint32_t settableFlags =
++	    DC_CS_HARD | DC_CS_EXEC_SET_HARD | DC_CS_KILL | DC_CS_EXEC_SET_KILL |
++	    DC_CS_RESTRICT | DC_CS_REQUIRE_LV | DC_CS_ENFORCEMENT |
++	    DC_CS_EXEC_SET_ENFORCEMENT;
++	static constexpr uint32_t clearableFlags =
++	    DC_CS_VALID | DC_CS_INSTALLER | DC_CS_DATAVAULT_CONTROLLER |
++	    DC_CS_EXEC_INHERIT_SIP | DC_CS_REQUIRE_LV | DC_CS_FORCED_LV |
++	    DC_CS_KILLED;
 +	int code = 0;
 +	uint32_t flags = 0;
 +
++	if ((_body.set_flags & ~settableFlags) != 0 ||
++	    (_body.clear_flags & ~clearableFlags) != 0 ||
++	    _body.valid < -1 || _body.valid > 0) {
++		_sendReply(-EINVAL, 0);
++		return;
++	}
++
 +	if (auto thread = _thread.lock()) {
-+		if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.pid)) {
-+			flags = (*maybeTargetProcess)->updateCsFlags(_body.set_flags, _body.clear_flags, _body.valid);
++		if (auto caller = thread->process()) {
++			if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.pid)) {
++				auto target = *maybeTargetProcess;
++				bool isSelf = (caller == target);
++				if (!isSelf) {
++					struct dc_cs_state targetState = {};
++					std::vector<uint8_t> blob;
++					std::vector<uint8_t> entitlements;
++					std::vector<uint8_t> derEntitlements;
++					target->copyCsState(&targetState, &blob, &entitlements, &derEntitlements);
++					if (caller->uid() != 0 &&
++					    (targetState.flags & DC_CS_GET_TASK_ALLOW) == 0) {
++						code = -EPERM;
++					}
++				}
++				if (code == 0)
++					flags = target->updateCsFlags(_body.set_flags, _body.clear_flags, _body.valid);
++			} else {
++				code = ESRCH;
++			}
 +		} else {
-+			code = ESRCH;
++			code = -ESRCH;
 +		}
 +	} else {
 +		code = -ESRCH;
@@ -2710,14 +2772,15 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..0cfe819 100644
+index 9cd7b81..d50945d 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
-@@ -25,9 +25,15 @@
+@@ -25,9 +25,16 @@
  #include <darlingserver/logging.hpp>
  
  #include <fstream>
 +#include <atomic>
++#include <cstdlib>
  #include <regex>
 +#include <cstdio>
 +#include <cstring>
@@ -2729,7 +2792,7 @@ index 9cd7b81..0cfe819 100644
  
  static DarlingServer::Log processLog("process");
  
-@@ -36,6 +42,7 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+@@ -36,6 +43,7 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
  	_nspid(nsid),
  	_architecture(architecture)
  {
@@ -2737,10 +2800,32 @@ index 9cd7b81..0cfe819 100644
  	int pidfd = (pipe >= 0) ? pipe : syscall(SYS_pidfd_open, _pid, 0);
  	if (pidfd < 0) {
  		throw std::system_error(errno, std::generic_category(), "Failed to open pidfd for process");
-@@ -80,6 +87,16 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+@@ -66,8 +74,15 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 				parentProcess = *maybeParentProcess;
+ 				_parentProcess = parentProcess;
+ 			}
+-
+-			break;
++		} else if (line.substr(0, sizeof("Uid") - 1) == "Uid") {
++			auto colon = line.find(':');
++			if (colon != line.npos) {
++				std::string rest = line.substr(colon + 1);
++				char* end = nullptr;
++				unsigned long parsed = strtoul(rest.c_str(), &end, 10);
++				if (end != rest.c_str())
++					_uid.store((uid_t) parsed);
++			}
+ 		}
+ 	}
  
- 		// inherit groups from parent process
+@@ -78,8 +93,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 		_vchrootDescriptor = parentProcess->_vchrootDescriptor;
+ 		_cachedVchrootPath = parentProcess->_cachedVchrootPath;
+ 
+-		// inherit groups from parent process
++		// inherit groups and credentials from parent process
  		_groups = parentProcess->_groups;
++		_uid.store(parentProcess->_uid.load());
 +
 +		// a fork inherits the parent's verified signing state; the child's
 +		// generation is filled in by copyCsState()/setCsState()
@@ -2754,7 +2839,7 @@ index 9cd7b81..0cfe819 100644
  	}
  
  	// NOTE: see thread.cpp for why it's okay to use `this` here
-@@ -93,6 +110,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -93,6 +119,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  	_pid(-1),
  	_nspid(0)
  {
@@ -2762,7 +2847,7 @@ index 9cd7b81..0cfe819 100644
  #if __x86_64__
  	_architecture = Architecture::x86_64;
  #elif __i386__
-@@ -109,6 +127,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -109,6 +136,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  
  DarlingServer::Process::~Process() {
  	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
@@ -2773,7 +2858,7 @@ index 9cd7b81..0cfe819 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -245,6 +267,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +276,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -2818,7 +2903,7 @@ index 9cd7b81..0cfe819 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -369,7 +429,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +438,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -2838,7 +2923,7 @@ index 9cd7b81..0cfe819 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +536,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +545,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -2946,7 +3031,7 @@ index 9cd7b81..0cfe819 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +643,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +652,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -3009,10 +3094,18 @@ index 9cd7b81..0cfe819 100644
  
  		info.protection = 0;
  
-@@ -607,6 +801,61 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +810,67 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
++uid_t DarlingServer::Process::uid() const {
++	return _uid.load();
++};
++
++void DarlingServer::Process::setUid(uid_t uid) {
++	_uid.store(uid);
++};
++
 +void DarlingServer::Process::setCsState(const struct dc_cs_state& state,
 +    const uint8_t* blob, size_t blobLen,
 +    const uint8_t* entitlements, size_t entitlementsLen,
@@ -3057,11 +3150,9 @@ index 9cd7b81..0cfe819 100644
 +	if (valid == 0) {
 +		_csState.valid = 0;
 +		flags &= ~DC_CS_VALID;
-+	} else if (valid == 1) {
-+		_csState.valid = _csState.verified ? 1 : 0;
-+		if (_csState.valid)
-+			flags |= DC_CS_VALID;
 +	}
++	/* valid == 1 is intentionally ignored: only a verifier may restore
++	 * validity, never an update RPC. */
 +	if (!_csState.valid || !_csState.verified)
 +		flags &= ~DC_CS_VALID;
 +	_csState.flags = flags;
@@ -3071,7 +3162,7 @@ index 9cd7b81..0cfe819 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +906,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +921,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -3795,10 +3886,10 @@ index 0000000..e7f0881
 +}
 diff --git a/src/dc_codesign.c b/src/dc_codesign.c
 new file mode 100644
-index 0000000..cd38315
+index 0000000..1a46ff9
 --- /dev/null
 +++ b/src/dc_codesign.c
-@@ -0,0 +1,517 @@
+@@ -0,0 +1,582 @@
 +/*
 + * dc_codesign.c - bounded Mach-O code signature parser.
 + *
@@ -4080,6 +4171,59 @@ index 0000000..cd38315
 +	return 0;
 +}
 +
++static int verify_special_blob(struct dc_image *img, uint32_t blob_type,
++			       uint32_t slot, uint32_t magic,
++			       char *err, size_t errlen)
++{
++	const struct dc_blob *blob = NULL;
++	const uint8_t *blob_data;
++	const uint8_t *slot_hash;
++	uint8_t digest[EVP_MAX_MD_SIZE];
++	size_t digest_len = 0;
++	uint32_t i;
++
++	if (!img->cd)
++		return fail(err, errlen, "CodeDirectory not parsed");
++
++	for (i = 0; i < img->blob_count; i++) {
++		if (img->blobs[i].type != blob_type)
++			continue;
++		if (blob != NULL)
++			return fail(err, errlen, "duplicate blob type %u", blob_type);
++		blob = &img->blobs[i];
++	}
++
++	if (slot > img->n_special_slots) {
++		/* The CodeDirectory does not reserve this slot. */
++		return blob == NULL ? 0 : fail(err, errlen, "special slot -%u missing", slot);
++	}
++	if ((uint64_t)slot * img->hash_size > img->hash_off)
++		return fail(err, errlen, "special slot -%u outside hash area", slot);
++
++	slot_hash = img->cd + img->hash_off - slot * img->hash_size;
++	if (blob == NULL) {
++		for (i = 0; i < img->hash_size; i++) {
++			if (slot_hash[i] != 0)
++				return fail(err, errlen,
++					    "special slot -%u is set but the blob is absent", slot);
++		}
++		return 0;
++	}
++
++	if (blob->magic != magic)
++		return fail(err, errlen, "special blob type %u has magic 0x%08x",
++			    blob_type, blob->magic);
++	blob_data = img->data + img->sig_offset + blob->offset;
++	if (be32(blob_data + 4) != blob->length)
++		return fail(err, errlen, "special blob type %u length mismatch", blob_type);
++	if (hash_data(img->hash_type, blob_data, blob->length, digest,
++		      sizeof(digest), &digest_len) != 0 ||
++	    digest_len != img->hash_size ||
++	    memcmp(digest, slot_hash, img->hash_size) != 0)
++		return fail(err, errlen, "special slot -%u hash mismatch", slot);
++	return 0;
++}
++
 +static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
 +{
 +	const uint8_t *cd = NULL;
@@ -4118,6 +4262,7 @@ index 0000000..cd38315
 +	code_limit32 = be32(cd + 32);
 +	img->hash_size = cd[36];
 +	img->hash_type = cd[37];
++	img->hash_off = hash_off;
 +	img->page_size_log2 = cd[39];
 +	img->n_special_slots = n_special;
 +	img->n_code_slots = n_code;
@@ -4226,6 +4371,17 @@ index 0000000..cd38315
 +		      sizeof(img->cd_sha256), NULL) != 0)
 +		return fail(err, errlen, "failed to compute SHA-256 of CodeDirectory");
 +
++	/* Special slots bind requirements and entitlement blobs to the
++	 * CodeDirectory. Verify the complete blob (including its 8-byte
++	 * generic header) and reject a non-zero slot with no blob. */
++	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
++				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
++				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
++				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
++		return -1;
++
 +	/* Embedded entitlements, both XML (type 5) and DER (type 7). */
 +	for (uint32_t i = 0; i < img->blob_count; i++) {
 +		const struct dc_blob *b = &img->blobs[i];
@@ -4318,10 +4474,10 @@ index 0000000..cd38315
 +}
 diff --git a/src/dc_codesign.h b/src/dc_codesign.h
 new file mode 100644
-index 0000000..0bdd7fa
+index 0000000..f272720
 --- /dev/null
 +++ b/src/dc_codesign.h
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,120 @@
 +/*
 + * dc_codesign.h - bounded parser for Mach-O code signatures.
 + *
@@ -4398,6 +4554,7 @@ index 0000000..0bdd7fa
 +	uint32_t cd_flags;
 +	uint32_t hash_type;
 +	uint32_t hash_size;
++	uint32_t hash_off;
 +	uint32_t page_size_log2;
 +	uint32_t n_special_slots;
 +	uint32_t n_code_slots;

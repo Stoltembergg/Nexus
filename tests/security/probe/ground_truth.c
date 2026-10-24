@@ -168,6 +168,26 @@ static void print_json_string(const char *s)
 	putchar('"');
 }
 
+static uint32_t be32(const unsigned char *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+/* Validate the 8-byte CS_GenericBlob header and return its total length.
+ * Returns 0 for a malformed or truncated blob. */
+static size_t blob_length(const unsigned char *buf, size_t cap)
+{
+	uint32_t length;
+
+	if (cap < 8)
+		return 0;
+	length = be32(buf + 4);
+	if (length < 8 || length > cap)
+		return 0;
+	return length;
+}
+
 static int read_blob(pid_t pid, unsigned int op, unsigned char **out, size_t *out_len)
 {
 	size_t cap = 65536;
@@ -195,7 +215,7 @@ static void probe_self(void)
 	char teamid[CS_MAX_TEAMID_LEN];
 	unsigned char *ents = NULL;
 	size_t ents_len = 0;
-	uint32_t pidoffset = 0;
+	off_t pidoffset = 0;
 	int r;
 
 	printf("  \"self\": {\n");
@@ -228,18 +248,23 @@ static void probe_self(void)
 	errno = 0;
 	r = x_csops(getpid(), CS_OPS_TEAMID, teamid, sizeof(teamid));
 	printf("    \"teamid\": {\"rc\": %d, \"errno\": %d, \"value\": ", r, r ? errno : 0);
-	if (r == 0) {
-		teamid[sizeof(teamid) - 1] = '\0';
-		print_json_string(teamid);
+	if (r == 0 && blob_length((unsigned char *)teamid, sizeof(teamid)) > 8) {
+		print_json_string(teamid + 8);
+	} else if (r == 0) {
+		print_json_string("");
 	} else {
 		printf("null");
 	}
 	printf("},\n");
 
 	if (read_blob(getpid(), CS_OPS_ENTITLEMENTS_BLOB, &ents, &ents_len) == 0) {
-		size_t len = strnlen((const char *)ents, ents_len);
-		printf("    \"entitlements\": {\"rc\": 0, \"length\": %zu, \"xml\": ", len);
-		print_json_string((const char *)ents);
+		size_t total = blob_length(ents, ents_len);
+		size_t payload = total > 8 ? total - 8 : 0;
+		printf("    \"entitlements\": {\"rc\": 0, \"length\": %zu, \"xml\": ", payload);
+		if (payload > 0)
+			print_json_string((const char *)(ents + 8));
+		else
+			print_json_string("");
 		printf("},\n");
 		free(ents);
 	} else {
@@ -248,8 +273,8 @@ static void probe_self(void)
 
 	errno = 0;
 	r = x_csops(getpid(), CS_OPS_PIDOFFSET, &pidoffset, sizeof(pidoffset));
-	printf("    \"pidoffset\": {\"rc\": %d, \"errno\": %d, \"value\": %u}\n",
-	       r, r ? errno : 0, pidoffset);
+	printf("    \"pidoffset\": {\"rc\": %d, \"errno\": %d, \"value\": %lld}\n",
+	       r, r ? errno : 0, (long long)pidoffset);
 
 	printf("  },\n");
 }
@@ -292,9 +317,10 @@ static void probe_child(void)
 		print_hex(cdhash, sizeof(cdhash));
 	printf("\"},\n");
 	printf("    \"teamid\": {\"rc\": %d, \"errno\": %d, \"value\": ", rt, rt ? et : 0);
-	if (rt == 0) {
-		teamid[sizeof(teamid) - 1] = '\0';
-		print_json_string(teamid);
+	if (rt == 0 && blob_length((unsigned char *)teamid, sizeof(teamid)) > 8) {
+		print_json_string(teamid + 8);
+	} else if (rt == 0) {
+		print_json_string("");
 	} else {
 		printf("null");
 	}

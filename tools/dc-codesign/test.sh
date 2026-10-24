@@ -58,9 +58,6 @@ if [ -z "$input" ] || [ ! -f "$input" ]; then
 	exit 0
 fi
 
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-
 field() { sed -n "s/^$2=//p" "$1"; }
 
 cdhash_ok() {
@@ -130,6 +127,28 @@ if "$RCODESIGN" sign --entitlements-xml-file "$tmp/ents.plist" "$tmp/ents.dylib"
 	*"com.apple.security.cs.allow-jit"*) ok "entitlements round-trip" ;;
 	*) bad "entitlements round-trip" ;;
 	esac
+
+	# The special slot must bind the entitlement bytes to the CodeDirectory.
+	cp "$tmp/ents.dylib" "$tmp/ents-tampered.dylib"
+	if python3 - "$tmp/ents-tampered.dylib" <<'PY'
+import sys
+path = sys.argv[1]
+data = bytearray(open(path, 'rb').read())
+index = data.find(b'allow-jit')
+if index < 0:
+    raise SystemExit(1)
+data[index] ^= 1
+open(path, 'wb').write(data)
+PY
+	then
+		if "$here/dc-codesign" verify "$tmp/ents-tampered.dylib" >/dev/null 2>&1; then
+			bad "tampered entitlements are rejected"
+		else
+			ok "tampered entitlements are rejected"
+		fi
+	else
+		miss "could not build the tampered-entitlements fixture"
+	fi
 else
 	miss "entitlements signing (rcodesign failed)"
 fi

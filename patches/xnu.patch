@@ -6201,10 +6201,10 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root_len = prefix_path_len;
  							}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-index f1ce3d3..4a91539 100644
+index f1ce3d3..30a23d8 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-@@ -1,38 +1,361 @@
+@@ -1,38 +1,359 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
  
  #include <stdint.h>
@@ -6579,11 +6579,9 @@ index f1ce3d3..4a91539 100644
 +	ret = state_for(pid, self, &state);
 +	if (ret != 0)
 +		return ret;
-+	/* The local copy's generation belongs to the exec'ed image; a forked
-+	 * child has a new server-side generation until it execs. The server has
-+	 * the authoritative value for cross-process queries. */
-+	if (!self && audit_token->val[7] != 0 && audit_token->val[7] != (uint32_t) state.generation)
-+		return -ESRCH;
++	/* XNU also validates audit_token.val[7] against the target pidversion.
++	 * Darling has no established pidversion mapping yet, so only the pid is
++	 * checked here; do not substitute the signing-state generation for it. */
 +
 +	return csops_common(pid, ops, useraddr, usersize);
  }

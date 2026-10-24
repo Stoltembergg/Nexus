@@ -144,8 +144,10 @@ int main(int argc, char** argv) {
 		CHECK(r == -1 && errno == EINVAL);
 	} else if (entitlements_mode) {
 		CHECK(r == 0);
-		CHECK(entitlements[0] == '<');
-		CHECK(contains(entitlements, sizeof(entitlements), "get-task-allow"));
+		CHECK(entitlements[0] == 0xfa && entitlements[1] == 0xde &&
+		      entitlements[2] == 0x71 && entitlements[3] == 0x71);
+		CHECK(entitlements[8] == '<');
+		CHECK(contains(entitlements + 8, sizeof(entitlements) - 8, "get-task-allow"));
 	} else {
 		CHECK(r == 0);
 		CHECK(entitlements[0] == 0 && entitlements[1] == 0 &&

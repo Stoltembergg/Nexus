@@ -71,7 +71,7 @@ def parse_codesign(text):
         m = re.search(r"^Platform identifier=(\d+)", body, re.M)
         if m:
             entry["platform"] = int(m.group(1))
-        m = re.search(r"^CodeDirectory v=(\w+)", body)
+        m = re.search(r"^CodeDirectory v=(\w+)", body, re.M)
         if m:
             entry["cd_version"] = "0x" + m.group(1)
         m = re.search(r"flags=(0x[0-9a-f]+)", body)
@@ -99,7 +99,9 @@ def parse_env(artifact_dir):
         runner = probe_path.parent.name.replace("ground-truth-", "")
         probe = json.loads(probe_path.read_text())
         sign_txt = probe_path.parent / f"codesign-{runner}.txt"
-        text = sign_txt.read_text(errors="replace") if sign_txt.exists() else ""
+        if not sign_txt.is_file():
+            raise SystemExit(f"missing codesign report: {sign_txt}")
+        text = sign_txt.read_text(errors="replace")
 
         sw = {}
         m = re.search(r"ProductVersion:\s*(\S+)", text)

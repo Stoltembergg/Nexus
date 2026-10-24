@@ -97,7 +97,9 @@ if [ -n "$object" ]; then
 fi
 
 run() { # extra args...
-	RCODESIGN="$RCODESIGN" LIPO="$LIPO" "$signer" --quiet "$@" "$tmp"
+	# Fixtures are isolated in $tmp; do not depend on whether a live prefix
+	# happens to have darlingserver running.
+	RCODESIGN="$RCODESIGN" LIPO="$LIPO" "$signer" --allow-running --quiet "$@" "$tmp"
 }
 
 out=$(run 2>&1)

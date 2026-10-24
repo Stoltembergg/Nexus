@@ -324,8 +324,9 @@ in `tests/security/fixtures/README.md`:
   reimplementing crypto policy; wrap it behind `dc_verify_cms()`.
 - Fuzz targets: truncated blob, length wrap, slot out of range, page size 0/31,
   hash type unknown, `codeLimit` beyond EOF, duplicate blob types.
-- Acceptance: parser accepts the macOS fixtures and rejects every fuzz seed;
-  `dc_codesign_selftest` runs in CI.
+- Acceptance: parser accepts valid macOS fixtures and the untruncated fuzz
+  seeds, and rejects malformed or truncated seeds; `dc_codesign_selftest`
+  runs in CI.
 - **Prototype (this branch):** `tools/dc-codesign/` implements the bounded
   parser and a CLI (`info|verify|cdhash|entitlements|blobs`). `make test`
   cross-checks SHA-1/SHA-256 of the CodeDirectory, the effective cdhash, page
@@ -389,12 +390,15 @@ in `tests/security/fixtures/README.md`:
   `test_mldr_gate.sh` remains 11/11.
   Observed: ad-hoc signed `STATUS=0x20000003`, unsigned `STATUS=0`, CDHASH
   matches `dc-codesign`, ad-hoc `TEAMID` is `ENOENT`, empty entitlements are
-  an 8-byte zero token, `get-task-allow` sets `0x4`, a forked child inherits
-  its parent's state, and a dead pid returns `ESRCH`.
-  Known limits: only the main image is verified (M4 covers `dlopen`); there is
-  no MACF layer, so setter policy is self/root/`get-task-allow`; the local
+  an 8-byte zero token, non-empty entitlements include their 8-byte
+  `CS_GenericBlob` header, `get-task-allow` sets `0x4`, a forked child inherits
+  its parent's state for the same image (with a fresh server generation), and
+  a dead pid returns `ESRCH`.
+  Known limits: only the main image is verified by mldr (M4 covers `dlopen`);
+  there is no MACF layer, so setter policy is self/root/`get-task-allow`;
+  `exec` derives a new state and never inherits across images. The local
   generation is not refreshed in a forked child until exec, so audittoken
-  generation checks are authoritative only for cross-process queries.
+  generation checks are deferred until a real pidversion mapping exists.
 - Risk: Chromium probes may change behavior once they see truth. Audit call
   sites (`tools/riot-mvg-dependency-trace.c` is a starting point) and keep the
   `warn` mode for a release cycle.
@@ -485,9 +489,10 @@ in `tests/security/fixtures/README.md`:
   attach, writes to NVRAM equivalents, and kext-style loads when the
   corresponding `CSR_ALLOW_*` bit is clear.
 - Acceptance: under SIP on, every mutation of a protected path fails with
-  `EPERM`; the same operation under `/usr/local` succeeds; symlink and
-  hardlink escapes fail; turning the bit on in config flips behavior without
-  a rebuild; `csrctl(GET)` matches the file.
+  `EPERM`; the same operation under `/usr/local` succeeds; symlink and `..`
+  escapes fail; hardlink escapes require decisions on the opened file's
+  device/inode and are deferred until that check exists; turning the bit on in
+  config flips behavior without a rebuild; `csrctl(GET)` matches the file.
 - Risk: path canonicalization bugs are the classic escape. Test with symlink
   chains, `..`, bind-mount-like prefix mappings, and case-insensitive hosts.
 
@@ -542,7 +547,7 @@ tests/security/
   test_runtime.sh      hardened runtime dyld env, get-task-allow
   test_seal.sh         mseal/mprotect/mmap/ptrace negative cases
   test_trustcache.sh   local signed entries, forged entry, rollback
-  test_sip.sh          protected paths, symlink/hardlink/.. escapes
+  test_sip.sh          protected paths, symlink/.. escapes (hardlinks deferred)
   test_amfi.sh         known/unknown calls, entitlement checks
 ```
 
@@ -574,11 +579,13 @@ Rules:
 - [ ] Fails closed: parse error, I/O error, missing file, short read → deny.
 - [ ] No fabrication: nothing sets `CS_VALID`/`notarized` without a verifier.
 - [ ] TOCTOU: verify and map the same fd; re-check `fstat` identity.
-- [ ] Path canonicalization: symlinks, `..`, hardlinks, case folding, prefix
-      mapping, trailing slashes, NUL/embedded separators.
+- [ ] Path canonicalization: symlinks, `..`, case folding, prefix mapping,
+      trailing slashes, NUL/embedded separators. Hardlink decisions must use
+      the opened file's device/inode; path checks alone are insufficient.
 - [ ] pid reuse: generation counter with the state.
-- [ ] fork/exec inheritance: child state derived from its own image, never
-      inherited wholesale.
+- [ ] fork/exec inheritance: `fork` inherits the verified state for the same
+      image and obtains a fresh server generation; `exec` derives state from
+      its own image and never carries the parent state across.
 - [ ] Cross-process writes: `ptrace`, `process_vm_writev`, `/proc/pid/mem`.
 - [ ] No new attack surface: parser bounds-checked, no unbounded allocation,
       no recursion on attacker-controlled depth.

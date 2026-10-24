@@ -74,6 +74,7 @@ struct dc_image {
 	uint32_t cd_flags;
 	uint32_t hash_type;
 	uint32_t hash_size;
+	uint32_t hash_off;
 	uint32_t page_size_log2;
 	uint32_t n_special_slots;
 	uint32_t n_code_slots;
