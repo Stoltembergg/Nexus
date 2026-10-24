@@ -45,8 +45,12 @@ jobs:
             /bin/ls \
             /usr/bin/true \
             /usr/lib/dyld \
-            /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation \
-            /System/Applications/Safari.app ; do
+            /usr/bin/security \
+            /usr/sbin/spctl \
+            /usr/libexec/amfid \
+            /usr/libexec/trustd \
+            /System/Library/Frameworks/Security.framework/Versions/A/Security ; do
+            [ -e "$p" ] || continue
             echo "### $p" >> "$out"
             codesign -dvvv "$p" >> "$out" 2>&1 || true
             codesign -d --entitlements - "$p" >> "$out" 2>&1 || true
