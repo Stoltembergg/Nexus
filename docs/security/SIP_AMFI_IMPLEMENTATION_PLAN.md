@@ -1,10 +1,11 @@
 # Code signing, SIP and AMFI: implementation plan
 
-Status: **design / proposal**. Companion to issue #49 and the draft tracking PR
-#50 (which carries `docs/security/SIP_AMFI_ENFORCEMENT.md`). This document is
-the engineering plan: it names the code seams, the data model, the phases, the
-acceptance tests and the honest limits. Nothing here is implemented until its
-acceptance test exists and passes.
+Status: **implementation in progress**. Companion to issue #49 and the draft
+tracking PR #50 (which carries `docs/security/SIP_AMFI_ENFORCEMENT.md`). This
+document is the engineering plan: it names the code seams, the data model, the
+phases, the acceptance tests and the honest limits. M0–M3 have prototypes on
+this branch, each behind its acceptance tests; M4–M10 remain design. Nothing
+further is implemented until its acceptance test exists and passes.
 
 Author: fork maintainers (`obrientatsuya/darling-lol`).
 
