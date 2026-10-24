@@ -1770,7 +1770,7 @@ index e35221c..65d4582 100755
  
  ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..092558e 100644
+index cc10f1d..4f88f49 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
 @@ -18,27 +18,101 @@
@@ -2017,7 +2017,7 @@ index cc10f1d..092558e 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
-@@ -1040,6 +1222,215 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+@@ -1040,6 +1222,217 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
  	_sendReply(code, fullLength);
  }
  
@@ -2144,7 +2144,9 @@ index cc10f1d..092558e 100644
 +	static constexpr uint32_t settableFlags =
 +	    DC_CS_HARD | DC_CS_EXEC_SET_HARD | DC_CS_KILL | DC_CS_EXEC_SET_KILL |
 +	    DC_CS_RESTRICT | DC_CS_REQUIRE_LV | DC_CS_ENFORCEMENT |
-+	    DC_CS_EXEC_SET_ENFORCEMENT;
++	    DC_CS_EXEC_SET_ENFORCEMENT |
++	    /* Set internally by MARKINVALID/MARKKILL after the process is killed. */
++	    DC_CS_KILLED;
 +	static constexpr uint32_t clearableFlags =
 +	    DC_CS_VALID | DC_CS_INSTALLER | DC_CS_DATAVAULT_CONTROLLER |
 +	    DC_CS_EXEC_INHERIT_SIP | DC_CS_REQUIRE_LV | DC_CS_FORCED_LV |
@@ -3629,10 +3631,10 @@ index 0000000..6eedb66
 +#endif
 diff --git a/src/cs_verify.cpp b/src/cs_verify.cpp
 new file mode 100644
-index 0000000..6fc896c
+index 0000000..04c210b
 --- /dev/null
 +++ b/src/cs_verify.cpp
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,306 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -3652,6 +3654,7 @@ index 0000000..6fc896c
 +#include <cerrno>
 +#include <cstdio>
 +#include <cstring>
++#include <exception>
 +#include <utility>
 +#include <map>
 +#include <mutex>
@@ -3779,7 +3782,12 @@ index 0000000..6fc896c
 +		if (error) *error = "image is too large to verify";
 +		return false;
 +	}
-+	data.resize((size_t) st.st_size);
++	try {
++		data.resize((size_t) st.st_size);
++	} catch (const std::exception&) {
++		if (error) *error = "cannot allocate image snapshot";
++		return false;
++	}
 +	{
 +		size_t done = 0;
 +		while (done < data.size()) {
