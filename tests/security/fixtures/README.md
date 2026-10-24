@@ -77,6 +77,18 @@ clang -O2 -Wall -Wextra -o ground_truth tests/security/probe/ground_truth.c
 Artifacts feed `docs/security/GROUND_TRUTH.md` (provenance, macOS version,
 runner image, date) and are diffed across versions.
 
+After downloading a run:
+
+```sh
+python3 tests/security/ground_truth_to_golden.py ARTIFACT_DIR \
+    --json tests/security/fixtures/macos-golden.json \
+    --markdown docs/security/GROUND_TRUTH.md \
+    --run-id <id> --date <YYYY-MM-DD>
+```
+
+The probe's own cdhash changes per build, so the golden file records its
+**flags**, not its hash. Apple binary cdhashes are recorded per macOS build.
+
 ## What each tier proves
 
 | Question | Tier |

@@ -289,6 +289,12 @@ in `tests/security/fixtures/README.md`:
   a read-only probe run is enough (no game, no account, no mutation).
 - Save summaries to `docs/security/GROUND_TRUTH.md` with provenance, macOS
   version and runner image.
+- **First collection:** run `40124165591` (macos-14 = 14.8.9/23J631,
+  macos-15 = 15.7.9/24G830, both arm64). Result: linker-signed probes report
+  `CS_VALID|CS_LINKER_SIGNED|CS_DYLD_PLATFORM|CS_SIGNED`, `CS_OPS_TEAMID` is
+  `-1/ENOENT`, an empty entitlements blob returns success with length 0, and
+  cross-process `csops` matches self. Platform-binary cdhashes and `amfid`/
+  `trustd` entitlement keys are recorded in `tests/security/fixtures/macos-golden.json`.
 - Deliverable: fixture generator, probe, CI artifacts, GROUND_TRUTH.md.
 
 ### M1 — `dc_codesign` parser (2 w)
@@ -522,8 +528,10 @@ Rules:
    `ENTITLEMENTS_BLOB 7`, `MARKRESTRICT 8`, `SET_STATUS 9`, `BLOB 10`,
    `IDENTITY 11`, `CLEARINSTALLER 12`, `CLEARPLATFORM 13`, `TEAMID 14`,
    `CLEAR_LV 15`. Flags from `osfmk/kern/cs_blobs.h` (`CS_VALID 0x1` …
-   `CS_LINKER_SIGNED 0x20000`). Still open: exact buffer-size semantics of the
-   blob getters (success with truncation vs `ERANGE`).
+   `CS_LINKER_SIGNED 0x20000`). Blob-getter size semantics are partially
+   resolved: an empty entitlements blob returns `rc=0` with no data
+   (`docs/security/GROUND_TRUTH.md`); the truncation behaviour for a non-empty
+   blob still needs a probe with a real entitlement set.
 2. AMFI `mac_syscall` call numbers and payload layouts; which ones are
    observable from user space.
 3. Trust-cache module format and whether the vendored `trustcache.c` is
@@ -573,4 +581,7 @@ requirement for field debugging.
   `src/external/darlingserver/duct-tape/`, `build/src/tools/codesign`.
 - Ground truth without a Mac: `tests/security/fixtures/README.md`,
   `tests/security/probe/ground_truth.c`,
-  `.github/workflows/security-ground-truth.yml`.
+  `.github/workflows/security-ground-truth.yml`,
+  `tests/security/ground_truth_to_golden.py`,
+  `docs/security/GROUND_TRUTH.md`,
+  `tests/security/fixtures/macos-golden.json`.
