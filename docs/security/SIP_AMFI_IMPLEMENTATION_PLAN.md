@@ -245,6 +245,14 @@ Enforcement is impossible while the runtime itself is unsigned. Order matters:
    Darling (`darlingserver`, `mldr`, `launchd`, `dyld`, frameworks, helpers)
    using the in-tree `codesign -s -`. Do it at `cmake --install` time and in
    `scripts/install-runtime.sh` for per-user overlays.
+   **Tool (this branch):** `tools/sign-darling-runtime.sh` walks a tree,
+   detects thin Mach-O by magic, signs with `rcodesign`, verifies every result
+   with `dc-codesign`, skips already-signed files (idempotent), refuses to run
+   while `darlingserver` is alive, and supports `--dry-run`, `--force`,
+   `--sdk`, `--prefix`. Fat binaries are skipped. Dry-run on the installed SDK:
+   1272 Mach-O, 1269 thin, 3 fat.
+   Confirmed: Darling executes an ad-hoc signed copy of `/usr/bin/true`
+   (`mldr: codesign ok` and exit 0), so the loader accepts re-signed images.
 2. Ship entitlement plists per component under
    `tools/entitlements/<component>.plist`; the signer applies them.
 3. Record the resulting cdhashes in the local trust store at install time
