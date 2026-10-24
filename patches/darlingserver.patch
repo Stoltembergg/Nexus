@@ -1562,10 +1562,18 @@ index 708f3f3..fd46ab8 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..31772dc 100644
+index c97be30..a1a1dbc 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
-@@ -94,6 +94,13 @@ namespace DarlingServer {
+@@ -32,6 +32,7 @@
+ #include <darlingserver/utility.hpp>
+ #include <darlingserver/kqchan.hpp>
+ #include <darlingserver/rpc.h>
++#include <darlingserver/cs_state.h>
+ #include <darlingserver/logging.hpp>
+ #include <darlingserver/registry.hpp>
+ 
+@@ -94,6 +95,13 @@ namespace DarlingServer {
  		std::shared_ptr<FD> _vchrootDescriptor;
  		dtape_task_t* _dtapeTask;
  		std::weak_ptr<Process> _parentProcess;
@@ -1579,6 +1587,40 @@ index c97be30..31772dc 100644
  		bool _startSuspended = false;
  		bool _pendingReplacement = false;
  		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
+@@ -102,6 +110,16 @@ namespace DarlingServer {
+ 		Architecture _architecture;
+ 		std::weak_ptr<Process> _tracerProcess;
+ 		std::string _executablePath;
++
++		// M3 task-owned signing state. Guarded separately from _rwlock because
++		// getters copy variable-length blobs and must not hold the process lock
++		// while writing into another task.
++		mutable std::shared_mutex _csMutex;
++		struct dc_cs_state _csState = {};
++		std::vector<uint8_t> _csBlob;
++		std::vector<uint8_t> _csEntitlements;
++		std::vector<uint8_t> _csDerEntitlements;
++
+ 		bool _dead = false;
+ 		std::shared_ptr<Process> _selfReference = nullptr;
+ 		std::vector<uint32_t> _groups;
+@@ -194,6 +212,16 @@ namespace DarlingServer {
+ 		std::string executablePath() const;
+ 		void setExecutablePath(std::string path);
+ 
++		void setCsState(const struct dc_cs_state& state,
++		    const uint8_t* blob, size_t blobLen,
++		    const uint8_t* entitlements, size_t entitlementsLen,
++		    const uint8_t* derEntitlements, size_t derEntitlementsLen);
++		void copyCsState(struct dc_cs_state* state,
++		    std::vector<uint8_t>* blob,
++		    std::vector<uint8_t>* entitlements,
++		    std::vector<uint8_t>* derEntitlements) const;
++		uint32_t updateCsFlags(uint32_t setFlags, uint32_t clearFlags, int valid);
++
+ 		uintptr_t allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite);
+ 		void freePages(uintptr_t address, size_t pageCount);
+ 		uintptr_t mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite);
 diff --git a/internal-include/darlingserver/server.hpp b/internal-include/darlingserver/server.hpp
 index b960f17..5f0e621 100644
 --- a/internal-include/darlingserver/server.hpp
@@ -1594,7 +1636,7 @@ index b960f17..5f0e621 100644
  		int _timerFD;
  		uint64_t _currentTimerDeadline = 0;
 diff --git a/scripts/generate-rpc-wrappers.py b/scripts/generate-rpc-wrappers.py
-index e35221c..1068426 100755
+index e35221c..781d3bc 100755
 --- a/scripts/generate-rpc-wrappers.py
 +++ b/scripts/generate-rpc-wrappers.py
 @@ -268,6 +268,22 @@ calls = [
@@ -1620,11 +1662,58 @@ index e35221c..1068426 100755
  	#
  	# pthread cancelation
  	#
+@@ -643,6 +659,46 @@ calls = [
+ 		('message_count', 'uint64_t'),
+ 		('fd', '@fd'),
+ 	], UNMANAGED_CALL),
++
++	#
++	# M3 code-signing state (appended so existing call numbers stay stable)
++	#
++
++	('set_cs_state', [
++		('state', 'const void*', 'uint64_t'),
++		('blob', 'const void*', 'uint64_t'),
++		('blob_size', 'uint64_t'),
++		('entitlements', 'const void*', 'uint64_t'),
++		('entitlements_size', 'uint64_t'),
++		('der_entitlements', 'const void*', 'uint64_t'),
++		('der_entitlements_size', 'uint64_t')
++	], [
++		('generation', 'uint64_t'),
++	]),
++
++	('get_cs_state', [
++		('pid', 'int32_t'),
++		('state', 'void*', 'uint64_t'),
++		('blob', 'void*', 'uint64_t'),
++		('blob_size', 'uint64_t'),
++		('entitlements', 'void*', 'uint64_t'),
++		('entitlements_size', 'uint64_t'),
++		('der_entitlements', 'void*', 'uint64_t'),
++		('der_entitlements_size', 'uint64_t')
++	], [
++		('blob_len', 'uint64_t'),
++		('entitlements_len', 'uint64_t'),
++		('der_entitlements_len', 'uint64_t'),
++	]),
++
++	('update_cs_state', [
++		('pid', 'int32_t'),
++		('set_flags', 'uint32_t'),
++		('clear_flags', 'uint32_t'),
++		('valid', 'int32_t')
++	], [
++		('flags', 'uint32_t'),
++	]),
+ ]
+ 
+ ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..7df0056 100644
+index cc10f1d..683e9cb 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
-@@ -18,9 +18,20 @@
+@@ -18,27 +18,100 @@
   */
  
  #define _GNU_SOURCE 1
@@ -1634,6 +1723,7 @@ index cc10f1d..7df0056 100644
 +#include <chrono>
 +#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
  #include <darlingserver/call.hpp>
  #include <darlingserver/server.hpp>
  #include <sys/uio.h>
@@ -1645,7 +1735,9 @@ index cc10f1d..7df0056 100644
  
  #include <darlingserver/logging.hpp>
  #include <darlingserver/duct-tape.h>
-@@ -29,16 +40,76 @@
+ #include <darlingserver/config.hpp>
++#include <darlingserver/cs_state.h>
+ #include <sys/fcntl.h>
  #include <sys/syscall.h>
  #include <darlingserver/kqchan.hpp>
  
@@ -1722,7 +1814,7 @@ index cc10f1d..7df0056 100644
  	std::shared_ptr<Call> result = nullptr;
  	std::shared_ptr<Process> process = nullptr;
  	std::shared_ptr<Thread> thread = nullptr;
-@@ -123,9 +194,43 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
+@@ -123,9 +196,43 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
  		}
  	}
  
@@ -1769,7 +1861,7 @@ index cc10f1d..7df0056 100644
  
  	if (header->number == dserver_callnum_s2c) {
  		// this is an S2C reply
-@@ -694,6 +799,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
+@@ -694,6 +801,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
  	_sendReply(code, socket);
  };
  
@@ -1830,7 +1922,7 @@ index cc10f1d..7df0056 100644
  void DarlingServer::Call::ForkWaitForChild::processCall() {
  	int code = 0;
  
-@@ -714,6 +873,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
+@@ -714,6 +875,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
  	int code = 0;
  	int newBSDSignal = 0;
  
@@ -1855,6 +1947,149 @@ index cc10f1d..7df0056 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
+@@ -1040,6 +1219,142 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+ 	_sendReply(code, fullLength);
+ }
+ 
++static bool csStateLayoutValid(const struct dc_cs_state* state, uint64_t blobSize,
++    uint64_t entitlementsSize, uint64_t derEntitlementsSize) {
++	if (state->version != DC_CS_STATE_VERSION)
++		return false;
++	if (state->cdhash_len > DC_CS_CDHASH_LEN)
++		return false;
++	if (state->teamid_len >= DC_CS_TEAMID_MAX || state->identity_len >= DC_CS_IDENTITY_MAX)
++		return false;
++	if (state->blob_len != blobSize || state->entitlements_len != entitlementsSize ||
++	    state->der_entitlements_len != derEntitlementsSize)
++		return false;
++	if (blobSize > DC_CS_MAX_BLOB || entitlementsSize > DC_CS_MAX_ENTITLEMENTS ||
++	    derEntitlementsSize > DC_CS_MAX_DER_ENTITLEMENTS)
++		return false;
++	if (memchr(state->teamid, '\0', sizeof(state->teamid)) == nullptr ||
++	    memchr(state->identity, '\0', sizeof(state->identity)) == nullptr ||
++	    memchr(state->image_path, '\0', sizeof(state->image_path)) == nullptr)
++		return false;
++	return true;
++}
++
++void DarlingServer::Call::SetCsState::processCall() {
++	int code = 0;
++	uint64_t generation = 0;
++
++	if (auto thread = _thread.lock()) {
++		if (auto process = thread->process()) {
++			struct dc_cs_state state;
++			if (_body.state == 0) {
++				code = -EINVAL;
++			} else if (!process->readMemory((uintptr_t) _body.state, &state, sizeof(state), &code)) {
++				code = -code;
++			} else if (!csStateLayoutValid(&state, _body.blob_size, _body.entitlements_size, _body.der_entitlements_size)) {
++				code = -EINVAL;
++			} else {
++				std::vector<uint8_t> blob(_body.blob_size);
++				std::vector<uint8_t> entitlements(_body.entitlements_size);
++				std::vector<uint8_t> derEntitlements(_body.der_entitlements_size);
++
++				if (!blob.empty() && !process->readMemory((uintptr_t) _body.blob, blob.data(), blob.size(), &code)) {
++					code = -code;
++				} else if (!entitlements.empty() && !process->readMemory((uintptr_t) _body.entitlements, entitlements.data(), entitlements.size(), &code)) {
++					code = -code;
++				} else if (!derEntitlements.empty() && !process->readMemory((uintptr_t) _body.der_entitlements, derEntitlements.data(), derEntitlements.size(), &code)) {
++					code = -code;
++				} else {
++					process->setCsState(state,
++					    blob.empty() ? nullptr : blob.data(), blob.size(),
++					    entitlements.empty() ? nullptr : entitlements.data(), entitlements.size(),
++					    derEntitlements.empty() ? nullptr : derEntitlements.data(), derEntitlements.size());
++					generation = process->eternalID();
++				}
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, generation);
++}
++
++void DarlingServer::Call::GetCsState::processCall() {
++	int code = 0;
++	uint64_t blobLen = 0;
++	uint64_t entitlementsLen = 0;
++	uint64_t derEntitlementsLen = 0;
++	struct dc_cs_state state = {};
++	state.version = DC_CS_STATE_VERSION;
++
++	if (auto callingThread = _thread.lock()) {
++		if (auto callingProcess = callingThread->process()) {
++			if (_body.state == 0) {
++				code = -EINVAL;
++			} else if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.pid)) {
++				auto targetProcess = *maybeTargetProcess;
++				std::vector<uint8_t> blob;
++				std::vector<uint8_t> entitlements;
++				std::vector<uint8_t> derEntitlements;
++				targetProcess->copyCsState(&state, &blob, &entitlements, &derEntitlements);
++				blobLen = blob.size();
++				entitlementsLen = entitlements.size();
++				derEntitlementsLen = derEntitlements.size();
++
++				if (!callingProcess->writeMemory((uintptr_t) _body.state, &state, sizeof(state), &code)) {
++					code = -code;
++				} else if (_body.blob != 0 && _body.blob_size > 0 && !blob.empty()) {
++					size_t len = std::min<size_t>(blob.size(), _body.blob_size);
++					if (!callingProcess->writeMemory((uintptr_t) _body.blob, blob.data(), len, &code)) {
++						code = -code;
++					}
++				}
++				if (code == 0 && _body.entitlements != 0 && _body.entitlements_size > 0 && !entitlements.empty()) {
++					size_t len = std::min<size_t>(entitlements.size(), _body.entitlements_size);
++					if (!callingProcess->writeMemory((uintptr_t) _body.entitlements, entitlements.data(), len, &code)) {
++						code = -code;
++					}
++				}
++				if (code == 0 && _body.der_entitlements != 0 && _body.der_entitlements_size > 0 && !derEntitlements.empty()) {
++					size_t len = std::min<size_t>(derEntitlements.size(), _body.der_entitlements_size);
++					if (!callingProcess->writeMemory((uintptr_t) _body.der_entitlements, derEntitlements.data(), len, &code)) {
++						code = -code;
++					}
++				}
++			} else {
++				// An unverified process is not the same thing as a missing one.
++				code = ESRCH;
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, blobLen, entitlementsLen, derEntitlementsLen);
++}
++
++void DarlingServer::Call::UpdateCsState::processCall() {
++	int code = 0;
++	uint32_t flags = 0;
++
++	if (auto thread = _thread.lock()) {
++		if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.pid)) {
++			flags = (*maybeTargetProcess)->updateCsFlags(_body.set_flags, _body.clear_flags, _body.valid);
++		} else {
++			code = ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, flags);
++}
++
+ void DarlingServer::Call::Groups::processCall() {
+ 	int code = 0;
+ 	std::vector<uint32_t> oldGroups;
 diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
 index f79f057..54c42aa 100644
 --- a/src/darlingserver.cpp
@@ -2393,7 +2628,7 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..180f372 100644
+index 9cd7b81..0cfe819 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,9 +25,15 @@
@@ -2412,7 +2647,40 @@ index 9cd7b81..180f372 100644
  
  static DarlingServer::Log processLog("process");
  
-@@ -109,6 +115,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -36,6 +42,7 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 	_nspid(nsid),
+ 	_architecture(architecture)
+ {
++	_csState.version = DC_CS_STATE_VERSION;
+ 	int pidfd = (pipe >= 0) ? pipe : syscall(SYS_pidfd_open, _pid, 0);
+ 	if (pidfd < 0) {
+ 		throw std::system_error(errno, std::generic_category(), "Failed to open pidfd for process");
+@@ -80,6 +87,16 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 
+ 		// inherit groups from parent process
+ 		_groups = parentProcess->_groups;
++
++		// a fork inherits the parent's verified signing state; the child's
++		// generation is filled in by copyCsState()/setCsState()
++		{
++			std::shared_lock csLock(parentProcess->_csMutex);
++			_csState = parentProcess->_csState;
++			_csBlob = parentProcess->_csBlob;
++			_csEntitlements = parentProcess->_csEntitlements;
++			_csDerEntitlements = parentProcess->_csDerEntitlements;
++		}
+ 	}
+ 
+ 	// NOTE: see thread.cpp for why it's okay to use `this` here
+@@ -93,6 +110,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+ 	_pid(-1),
+ 	_nspid(0)
+ {
++	_csState.version = DC_CS_STATE_VERSION;
+ #if __x86_64__
+ 	_architecture = Architecture::x86_64;
+ #elif __i386__
+@@ -109,6 +127,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  
  DarlingServer::Process::~Process() {
  	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
@@ -2423,7 +2691,7 @@ index 9cd7b81..180f372 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -245,6 +255,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +267,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -2468,7 +2736,7 @@ index 9cd7b81..180f372 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -369,7 +417,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +429,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -2488,7 +2756,7 @@ index 9cd7b81..180f372 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +524,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +536,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -2596,7 +2864,7 @@ index 9cd7b81..180f372 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +631,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +643,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -2659,7 +2927,69 @@ index 9cd7b81..180f372 100644
  
  		info.protection = 0;
  
-@@ -657,27 +839,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -607,6 +801,61 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+ 	_executablePath = std::move(path);
+ };
+ 
++void DarlingServer::Process::setCsState(const struct dc_cs_state& state,
++    const uint8_t* blob, size_t blobLen,
++    const uint8_t* entitlements, size_t entitlementsLen,
++    const uint8_t* derEntitlements, size_t derEntitlementsLen) {
++	std::unique_lock lock(_csMutex);
++	_csState = state;
++	_csState.version = DC_CS_STATE_VERSION;
++	_csState.generation = eternalID();
++	_csState.blob_len = (uint32_t) blobLen;
++	_csState.entitlements_len = (uint32_t) entitlementsLen;
++	_csState.der_entitlements_len = (uint32_t) derEntitlementsLen;
++	if (blobLen > 0)
++		_csBlob.assign(blob, blob + blobLen);
++	else
++		_csBlob.clear();
++	if (entitlementsLen > 0)
++		_csEntitlements.assign(entitlements, entitlements + entitlementsLen);
++	else
++		_csEntitlements.clear();
++	if (derEntitlementsLen > 0)
++		_csDerEntitlements.assign(derEntitlements, derEntitlements + derEntitlementsLen);
++	else
++		_csDerEntitlements.clear();
++};
++
++void DarlingServer::Process::copyCsState(struct dc_cs_state* state,
++    std::vector<uint8_t>* blob,
++    std::vector<uint8_t>* entitlements,
++    std::vector<uint8_t>* derEntitlements) const {
++	std::shared_lock lock(_csMutex);
++	*state = _csState;
++	state->generation = eternalID();
++	*blob = _csBlob;
++	*entitlements = _csEntitlements;
++	*derEntitlements = _csDerEntitlements;
++};
++
++uint32_t DarlingServer::Process::updateCsFlags(uint32_t setFlags, uint32_t clearFlags, int valid) {
++	std::unique_lock lock(_csMutex);
++	uint32_t flags = (_csState.flags | setFlags) & ~clearFlags;
++
++	if (valid == 0) {
++		_csState.valid = 0;
++		flags &= ~DC_CS_VALID;
++	} else if (valid == 1) {
++		_csState.valid = _csState.verified ? 1 : 0;
++		if (_csState.valid)
++			flags |= DC_CS_VALID;
++	}
++	if (!_csState.valid || !_csState.verified)
++		flags &= ~DC_CS_VALID;
++	_csState.flags = flags;
++	return flags;
++};
++
+ uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
+ 	auto thread = _pickS2CThread();
+ 
+@@ -657,27 +906,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -2955,3 +3285,113 @@ index e502e28..8d1cf2b 100644
 +		 * microthread must not throw. */
 +	}
  };
+diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
+new file mode 100644
+index 0000000..949c37e
+--- /dev/null
++++ b/include/darlingserver/cs_state.h
+@@ -0,0 +1,104 @@
++/*
++ * cs_state.h - code-signing state shared by mldr, libsystem_kernel and
++ * darlingserver.
++ *
++ * This is the M3 data model from
++ * docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md. The structure is deliberately
++ * packed and fixed-size so a 32-bit guest and the 64-bit server agree on the
++ * layout when it is copied through darlingserver's read/writeMemory helpers.
++ * Variable-length data (the SuperBlob and entitlements) lives outside the
++ * structure and is transferred separately.
++ */
++
++#ifndef _DARLINGSERVER_CS_STATE_H_
++#define _DARLINGSERVER_CS_STATE_H_
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define DC_CS_STATE_VERSION 1u
++
++#define DC_CS_CDHASH_LEN 20u
++#define DC_CS_TEAMID_MAX 64u
++#define DC_CS_IDENTITY_MAX 256u
++#define DC_CS_PATH_MAX 1024u
++
++#define DC_CS_MAX_BLOB (16u * 1024u * 1024u)
++#define DC_CS_MAX_ENTITLEMENTS (1024u * 1024u)
++#define DC_CS_MAX_DER_ENTITLEMENTS (1024u * 1024u)
++
++/* Apple's CS_* flag values (osfmk/kern/cs_blobs.h). */
++#define DC_CS_VALID 0x00000001u
++#define DC_CS_ADHOC 0x00000002u
++#define DC_CS_GET_TASK_ALLOW 0x00000004u
++#define DC_CS_INSTALLER 0x00000008u
++#define DC_CS_FORCED_LV 0x00000010u
++#define DC_CS_INVALID_ALLOWED 0x00000020u
++#define DC_CS_HARD 0x00000100u
++#define DC_CS_KILL 0x00000200u
++#define DC_CS_CHECK_EXPIRATION 0x00000400u
++#define DC_CS_RESTRICT 0x00000800u
++#define DC_CS_ENFORCEMENT 0x00001000u
++#define DC_CS_REQUIRE_LV 0x00002000u
++#define DC_CS_ENTITLEMENTS_VALIDATED 0x00004000u
++#define DC_CS_NVRAM_UNRESTRICTED 0x00008000u
++#define DC_CS_RUNTIME 0x00010000u
++#define DC_CS_LINKER_SIGNED 0x00020000u
++#define DC_CS_EXEC_SET_HARD 0x00100000u
++#define DC_CS_EXEC_SET_KILL 0x00200000u
++#define DC_CS_EXEC_SET_ENFORCEMENT 0x00400000u
++#define DC_CS_EXEC_INHERIT_SIP 0x00800000u
++#define DC_CS_KILLED 0x01000000u
++#define DC_CS_DYLD_PLATFORM 0x02000000u
++#define DC_CS_PLATFORM_BINARY 0x04000000u
++#define DC_CS_PLATFORM_PATH 0x08000000u
++#define DC_CS_DEBUGGED 0x10000000u
++#define DC_CS_SIGNED 0x20000000u
++#define DC_CS_DEV_CODE 0x40000000u
++#define DC_CS_DATAVAULT_CONTROLLER 0x80000000u
++
++struct dc_cs_state {
++	uint32_t version;
++	uint32_t verified; /* a verifier ran for this task */
++	uint32_t valid;    /* verification succeeded */
++	uint32_t flags;
++
++	uint32_t hash_type;
++	uint32_t page_size_log2;
++	uint32_t cdhash_len;
++	uint32_t teamid_len;   /* strlen(teamid), 0 when absent */
++	uint32_t identity_len; /* strlen(identity), 0 when absent */
++	uint32_t blob_len;
++	uint32_t entitlements_len;
++	uint32_t der_entitlements_len;
++
++	uint64_t generation; /* darlingserver eternal ID for pid-reuse checks */
++	uint64_t code_limit;
++	uint64_t image_offset; /* active slice offset (CS_OPS_PIDOFFSET) */
++	uint64_t image_dev;
++	uint64_t image_ino;
++	uint64_t image_size;
++	uint64_t image_mtime;
++
++	uint8_t cdhash[DC_CS_CDHASH_LEN];
++	char teamid[DC_CS_TEAMID_MAX];
++	char identity[DC_CS_IDENTITY_MAX];
++	char image_path[DC_CS_PATH_MAX];
++} __attribute__((packed));
++
++/* mldr-only view: the fixed state plus pointers into mldr's address space. */
++struct dc_cs_local_state {
++	struct dc_cs_state state;
++	const uint8_t *blob;
++	const uint8_t *entitlements;
++	const uint8_t *der_entitlements;
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _DARLINGSERVER_CS_STATE_H_ */

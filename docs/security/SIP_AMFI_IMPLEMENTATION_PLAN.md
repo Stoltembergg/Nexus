@@ -374,6 +374,26 @@ in `tests/security/fixtures/README.md`:
 - Acceptance: `csops` reflects the loader's real result; a process whose image
   failed verification reports zero flags; pid reuse cannot return a previous
   process's blob; entitlements blob byte-identical to the fixture.
+- **Prototype (this branch):** `mldr` fills a packed `struct dc_cs_state` and
+  exposes it to `libsystem_kernel` through `struct elf_calls`; after checkin it
+  registers the state (including the SuperBlob and entitlements) with
+  `darlingserver`. Three RPCs (`set_cs_state`, `get_cs_state`,
+  `update_cs_state`) were appended to the generated call list so existing call
+  numbers stay stable. `csops.c` implements `STATUS`, `CDHASH`,
+  `ENTITLEMENTS_BLOB`, `TEAMID`, `BLOB`, `IDENTITY`, `PIDPATH` (4),
+  `PIDOFFSET`, the setters and the `audittoken` variant. `off` still verifies
+  and records state; it only suppresses logging and rejection, so `CS_VALID`
+  is never fabricated. `tests/security/test_csops.sh` covers signed, unsigned
+  and entitled images plus cross-process and dead-pid behaviour: 3/3 passing;
+  `test_mldr_gate.sh` remains 11/11.
+  Observed: ad-hoc signed `STATUS=0x20000003`, unsigned `STATUS=0`, CDHASH
+  matches `dc-codesign`, ad-hoc `TEAMID` is `ENOENT`, empty entitlements are
+  an 8-byte zero token, `get-task-allow` sets `0x4`, a forked child inherits
+  its parent's state, and a dead pid returns `ESRCH`.
+  Known limits: only the main image is verified (M4 covers `dlopen`); there is
+  no MACF layer, so setter policy is self/root/`get-task-allow`; the local
+  generation is not refreshed in a forked child until exec, so audittoken
+  generation checks are authoritative only for cross-process queries.
 - Risk: Chromium probes may change behavior once they see truth. Audit call
   sites (`tools/riot-mvg-dependency-trace.c` is a starting point) and keep the
   `warn` mode for a release cycle.

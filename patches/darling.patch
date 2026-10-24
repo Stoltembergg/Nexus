@@ -8439,7 +8439,7 @@ index d9a7aea96..cc76f7a85 100644
  
  unsigned long commpage_address(bool _64bit)
 diff --git a/src/startup/mldr/elfcalls/elfcalls.c b/src/startup/mldr/elfcalls/elfcalls.c
-index 8f0b9e61f..38a9644c0 100644
+index 8f0b9e61..fd75d43b 100644
 --- a/src/startup/mldr/elfcalls/elfcalls.c
 +++ b/src/startup/mldr/elfcalls/elfcalls.c
 @@ -6,6 +6,7 @@
@@ -8450,7 +8450,20 @@ index 8f0b9e61f..38a9644c0 100644
  #include "elfcalls.h"
  #include "threads.h"
  #include <sys/un.h>
-@@ -86,6 +87,9 @@ static int __dserver_process_lifetime_pipe_refresh() {
+@@ -64,6 +65,12 @@ static const void* __dserver_socket_address(void) {
+ 
+ extern void __mldr_close_rpc_socket(int socket);
+ 
++extern struct dc_cs_local_state mldr_cs_state;
++
++static const struct dc_cs_local_state* get_cs_state(void) {
++	return &mldr_cs_state;
++}
++
+ extern int __mldr_create_process_lifetime_pipe(int* fds);
+ extern void __mldr_close_process_lifetime_pipe(int fd);
+ extern int __dserver_process_lifetime_pipe_fd;
+@@ -86,6 +93,9 @@ static int __dserver_process_lifetime_pipe_refresh() {
  
  void elfcalls_make(struct elf_calls* calls)
  {
@@ -8460,7 +8473,7 @@ index 8f0b9e61f..38a9644c0 100644
  	calls->dlopen = dlopen_simple;
  	calls->dlclose = dlclose;
  	calls->dlsym = dlsym;
-@@ -100,7 +104,16 @@ void elfcalls_make(struct elf_calls* calls)
+@@ -100,7 +110,16 @@ void elfcalls_make(struct elf_calls* calls)
  	calls->darling_thread_get_stack = __darling_thread_get_stack;
  
  	calls->get_errno = get_errno;
@@ -8478,66 +8491,134 @@ index 8f0b9e61f..38a9644c0 100644
  
  	calls->malloc = malloc;
  	calls->free = free;
-@@ -126,4 +139,5 @@ void elfcalls_make(struct elf_calls* calls)
+@@ -126,4 +145,6 @@ void elfcalls_make(struct elf_calls* calls)
  	calls->dserver_get_process_lifetime_pipe = __dserver_get_process_lifetime_pipe;
  	calls->dserver_process_lifetime_pipe_refresh = __dserver_process_lifetime_pipe_refresh;
  	calls->dserver_close_process_lifetime_pipe = __mldr_close_process_lifetime_pipe;
 +	calls->fork = fork;
++	calls->cs_state = get_cs_state;
  }
 diff --git a/src/startup/mldr/elfcalls/elfcalls.h b/src/startup/mldr/elfcalls/elfcalls.h
-index fee1bde87..bee86604b 100644
+index fee1bde8..14733ac4 100644
 --- a/src/startup/mldr/elfcalls/elfcalls.h
 +++ b/src/startup/mldr/elfcalls/elfcalls.h
-@@ -71,7 +71,9 @@ struct elf_calls
+@@ -5,6 +5,8 @@
+ #include <stdbool.h>
+ #include <stddef.h>
+ 
++struct dc_cs_local_state;
++
+ struct darling_thread_create_callbacks {
+ 	unsigned int (*thread_self_trap)(void);
+ 	void (*thread_set_tsd_base)(void*, int);
+@@ -71,7 +73,12 @@ struct elf_calls
  	int (*dserver_get_process_lifetime_pipe)(void);
  	int (*dserver_process_lifetime_pipe_refresh)(void);
  	void (*dserver_close_process_lifetime_pipe)(int fd);
 +
 +	// Host libc fork prepares native allocator and loader locks for the child.
 +	int (*fork)(void);
++
++	// Task-owned signing state filled by mldr before the guest starts.
++	const struct dc_cs_local_state* (*cs_state)(void);
  };
  
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82..3033622e 100644
+index 6617ef82..d8828002 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
-@@ -42,6 +42,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -42,6 +42,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  #include <sys/ptrace.h>
  #include <pthread.h>
  #include <sys/utsname.h>
++#include <darlingserver/cs_state.h>
 +#include "dc_codesign.h"
  
  #ifndef PAGE_SIZE
  #	define PAGE_SIZE	4096
-@@ -106,6 +107,82 @@ void* __mldr_main_stack_top = NULL;
+@@ -106,6 +108,192 @@ void* __mldr_main_stack_top = NULL;
  static int kernel_major = -1;
  static int kernel_minor = -1;
  
++// darling-lol M3: signing state for this task. mldr fills it before the guest
++// starts and exposes it through struct elf_calls; after checkin it registers a
++// copy with darlingserver for cross-process csops queries.
++struct dc_cs_local_state mldr_cs_state;
 +
-+// darling-lol M2: loader gate. Verifies the Mach-O code signature before the
-+// image is mapped. Policy comes from DARLING_CODESIGN_ENFORCE:
++static bool entitlements_key_is_true(const uint8_t* data, size_t len, const char* key)
++{
++	char needle[320];
++	size_t needle_len;
++	const char* start;
++	const char* end;
++	const char* match;
++
++	if (data == NULL || len == 0)
++		return false;
++	if (snprintf(needle, sizeof(needle), "<key>%s</key>", key) >= (int) sizeof(needle))
++		return false;
++	needle_len = strlen(needle);
++	start = (const char*) data;
++	end = start + len;
++
++	match = memmem(start, len, needle, needle_len);
++	if (match == NULL)
++		return false;
++	match += needle_len;
++	while (match < end && (*match == ' ' || *match == '\t' || *match == '\r' || *match == '\n'))
++		match++;
++	return (size_t)(end - match) >= 7 && memcmp(match, "<true/>", 7) == 0
++	    ? true
++	    : (size_t)(end - match) >= 8 && memcmp(match, "<true />", 8) == 0;
++}
++
++static uint32_t flags_from_image(const struct dc_image* img, bool pages_ok)
++{
++	uint32_t flags = DC_CS_SIGNED;
++
++	if (pages_ok)
++		flags |= DC_CS_VALID;
++	flags |= img->cd_flags & (DC_CS_ADHOC | DC_CS_HARD | DC_CS_KILL |
++	    DC_CS_CHECK_EXPIRATION | DC_CS_RESTRICT | DC_CS_ENFORCEMENT |
++	    DC_CS_REQUIRE_LV | DC_CS_RUNTIME | DC_CS_LINKER_SIGNED);
++	if (entitlements_key_is_true(img->entitlements, img->entitlements_len, "get-task-allow") ||
++	    entitlements_key_is_true(img->entitlements, img->entitlements_len, "com.apple.security.get-task-allow"))
++		flags |= DC_CS_GET_TASK_ALLOW;
++	if (entitlements_key_is_true(img->entitlements, img->entitlements_len, "com.apple.private.security.installer"))
++		flags |= DC_CS_INSTALLER;
++	return flags;
++}
++
++// darling-lol M2/M3: loader gate. Verifies the Mach-O code signature before
++// the image is mapped and records the result for csops(). Policy comes from
++// DARLING_CODESIGN_ENFORCE:
 +//   off (default) | warn | enforce
-+// Fail closed: an unknown policy is an error, and enforce refuses to load on
-+// any parse or page-hash failure. This reads the file on the host; the TOCTOU
-+// window between this check and the loader's own open is documented in
-+// docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (M2).
++// A parse or page-hash failure always leaves the state invalid. `off` only
++// suppresses logging and rejection; it still verifies so csops never fabricates
++// CS_VALID. An unknown policy fails closed. This reads the file on the host;
++// the TOCTOU window between this check and the loader's own open is documented
++// in docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (M2).
 +static int codesign_gate(const char* path)
 +{
 +	const char* policy = getenv("DARLING_CODESIGN_ENFORCE");
-+	bool enforce, verbose;
++	bool enforce = false, quiet = false, verbose;
 +	struct stat st;
 +	struct dc_image img;
++	struct dc_cs_state* state = &mldr_cs_state.state;
 +	char err[512];
 +	void* map;
 +	int fd, r;
 +
-+	if (policy == NULL || policy[0] == '\0' ||
-+	    strcmp(policy, "off") == 0 || strcmp(policy, "0") == 0)
-+		return 0;
++	memset(&mldr_cs_state, 0, sizeof(mldr_cs_state));
++	state->version = DC_CS_STATE_VERSION;
++	state->verified = 1;
 +
-+	if (strcmp(policy, "warn") == 0) {
++	if (policy == NULL || policy[0] == '\0' ||
++	    strcmp(policy, "off") == 0 || strcmp(policy, "0") == 0) {
++		quiet = true;
++	} else if (strcmp(policy, "warn") == 0) {
 +		enforce = false;
 +	} else if (strcmp(policy, "enforce") == 0) {
 +		enforce = true;
@@ -8545,23 +8626,32 @@ index 6617ef82..3033622e 100644
 +		fprintf(stderr, "mldr: codesign: unknown policy '%s' (use off|warn|enforce)\n", policy);
 +		return -1;
 +	}
-+	verbose = getenv("DARLING_CODESIGN_VERBOSE") != NULL;
++	verbose = !quiet && getenv("DARLING_CODESIGN_VERBOSE") != NULL;
 +
 +	fd = open(path, O_RDONLY);
 +	if (fd < 0) {
-+		fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, strerror(errno));
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, strerror(errno));
 +		if (enforce) { errno = ENOEXEC; return -1; }
 +		return 0;
 +	}
 +	if (fstat(fd, &st) != 0 || st.st_size <= 0) {
-+		fprintf(stderr, "mldr: codesign %s: %s: cannot stat\n", enforce ? "rejected" : "warning", path);
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: cannot stat\n", enforce ? "rejected" : "warning", path);
 +		close(fd);
 +		if (enforce) { errno = ENOEXEC; return -1; }
 +		return 0;
 +	}
++	state->image_dev = (uint64_t) st.st_dev;
++	state->image_ino = (uint64_t) st.st_ino;
++	state->image_size = (uint64_t) st.st_size;
++	state->image_mtime = (uint64_t) st.st_mtime;
++	snprintf(state->image_path, sizeof(state->image_path), "%s", path);
++
 +	map = mmap(NULL, (size_t) st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 +	if (map == MAP_FAILED) {
-+		fprintf(stderr, "mldr: codesign %s: %s: cannot map\n", enforce ? "rejected" : "warning", path);
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: cannot map\n", enforce ? "rejected" : "warning", path);
 +		close(fd);
 +		if (enforce) { errno = ENOEXEC; return -1; }
 +		return 0;
@@ -8572,8 +8662,55 @@ index 6617ef82..3033622e 100644
 +	if (r == 0)
 +		r = dc_verify_pages(&img, err, sizeof(err));
 +
++	if (r == 0) {
++		state->valid = 1;
++		state->flags = flags_from_image(&img, true);
++		state->hash_type = img.hash_type;
++		state->page_size_log2 = img.page_size_log2;
++		state->code_limit = img.code_limit;
++		state->image_offset = 0; /* thin images only at M3 */
++		state->cdhash_len = DC_CS_CDHASH_LEN;
++		memcpy(state->cdhash, img.cdhash, DC_CS_CDHASH_LEN);
++		if (img.teamid[0] != '\0') {
++			state->teamid_len = strlen(img.teamid);
++			snprintf(state->teamid, sizeof(state->teamid), "%s", img.teamid);
++		}
++		if (img.identifier[0] != '\0') {
++			state->identity_len = strlen(img.identifier);
++			snprintf(state->identity, sizeof(state->identity), "%s", img.identifier);
++		}
++		if (img.sig_size > 0 && img.sig_size <= DC_CS_MAX_BLOB) {
++			mldr_cs_state.blob = malloc((size_t) img.sig_size);
++			if (mldr_cs_state.blob != NULL) {
++				memcpy((void*) mldr_cs_state.blob, (const uint8_t*) map + img.sig_offset, (size_t) img.sig_size);
++				state->blob_len = (uint32_t) img.sig_size;
++			}
++		}
++		if (img.entitlements_len > 0 && img.entitlements_len <= DC_CS_MAX_ENTITLEMENTS) {
++			uint8_t* copy = malloc(img.entitlements_len + 1);
++			if (copy != NULL) {
++				memcpy(copy, img.entitlements, img.entitlements_len);
++				copy[img.entitlements_len] = '\0';
++				mldr_cs_state.entitlements = copy;
++				state->entitlements_len = (uint32_t) img.entitlements_len;
++			}
++		}
++		if (img.der_entitlements_len > 0 && img.der_entitlements_len <= DC_CS_MAX_DER_ENTITLEMENTS) {
++			uint8_t* copy = malloc(img.der_entitlements_len);
++			if (copy != NULL) {
++				memcpy(copy, img.der_entitlements, img.der_entitlements_len);
++				mldr_cs_state.der_entitlements = copy;
++				state->der_entitlements_len = (uint32_t) img.der_entitlements_len;
++			}
++		}
++	} else {
++		state->valid = 0;
++		state->flags = 0;
++	}
++
 +	if (r != 0) {
-+		fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, err);
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, err);
 +	} else if (verbose) {
 +		fprintf(stderr, "mldr: codesign ok: %s cdhash=", path);
 +		for (size_t i = 0; i < sizeof(img.cdhash); i++)
@@ -8594,7 +8731,7 @@ index 6617ef82..3033622e 100644
  int main(int argc, char** argv, char** envp)
  {
  	void** sp;
-@@ -154,10 +231,15 @@ int main(int argc, char** argv, char** envp)
+@@ -154,10 +342,15 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -8611,7 +8748,7 @@ index 6617ef82..3033622e 100644
  #ifdef __i386__
  	load(filename, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
  #else
-@@ -563,6 +645,16 @@ static socket_bitmap_t socket_bitmap = {
+@@ -563,6 +756,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -8628,7 +8765,7 @@ index 6617ef82..3033622e 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +740,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +851,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -8640,7 +8777,7 @@ index 6617ef82..3033622e 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +770,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +881,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -8655,7 +8792,7 @@ index 6617ef82..3033622e 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +788,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +899,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -8681,7 +8818,7 @@ index 6617ef82..3033622e 100644
  		}
  	}
  
-@@ -698,6 +809,22 @@ out:
+@@ -698,6 +920,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -8704,7 +8841,7 @@ index 6617ef82..3033622e 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +834,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +945,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -8724,7 +8861,7 @@ index 6617ef82..3033622e 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +892,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1003,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -8743,6 +8880,29 @@ index 6617ef82..3033622e 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
+@@ -889,6 +1114,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+ 	// keep our write end while closing the unused read end.
+ 	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
+ 
++	// Register the verified signing state with darlingserver for cross-process
++	// csops queries. The server assigns the generation used for pid-reuse and
++	// audit-token checks.
++	uint64_t cs_generation = 0;
++	int cs_ret = dserver_rpc_set_cs_state(
++	    &mldr_cs_state.state,
++	    mldr_cs_state.blob, mldr_cs_state.state.blob_len,
++	    mldr_cs_state.entitlements, mldr_cs_state.state.entitlements_len,
++	    mldr_cs_state.der_entitlements, mldr_cs_state.state.der_entitlements_len,
++	    &cs_generation);
++	if (cs_ret < 0) {
++		fprintf(stderr, "mldr: csops: failed to register signing state: %d\n", cs_ret);
++	} else {
++		mldr_cs_state.state.generation = cs_generation;
++	}
++
+ 	if (!lr->root_path) {
+ 		static char vchroot_buffer[4096];
+ 		uint64_t vchroot_path_length = 0;
 diff --git a/src/tools/open.m b/src/tools/open.m
 index 126bd394c..f62c2e0e8 100644
 --- a/src/tools/open.m
