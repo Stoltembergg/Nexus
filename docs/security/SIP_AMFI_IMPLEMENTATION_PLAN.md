@@ -542,8 +542,10 @@ in `tests/security/fixtures/README.md`:
   `security.plist` or root-only `csrctl` setter; only four VFS wrappers are
   hooked; `chmod`, `chown`, `utimes`, `setxattr`, `truncate`, `link`, `symlink`,
   `rmdir` and writable `mmap` are not covered; hardlink decisions are deferred;
-  the host-path substring check is deliberately conservative and is not a full
-  VFS policy; rootless redirects are not modeled.
+  the host-path check runs after expansion but before the syscall, so a racing
+  symlink swap is not prevented; the substring check is deliberately
+  conservative and is not a full VFS policy; rootless redirects are not
+  modeled.
 
 ### M8 — Debug/injection restrictions and AMFI dispatch (2 w)
 

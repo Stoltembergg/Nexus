@@ -16,12 +16,21 @@ static int probe_function(void) {
 
 static int sealed(void* address, const char* label) {
 	uintptr_t page = (uintptr_t) address & ~(uintptr_t)(getpagesize() - 1);
+	void* mapped;
 	int result;
 
 	errno = 0;
 	result = mprotect((void*) page, getpagesize(), PROT_READ | PROT_WRITE | PROT_EXEC);
 	printf("%s mprotect r=%d errno=%d\n", label, result, errno);
-	return result == -1;
+	if (result != -1)
+		return 0;
+
+	/* mseal also rejects a fixed mapping over the sealed range. */
+	errno = 0;
+	mapped = mmap((void*) page, getpagesize(), PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	printf("%s mmap_fixed r=%s errno=%d\n", label, mapped == MAP_FAILED ? "failed" : "ok", errno);
+	return mapped == MAP_FAILED;
 }
 
 int main(int argc, char** argv) {
