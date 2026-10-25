@@ -59,7 +59,8 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; trust=1 ;;
 	--prefix)
-		for d in "$HOME"/.darling/Users/*/RuntimeLibraries "$HOME"/.darling/Users/*/RuntimeFrameworks; do
+		prefix_root=${DPREFIX:-${HOME}/.darling}
+		for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
 			[ -d "$d" ] && roots="$roots $d"
 		done
 		explicit=1 ;;
@@ -83,7 +84,8 @@ done
 if [ "$explicit" -eq 0 ]; then
 	trust=1
 	roots="/usr/local/libexec/darling"
-	for d in "$HOME"/.darling/Users/*/RuntimeLibraries "$HOME"/.darling/Users/*/RuntimeFrameworks; do
+	prefix_root=${DPREFIX:-${HOME}/.darling}
+	for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
 		[ -d "$d" ] && roots="$roots $d"
 	done
 fi
