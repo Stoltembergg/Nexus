@@ -637,7 +637,8 @@ are not available here. No `notarized` bit is set by this branch.
 - Real acceptance still requires a genuine notarized Apple fixture, the
   ticket/`syspolicyd` surface probes, and Apple chain policy. Hard rule: if no
   real ticket was validated, `notarized` is false. No heuristic "looks
-  notarized".
+  notarized". The concrete macOS handoff is in
+  `docs/security/M9_M10_MAC_NEXT_STEPS.md`.
 
 ### M10 — Default switch and soak (2 w)
 
@@ -775,6 +776,7 @@ requirement for field debugging.
 ## 14. References
 
 - Issue #49 — remaining work and requirement list.
+- `docs/security/M9_M10_MAC_NEXT_STEPS.md` — the Mac/reference-machine handoff.
 - PR #50 / `docs/security/SIP_AMFI_ENFORCEMENT.md` — short design note.
 - `docs/reviews/pr41-cpuid-security-validation.md` — current truthful-API state.
 - Apple: Code Signing Guide; System Integrity Protection Guide; trust caches
