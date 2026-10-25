@@ -8526,7 +8526,7 @@ index fee1bde8..14733ac4 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82..73747019 100644
+index 6617ef82..6e557c08 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -42,6 +42,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -8538,17 +8538,16 @@ index 6617ef82..73747019 100644
  
  #ifndef PAGE_SIZE
  #	define PAGE_SIZE	4096
-@@ -70,7 +72,8 @@ static void reexec32(char** argv);
+@@ -70,7 +72,7 @@ static void reexec32(char** argv);
  #endif
  static void load32(int fd, bool expect_dylinker, struct load_results* lr);
  static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
 -static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
-+static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, bool verify_identity, char** argv, struct load_results* lr);
-+static int codesign_fd_matches(int fd);
++static void load(const char* path, int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
  static int native_prot(int prot);
  static void setup_space(struct load_results* lr, bool is_64_bit);
  static void process_special_env(struct load_results* lr);
-@@ -106,6 +109,213 @@ void* __mldr_main_stack_top = NULL;
+@@ -106,6 +108,216 @@ void* __mldr_main_stack_top = NULL;
  static int kernel_major = -1;
  static int kernel_minor = -1;
  
@@ -8610,7 +8609,7 @@ index 6617ef82..73747019 100644
 +// CS_VALID. An unknown policy fails closed. This reads the file on the host;
 +// the TOCTOU window between this check and the loader's own open is documented
 +// in docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (M2).
-+static int codesign_gate(const char* path)
++static int codesign_gate(const char* path, int* out_fd)
 +{
 +	const char* policy = getenv("DARLING_CODESIGN_ENFORCE");
 +	bool enforce = false, quiet = false, verbose;
@@ -8621,6 +8620,7 @@ index 6617ef82..73747019 100644
 +	void* map;
 +	int fd, r;
 +
++	*out_fd = -1;
 +	memset(&mldr_cs_state, 0, sizeof(mldr_cs_state));
 +	state->version = DC_CS_STATE_VERSION;
 +	state->verified = 1;
@@ -8645,7 +8645,7 @@ index 6617ef82..73747019 100644
 +	state->signing_enforce = enforce ? 1 : 0;
 +	verbose = !quiet && getenv("DARLING_CODESIGN_VERBOSE") != NULL;
 +
-+	fd = open(path, O_RDONLY);
++	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
 +	if (fd < 0) {
 +		if (!quiet)
 +			fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, strerror(errno));
@@ -8659,6 +8659,7 @@ index 6617ef82..73747019 100644
 +		if (enforce) { errno = ENOEXEC; return -1; }
 +		return 0;
 +	}
++	*out_fd = fd;
 +	state->image_dev = (uint64_t) st.st_dev;
 +	state->image_ino = (uint64_t) st.st_ino;
 +	state->image_size = (uint64_t) st.st_size;
@@ -8673,6 +8674,7 @@ index 6617ef82..73747019 100644
 +		if (!quiet)
 +			fprintf(stderr, "mldr: codesign %s: %s: cannot map\n", enforce ? "rejected" : "warning", path);
 +		close(fd);
++		*out_fd = -1;
 +		if (enforce) { errno = ENOEXEC; return -1; }
 +		return 0;
 +	}
@@ -8750,9 +8752,9 @@ index 6617ef82..73747019 100644
 +	}
 +
 +	munmap(map, (size_t) st.st_size);
-+	close(fd);
 +
 +	if (r != 0 && enforce) {
++		close(fd);
 +		errno = ENOEXEC;
 +		return -1;
 +	}
@@ -8762,7 +8764,7 @@ index 6617ef82..73747019 100644
  int main(int argc, char** argv, char** envp)
  {
  	void** sp;
-@@ -154,14 +364,19 @@ int main(int argc, char** argv, char** envp)
+@@ -154,14 +366,20 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -8771,61 +8773,47 @@ index 6617ef82..73747019 100644
  
  	process_special_env(&mldr_load_results);
  
-+	if (codesign_gate(filename) != 0) {
++	int gate_fd = -1;
++	if (codesign_gate(filename, &gate_fd) != 0) {
 +		fprintf(stderr, "mldr: refusing to load %s (code signing)\n", filename);
 +		return 1;
 +	}
 +
  #ifdef __i386__
 -	load(filename, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
-+	load(filename, CPU_TYPE_X86, false, true, argv, &mldr_load_results); // accept i386 only
++	load(filename, gate_fd, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
  #else
 -	load(filename, 0, false, argv, &mldr_load_results);
-+	load(filename, 0, false, true, argv, &mldr_load_results);
++	load(filename, gate_fd, 0, false, argv, &mldr_load_results);
  #endif
  
  	// this was previously necessary when we were loading the binary from the LKM
-@@ -280,7 +495,25 @@ int main(int argc, char** argv, char** envp)
+@@ -280,16 +498,17 @@ int main(int argc, char** argv, char** envp)
  	__builtin_unreachable();
  }
  
 -void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, char** argv, struct load_results* lr)
-+static int codesign_fd_matches(int fd) {
-+	const struct dc_cs_state* state = &mldr_cs_state.state;
-+	struct stat st;
-+	uint64_t mtime, ctime;
-+
-+	if (fstat(fd, &st) != 0)
-+		return 0;
-+	mtime = (uint64_t) st.st_mtim.tv_sec * 1000000000ull +
-+	    (uint64_t) st.st_mtim.tv_nsec;
-+	ctime = (uint64_t) st.st_ctim.tv_sec * 1000000000ull +
-+	    (uint64_t) st.st_ctim.tv_nsec;
-+	return (uint64_t) st.st_dev == state->image_dev &&
-+	       (uint64_t) st.st_ino == state->image_ino &&
-+	       (uint64_t) st.st_size == state->image_size &&
-+	       mtime == state->image_mtime &&
-+	       ctime == state->image_ctime;
-+}
-+
-+void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, bool verify_identity, char** argv, struct load_results* lr)
++void load(const char* path, int fd, cpu_type_t forced_arch, bool expect_dylinker, char** argv, struct load_results* lr)
  {
- 	int fd;
+-	int fd;
  	uint32_t magic;
-@@ -291,6 +524,12 @@ void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, char**
- 		fprintf(stderr, "Cannot open %s: %s\n", path, strerror(errno));
- 		exit(1);
+ 
+-	fd = open(path, O_RDONLY);
+-	if (fd == -1)
+-	{
+-		fprintf(stderr, "Cannot open %s: %s\n", path, strerror(errno));
+-		exit(1);
++	if (fd < 0) {
++		fd = open(path, O_RDONLY);
++		if (fd == -1)
++		{
++			fprintf(stderr, "Cannot open %s: %s\n", path, strerror(errno));
++			exit(1);
++		}
  	}
-+	if (verify_identity && !codesign_fd_matches(fd))
-+	{
-+		fprintf(stderr, "mldr: %s changed between verification and load\n", path);
-+		close(fd);
-+		exit(1);
-+	}
  
  	// We need to read argv[1] and detect whether it's a 32 or 64-bit application.
- 	// Then load the appropriate version of dyld from the fat file.
-@@ -563,6 +802,16 @@ static socket_bitmap_t socket_bitmap = {
+@@ -563,6 +782,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -8842,7 +8830,7 @@ index 6617ef82..73747019 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +897,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +877,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -8854,7 +8842,7 @@ index 6617ef82..73747019 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +927,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +907,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -8869,7 +8857,7 @@ index 6617ef82..73747019 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +945,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +925,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -8895,7 +8883,7 @@ index 6617ef82..73747019 100644
  		}
  	}
  
-@@ -698,6 +966,22 @@ out:
+@@ -698,6 +946,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -8918,7 +8906,7 @@ index 6617ef82..73747019 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +991,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +971,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -8938,7 +8926,7 @@ index 6617ef82..73747019 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +1049,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1029,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -8957,7 +8945,7 @@ index 6617ef82..73747019 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1160,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1140,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  
@@ -12464,7 +12452,7 @@ index 00000000..f2727207
 +
 +#endif /* DC_CODESIGN_H */
 diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
-index 1e9ec25d..0e616141 100644
+index 1e9ec25d..4cae4d8e 100644
 --- a/src/startup/mldr/loader.c
 +++ b/src/startup/mldr/loader.c
 @@ -6,13 +6,14 @@
@@ -12479,7 +12467,7 @@ index 1e9ec25d..0e616141 100644
  
  static int native_prot(int prot);
 -static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
-+static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, bool verify_identity, char** argv, struct load_results* lr);
++static void load(const char* path, int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
  static void setup_space(struct load_results* lr, bool is_64_bit);
  static void* compatible_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
  
@@ -12518,7 +12506,7 @@ index 1e9ec25d..0e616141 100644
  				}
  
 -				load(path, header.cputype, true, NULL, lr);
-+				load(path, header.cputype, true, false, NULL, lr);
++				load(path, -1, header.cputype, true, NULL, lr);
  
  				break;
  			}

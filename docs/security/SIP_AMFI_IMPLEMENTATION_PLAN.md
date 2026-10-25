@@ -361,11 +361,12 @@ in `tests/security/fixtures/README.md`:
   logs `bash`, `path_helper` and `true` as unsigned, so the gate sits on the
   actual exec path. Cost: ~4 ms to verify a 4.8 MB dylib including process
   startup; no measurable change in `darling shell` startup.
-  The loader reopens the path, but now compares the opened fd's device, inode,
-  size, nanosecond mtime and ctime with the verified snapshot and refuses a
-  mismatch. This is the minimum fallback, **not** the M2 no-TOCTOU acceptance
-  criterion; mapping through the exact verified descriptor is still required
-  and M2's single-fd criterion remains unmet.
+  `codesign_gate()` opens the main image once with `O_NOFOLLOW|O_CLOEXEC`,
+  verifies it, and hands the same descriptor to `load()`; the main image is
+  never reopened by path. The M2 single-fd criterion is satisfied for the main
+  executable. If the gate cannot even open the file in `off`/`warn`, the
+  loader may still fall back to a path open, but that path was not approved
+  by the verifier and the state remains invalid.
 - Risk: breaks the runtime if M0/M7 prerequisites are skipped. Ship with
   `off` default and a documented `warn` soak period.
 
