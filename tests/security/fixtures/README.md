@@ -99,4 +99,4 @@ The probe's own cdhash changes per build, so the golden file records its
 | Real Apple/Developer ID binary parsing and page hashes | 2 |
 | Developer ID chain trust, notarization tickets, Apple policy | not verified |
 | `csops`/`csrctl` semantics, flags, cross-process behaviour | 3 |
-| SIP path enforcement | 3 + runtime tests |
+| SIP path enforcement | not verified (Tier 3 runs with SIP disabled; runtime tests are prototypes) |

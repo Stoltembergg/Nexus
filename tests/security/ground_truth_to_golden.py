@@ -97,11 +97,11 @@ def parse_env(artifact_dir):
     envs = []
     for probe_path in probe_files:
         runner = probe_path.parent.name.replace("ground-truth-", "")
-        probe = json.loads(probe_path.read_text())
+        probe = json.loads(probe_path.read_text(encoding="utf-8"))
         sign_txt = probe_path.parent / f"codesign-{runner}.txt"
         if not sign_txt.is_file():
             raise SystemExit(f"missing codesign report: {sign_txt}")
-        text = sign_txt.read_text(errors="replace")
+        text = sign_txt.read_text(encoding="utf-8", errors="replace")
 
         sw = {}
         m = re.search(r"ProductVersion:\s*(\S+)", text)
@@ -115,6 +115,7 @@ def parse_env(artifact_dir):
 
         flags = int(probe["self"]["status"]["flags"], 16)
         child_flags = int(probe["child_query"]["status"]["flags"], 16)
+        entitlements = probe["self"]["entitlements"]
 
         envs.append(
             {
@@ -138,7 +139,12 @@ def parse_env(artifact_dir):
                         "rc": probe["self"]["teamid"]["rc"],
                         "errno": probe["self"]["teamid"]["errno"],
                     },
-                    "entitlements_length": probe["self"]["entitlements"]["length"],
+                    "entitlements": {
+                        "rc": entitlements.get("rc"),
+                        "errno": entitlements.get("errno", 0),
+                        "length": entitlements.get("length"),
+                    },
+                    "entitlements_length": entitlements.get("length"),
                     "pidoffset": probe["self"]["pidoffset"]["value"],
                     "child_status_flags": probe["child_query"]["status"]["flags"],
                     "child_matches_self": child_flags == flags,
@@ -191,7 +197,15 @@ def render_markdown(golden):
     for e in golden["environments"]:
         p = e["probe"]
         team = f"rc={p['teamid']['rc']} errno={p['teamid']['errno']}"
-        ents = f"{p['entitlements_length']} bytes"
+        ent = p.get("entitlements", {})
+        if ent.get("rc") == 0 and ent.get("length") is not None:
+            ents = f"{ent['length']} bytes"
+        elif ent:
+            ents = f"rc={ent.get('rc')} errno={ent.get('errno', 0)}"
+        elif p.get("entitlements_length") is not None:
+            ents = f"{p['entitlements_length']} bytes"
+        else:
+            ents = "unavailable"
         child = "matches self" if p["child_matches_self"] else "differs"
         out.append(
             f"| {e['runner']} | `{p['status_flags']}` | "
@@ -271,9 +285,9 @@ def main():
         "environments": envs,
     }
     args.json.parent.mkdir(parents=True, exist_ok=True)
-    args.json.write_text(json.dumps(golden, indent=2) + "\n")
+    args.json.write_text(json.dumps(golden, indent=2) + "\n", encoding="utf-8")
     args.markdown.parent.mkdir(parents=True, exist_ok=True)
-    args.markdown.write_text(render_markdown(golden))
+    args.markdown.write_text(render_markdown(golden), encoding="utf-8")
     print(f"wrote {args.json} and {args.markdown} ({len(envs)} environments)")
 
 

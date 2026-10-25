@@ -1,3 +1,61 @@
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
+index 6dc66b0..f532811 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
+@@ -7,4 +7,10 @@
+ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize);
+ long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* audit_token);
+ 
++/* M8: true when the caller may debug the target (self, root, or get-task-allow). */
++int dc_cs_target_allows_debug(int pid);
++
++/* True when DARLING_CODESIGN_ENFORCE=enforce selected rejection policy. */
++int dc_cs_signing_enforce(void);
++
+ #endif // LINUX_CSOPS_H
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h
+new file mode 100644
+index 0000000..5c351b8
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h
+@@ -0,0 +1,12 @@
++#ifndef _DARLING_SIP_H
++#define _DARLING_SIP_H
++
++#include <stdint.h>
++
++/* Darling-local SIP prototype. Enabled by DARLING_SIP_ENFORCE=1/on. */
++int dc_sip_enabled(void);
++uint32_t dc_sip_csr_config(void);
++int dc_sip_check_csr(uint32_t bit);
++int dc_sip_check_write(const char* host_path);
++
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c
+index 0ad74ed..542cde9 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c
+@@ -11,6 +11,7 @@
+ #include <darling/emulation/common/simple.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ 
+ #include <darlingserver/rpc.h>
+ 
+@@ -75,6 +76,12 @@ long sys_openat_nocancel(int fd, const char* filename, int flags, unsigned int m
+ 		return errno_linux_to_bsd(ret);
+ 	}
+ 
++	if (flags & (BSD_O_WRONLY | BSD_O_RDWR | BSD_O_CREAT | BSD_O_TRUNC | BSD_O_APPEND)) {
++		ret = dc_sip_check_write(vc.path);
++		if (ret != 0)
++			return ret;
++	}
++
+ 	// when we're given O_SYMLINK, `oflags_bsd_to_linux` translates it into
+ 	// O_NOFOLLOW and O_PATH
+ 	// this is the only way to open the symlink itself on Linux
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
 index 7fe0b4e..7e00a00 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
@@ -184,53 +242,6 @@ index 0000000..764f540
 +	}
 +	return 0;
 +}
-diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c
-index e16d09f..e68c212 100644
---- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c
-+++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c
-@@ -9,6 +9,7 @@
- #include <darling/emulation/conversion/common_at.h>
- #include <darling/emulation/linux_premigration/vchroot_expand.h>
- #include <darling/emulation/other/mach/lkm.h>
-+#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
- 
- extern char* strcpy(char* dst, const char* src);
- 
-@@ -28,6 +29,9 @@ long sys_mkdirat(int fd, const char* path, unsigned int mode)
- 	ret = vchroot_expand(&vc);
- 	if (ret < 0)
- 		return errno_linux_to_bsd(ret);
-+	ret = dc_sip_check_write(vc.path);
-+	if (ret != 0)
-+		return ret;
- 
- 	ret = LINUX_SYSCALL(__NR_mkdirat, vc.dfd, vc.path, mode);
- 
-diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c
-index 0ad74ed..542cde9 100644
---- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c
-+++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/openat.c
-@@ -11,6 +11,7 @@
- #include <darling/emulation/common/simple.h>
- #include <darling/emulation/linux_premigration/vchroot_expand.h>
- #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
-+#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
- 
- #include <darlingserver/rpc.h>
- 
-@@ -75,6 +76,12 @@ long sys_openat_nocancel(int fd, const char* filename, int flags, unsigned int m
- 		return errno_linux_to_bsd(ret);
- 	}
- 
-+	if (flags & (BSD_O_WRONLY | BSD_O_RDWR | BSD_O_CREAT | BSD_O_TRUNC | BSD_O_APPEND)) {
-+		ret = dc_sip_check_write(vc.path);
-+		if (ret != 0)
-+			return ret;
-+	}
-+
- 	// when we're given O_SYMLINK, `oflags_bsd_to_linux` translates it into
- 	// O_NOFOLLOW and O_PATH
- 	// this is the only way to open the symlink itself on Linux
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c
 index 282a5a1..34e2cf3 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c
@@ -272,19 +283,19 @@ index 282a5a1..34e2cf3 100644
  long sys_mprotect(void* addr, unsigned long len, int prot)
  {
  	int linux_prot, ret;
-diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c
-index 7fd6d41..cbcef44 100644
---- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c
-+++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c
-@@ -8,6 +8,7 @@
- #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c
+index e16d09f..e68c212 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkdirat.c
+@@ -9,6 +9,7 @@
  #include <darling/emulation/conversion/common_at.h>
  #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/other/mach/lkm.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
  
- 
  extern char* strcpy(char* dst, const char* src);
-@@ -26,6 +27,9 @@ long sys_unlinkat(int fd, const char* path, int flag)
+ 
+@@ -28,6 +29,9 @@ long sys_mkdirat(int fd, const char* path, unsigned int mode)
  	ret = vchroot_expand(&vc);
  	if (ret < 0)
  		return errno_linux_to_bsd(ret);
@@ -292,8 +303,8 @@ index 7fd6d41..cbcef44 100644
 +	if (ret != 0)
 +		return ret;
  
- 	linux_flags = atflags_bsd_to_linux(flag);
- 	if (linux_flags == LINUX_AT_INVALID)
+ 	ret = LINUX_SYSCALL(__NR_mkdirat, vc.dfd, vc.path, mode);
+ 
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/renameat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/renameat.c
 index 23a1912..cc54222 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/renameat.c
@@ -319,36 +330,28 @@ index 23a1912..cc54222 100644
  
  	ret = LINUX_SYSCALL(__NR_renameat, vc.dfd, vc.path, vc2.dfd, vc2.path);
  
-diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
-index 6dc66b0..7b63da2 100644
---- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
-+++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
-@@ -7,4 +7,7 @@
- long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize);
- long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* audit_token);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c
+index 7fd6d41..cbcef44 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/unlinkat.c
+@@ -8,6 +8,7 @@
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ #include <darling/emulation/conversion/common_at.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
  
-+/* M8: true when the caller may debug the target (self, root, or get-task-allow). */
-+int dc_cs_target_allows_debug(int pid);
-+
- #endif // LINUX_CSOPS_H
-diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h
-new file mode 100644
-index 0000000..5c351b8
---- /dev/null
-+++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h
-@@ -0,0 +1,12 @@
-+#ifndef _DARLING_SIP_H
-+#define _DARLING_SIP_H
-+
-+#include <stdint.h>
-+
-+/* Darling-local SIP prototype. Enabled by DARLING_SIP_ENFORCE=1/on. */
-+int dc_sip_enabled(void);
-+uint32_t dc_sip_csr_config(void);
-+int dc_sip_check_csr(uint32_t bit);
-+int dc_sip_check_write(const char* host_path);
-+
-+#endif
+ 
+ extern char* strcpy(char* dst, const char* src);
+@@ -26,6 +27,9 @@ long sys_unlinkat(int fd, const char* path, int flag)
+ 	ret = vchroot_expand(&vc);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
+ 
+ 	linux_flags = atflags_bsd_to_linux(flag);
+ 	if (linux_flags == LINUX_AT_INVALID)
 diff --git a/darling/src/libsystem_kernel/CMakeLists.txt b/darling/src/libsystem_kernel/CMakeLists.txt
 index e14e7ea..024981b 100644
 --- a/darling/src/libsystem_kernel/CMakeLists.txt
@@ -6610,10 +6613,10 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root_len = prefix_path_len;
  							}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-index f1ce3d3..c92decc 100644
+index f1ce3d3..1ed5716 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-@@ -1,38 +1,379 @@
+@@ -1,38 +1,384 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
  
  #include <stdint.h>
@@ -6790,8 +6793,11 @@ index f1ce3d3..c92decc 100644
 +	ret = state_for(pid, self, &state);
 +	if (ret != 0)
 +		return ret;
-+
-+	switch (ops) {
+ 
+ 	switch (ops) {
+-		case CS_OPS_STATUS: {
+-			*(uint32_t*)useraddr = CS_VALID;
+-		} break;
 +	case CS_OPS_MARKINVALID:
 +	case CS_OPS_MARKHARD:
 +	case CS_OPS_MARKKILL:
@@ -6806,11 +6812,8 @@ index f1ce3d3..c92decc 100644
 +	default:
 +		break;
 +	}
- 
- 	switch (ops) {
--		case CS_OPS_STATUS: {
--			*(uint32_t*)useraddr = CS_VALID;
--		} break;
++
++	switch (ops) {
 +	case CS_OPS_DARLING_ENTITLEMENT_BITS: {
 +		uint32_t bits = state.darling_entitlements;
 +		if (!self)
@@ -6822,7 +6825,12 @@ index f1ce3d3..c92decc 100644
 +		memcpy(useraddr, &bits, sizeof(bits));
 +		return 0;
 +	}
-+
+ 
+-		case CS_OPS_BLOB:
+-		case CS_OPS_ENTITLEMENTS_BLOB:
+-		case CS_OPS_IDENTITY: {
+-			memset(useraddr, 0, usersize);
+-		} break;
 +	case CS_OPS_STATUS:
 +		if (useraddr != NULL) {
 +			if (usersize < sizeof(uint32_t))
@@ -6830,7 +6838,11 @@ index f1ce3d3..c92decc 100644
 +			memcpy(useraddr, &state.flags, sizeof(state.flags));
 +		}
 +		return 0;
-+
+ 
+-		// all other operations are completely unsupported
+-		default: {
+-			ret = -ENOSYS;
+-		} break;
 +	case CS_OPS_CDHASH:
 +		if (usersize != DC_CS_CDHASH_LEN || state.cdhash_len != DC_CS_CDHASH_LEN)
 +			return -EINVAL;
@@ -6846,19 +6858,10 @@ index f1ce3d3..c92decc 100644
 +			return -ERANGE;
 +		memcpy(useraddr, &state.image_offset, sizeof(state.image_offset));
 +		return 0;
- 
--		case CS_OPS_BLOB:
--		case CS_OPS_ENTITLEMENTS_BLOB:
--		case CS_OPS_IDENTITY: {
--			memset(useraddr, 0, usersize);
--		} break;
++
 +	case CS_OPS_PIDPATH:
 +		return copy_identity(state.image_path, strlen(state.image_path), useraddr, usersize);
- 
--		// all other operations are completely unsupported
--		default: {
--			ret = -ENOSYS;
--		} break;
++
 +	case CS_OPS_ENTITLEMENTS_BLOB: {
 +		if (!state_is_valid(&state))
 +			return -EINVAL;
@@ -6965,6 +6968,11 @@ index f1ce3d3..c92decc 100644
 +	}
 +}
 +
++int dc_cs_signing_enforce(void) {
++	const struct dc_cs_local_state* local = local_state();
++	return local != NULL && local->state.signing_enforce != 0;
++}
++
 +int dc_cs_target_allows_debug(int pid) {
 +	const struct dc_cs_local_state* local = local_state();
 +	struct dc_cs_state state;
@@ -7015,20 +7023,21 @@ index f1ce3d3..c92decc 100644
 +	return csops_common(pid, ops, useraddr, usersize);
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
-index 49bac54..cdac7ff 100644
+index 49bac54..eb1fcdb 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
-@@ -2,6 +2,9 @@
+@@ -2,6 +2,10 @@
  
  #include <sys/errno.h>
  #include <sys/fcntl.h>
 +#include <string.h>
 +
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
 +#include <darlingserver/rpc.h>
  
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/common/base.h>
-@@ -65,6 +68,16 @@ static int cmd_bsd_to_linux(int bsd) {
+@@ -65,6 +69,16 @@ static int cmd_bsd_to_linux(int bsd) {
  	};
  };
  
@@ -7045,7 +7054,7 @@ index 49bac54..cdac7ff 100644
  long sys_fcntl(int fd, int cmd, long arg)
  {
  	CANCELATION_POINT();
-@@ -78,8 +91,49 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
+@@ -78,8 +92,51 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
  
  	switch (cmd)
  	{
@@ -7063,8 +7072,10 @@ index 49bac54..cdac7ff 100644
 +			    NULL, 0, &valid, &lv_ok, &covered_length, &flags);
 +			if (ret != 0)
 +				return ret;
-+			if (!valid)
++			if (!valid && dc_cs_signing_enforce())
 +				return -EPERM;
++			/* off/warn still report the verified coverage, but do not
++			 * reject an image that dyld is allowed to load. */
 +			signatures->fs_file_start = (off_t) covered_length;
  			return 0;
 +		}

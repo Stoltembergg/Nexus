@@ -341,7 +341,7 @@ int main(void)
 	uint32_t config = 0;
 	csr_get_config_fn get_config = csr_get_config_sym();
 	csr_check_fn check = csr_check_sym();
-	int cr = -1, ck_tfp = -1, ck_dbg = -1;
+	int cr = -1, cr_errno = ENOSYS, ck_tfp = -1, ck_dbg = -1;
 
 	if (uname(&u) != 0)
 		memset(&u, 0, sizeof(u));
@@ -349,6 +349,7 @@ int main(void)
 	if (get_config) {
 		errno = 0;
 		cr = get_config(&config);
+		cr_errno = cr ? errno : 0;
 	}
 	if (check) {
 		ck_tfp = check(CSR_ALLOW_TASK_FOR_PID);
@@ -370,7 +371,7 @@ int main(void)
 	printf("  \"csr\": {\"rc\": %d, \"errno\": %d, \"config\": \"0x%08x\", "
 	       "\"unrestricted_fs\": %s, \"task_for_pid\": %s, \"debugger\": %s, "
 	       "\"unauthenticated_root\": %s},\n",
-	       cr, cr ? errno : 0, config,
+	       cr, cr_errno, config,
 	       (config & CSR_ALLOW_UNRESTRICTED_FS) ? "true" : "false",
 	       (config & CSR_ALLOW_TASK_FOR_PID) ? "true" : "false",
 	       (config & CSR_ALLOW_KERNEL_DEBUGGER) ? "true" : "false",
