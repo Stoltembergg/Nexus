@@ -66,3 +66,37 @@ index 3710870..2a6f6bd 100644
  				processDyldEnvironmentVariable(key, value, NULL);
  			}
  		}
+diff --git a/src/ImageLoaderMachO.cpp b/src/ImageLoaderMachO.cpp
+index 9242278..5fa96af 100644
+--- a/src/ImageLoaderMachO.cpp
++++ b/src/ImageLoaderMachO.cpp
+@@ -44,6 +44,10 @@
+ #include <sys/syscall.h>
+ #include <libkern/OSAtomic.h>
+ #include <libkern/OSCacheControl.h>
++
++#ifdef DARLING
++extern "C" int __darling_mseal_range(void* addr, unsigned long len);
++#endif
+ #include <stdint.h>
+ #include <System/sys/codesign.h>
+ 
+@@ -2724,6 +2728,18 @@ void ImageLoaderMachO::mapSegments(int fd, uint64_t offsetInFat, uint64_t lenInF
+ 
+ 	// update slide to reflect load location			
+ 	this->setSlide(slide);
++
++#ifdef DARLING
++	/* M5: seal signed read-only ranges in this image. The helper lives in
++	 * libsystem_kernel and uses Linux mseal(2) when available. */
++	for (unsigned int i = 0, e = segmentCount(); i < e; ++i) {
++		if (segWriteable(i))
++			continue;
++		if (strcmp(segName(i), "__TEXT") != 0 && strcmp(segName(i), "__LINKEDIT") != 0)
++			continue;
++		__darling_mseal_range((void*)segActualLoadAddress(i), segSize(i));
++	}
++#endif
+ }
+ 
+ void ImageLoaderMachO::mapSegments(const void* memoryImage, uint64_t imageLen, const LinkContext& context)

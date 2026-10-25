@@ -8,7 +8,7 @@
    "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
    "repository": "https://github.com/darlinghq/darling.git",
    "patch": "patches/darling.patch",
-   "modified_files": 90,
+   "modified_files": 99,
    "new_files": [
     "src/CoreAudio/AudioTrace.h",
     "src/CoreAudio/CoreAudio/AudioConverterShim.c",
@@ -27,7 +27,9 @@
     "src/shellspawn/shellspawn-fds.h",
     "src/startup/mldr/commpage-cpu-caps.h",
     "src/startup/mldr/dc_codesign.c",
-    "src/startup/mldr/dc_codesign.h"
+    "src/startup/mldr/dc_codesign.h",
+    "src/frameworks/Accelerate/vecLib/vDSP/src/arith.c",
+    "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c"
    ]
   },
   {
@@ -117,7 +119,9 @@
     "internal-include/darlingserver/cs_verify.hpp",
     "src/cs_verify.cpp",
     "src/dc_codesign.c",
-    "src/dc_codesign.h"
+    "src/dc_codesign.h",
+    "internal-include/darlingserver/trustcache.hpp",
+    "src/trustcache.cpp"
    ]
   },
   {
@@ -125,7 +129,7 @@
    "revision": "63f667cf06d7ed59553adebb0c8d70a117135ac9",
    "repository": "https://github.com/darlinghq/darling-dyld.git",
    "patch": "patches/dyld.patch",
-   "modified_files": 1,
+   "modified_files": 2,
    "new_files": []
   },
   {
@@ -289,7 +293,7 @@
    "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
    "repository": "https://github.com/darlinghq/darling-xnu.git",
    "patch": "patches/xnu.patch",
-   "modified_files": 67,
+   "modified_files": 74,
    "new_files": [
     "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
     "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
@@ -300,7 +304,9 @@
     "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c",
     "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
     "libsyscall/wrappers/__sysctlbyname.S",
-    "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h"
+    "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h",
+    "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h",
+    "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c"
    ]
   },
   {

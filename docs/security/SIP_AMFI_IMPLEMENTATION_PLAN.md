@@ -3,9 +3,11 @@
 Status: **implementation in progress**. Companion to issue #49 and the draft
 tracking PR #50 (which carries `docs/security/SIP_AMFI_ENFORCEMENT.md`). This
 document is the engineering plan: it names the code seams, the data model, the
-phases, the acceptance tests and the honest limits. M0–M4 have prototypes on
-this branch, each behind its acceptance tests; M5–M10 remain design. Nothing
-further is implemented until its acceptance test exists and passes.
+phases, the acceptance tests and the honest limits. M0–M8 have prototypes on
+this branch, each behind its acceptance tests. M9 (Gatekeeper/notarization)
+and M10 (production default + soak) remain open because they require a real
+macOS/notarization corpus and a full reference-machine match test; they are
+not claimed as implemented.
 
 Author: fork maintainers (`obrientatsuya/darling-lol`).
 
@@ -454,6 +456,19 @@ in `tests/security/fixtures/README.md`:
   unmodified image runs, and a page modified before sealing is detected.
 - Risk: JIT and self-modifying runtimes (Chromium V8) legitimately need
   `MAP_JIT`; `allow-jit` must gate an explicit, audited exception.
+- **Prototype (this branch):** after mapping segments, `mldr` calls Linux
+  `mseal(2)` on read-only `__TEXT`/`__LINKEDIT`; dyld calls a private
+  `__darling_mseal_range()` helper for every non-writable `__TEXT`/`__LINKEDIT`
+  segment it maps. The kernel then rejects later `mprotect`, `munmap` and
+  `mmap(MAP_FIXED)` over those ranges on Linux ≥ 6.10.
+  `tests/security/test_m5_seal.sh` checks the main image and a `dlopen()`ed
+  dylib: both reject `mprotect(PROT_WRITE)`: 1/1 passing on the 7.3 test host.
+  Known limits: there is no registry fallback on kernels without `mseal`;
+  sealing errors are logged but do not currently abort the image (best-effort
+  prototype, not fail-closed); JIT allocations are not sealed; `dlclose()`
+  cannot unmap a sealed image (the mapping is intentionally left behind); page
+  hashes remain eager from M0–M1; cross-process write checks beyond the M8
+  debug entitlement gate are still pending.
 
 ### M6 — Local authenticated trust store (2 w)
 
@@ -470,6 +485,23 @@ in `tests/security/fixtures/README.md`:
   fails closed.
 - Non-goal restated: this is **not** an Apple trust cache and must never be
   reported as one.
+- **Prototype (this branch):** `tools/dc-trustcache.py init|add|remove|list|
+  verify` creates an Ed25519 key pair next to
+  `$prefix/var/db/darling/trustcache`, signs a versioned binary store
+  (`DTC1`, issuer `darling-local`, generation, 20-byte cdhash + flags), and
+  requires root to mutate it. `darlingserver/src/trustcache.cpp` verifies the
+  signature with the local public key, fails closed on malformed/missing
+  signatures, and rejects lower generations using both an in-memory cache and
+  a persisted `.lastgen` anchor. `cs_verify.cpp` consults the store before the
+  runtime-path fallback. `tests/security/test_trustcache.sh` covers add,
+  higher-generation acceptance, rollback, tamper and missing-signature cases:
+  6/6 passing.
+  Known limits: this is not Apple's trust cache and no Apple chain is
+  validated; a local root-equivalent attacker can replace both key and store;
+  `.lastgen` is a local rollback anchor, not a hardware monotonic counter; the
+  runtime path exemption remains until install/signing populates runtime
+  cdhashes; the test restarts the prefix namespace after store mutations so
+  the server sees the new file under the overlay.
 
 ### M7 — SIP configuration and path enforcement (4 w)
 
@@ -496,6 +528,22 @@ in `tests/security/fixtures/README.md`:
   config flips behavior without a rebuild; `csrctl(GET)` matches the file.
 - Risk: path canonicalization bugs are the classic escape. Test with symlink
   chains, `..`, bind-mount-like prefix mappings, and case-insensitive hosts.
+- **Prototype (this branch):** `DARLING_SIP_ENFORCE=1/on` is read by `mldr`
+  into `dc_cs_state.sip_enabled` for the process (and inherited on fork).
+  `csrctl(GET_ACTIVE_CONFIG)` reports `0` when enforcing and `CSR_VALID_FLAGS`
+  when off; `CHECK` returns `EPERM` for every allow bit while enforcing;
+  `SET_ACTIVE_CONFIG` is not implemented. `openat` (write/create/truncate/
+  append), `unlinkat`, `mkdirat` and `renameat` call a shared path policy after
+  `vchroot_expand()`; the policy allows `/usr/local` and rejects resolved
+  `/System`, `/bin`, `/sbin`, `/usr`, `/private/etc`, `/private/var/db` and
+  `/Library/Apple` paths. `tests/security/test_sip.sh` covers off/on,
+  protected writes, `/usr/local`, `..` and symlink escapes: 2/2 passing.
+  Known limits: policy is a per-process environment flag, not a prefix
+  `security.plist` or root-only `csrctl` setter; only four VFS wrappers are
+  hooked; `chmod`, `chown`, `utimes`, `setxattr`, `truncate`, `link`, `symlink`,
+  `rmdir` and writable `mmap` are not covered; hardlink decisions are deferred;
+  the host-path substring check is deliberately conservative and is not a full
+  VFS policy; rootless redirects are not modeled.
 
 ### M8 — Debug/injection restrictions and AMFI dispatch (2 w)
 
@@ -508,8 +556,26 @@ in `tests/security/fixtures/README.md`:
   AMFI call is an error (not success).
 - Risk: Chromium's sandbox probes previously depended on the fake success;
   the `warn` mode and an audit list are mandatory.
+- **Prototype (this branch):** AMFI call 95
+  (`CDHASH_IN_TRUSTCACHE`) now queries the M6 local trust store through a
+  `trustcache_contains` RPC and writes a truthful result; unknown AMFI calls
+  return `ENOTSUP` instead of fabricated success. `get-task-allow` is enforced
+  guest-side for `ptrace(PT_ATTACHEXC)`, `task_for_pid` and
+  `task_name_for_pid` (self and root are exempt).
+  `tests/security/test_amfi.sh` checks unknown AMFI failure and a non-entitled
+  ptrace denial: 1/1 passing.
+  Known limits: the Seatbelt policy still soft-succeeds to keep Chromium's
+  probes alive and is not a real sandbox; `process_vm_*`, `mach_vm_write` and
+  direct darlingserver RPC bypass are not covered; the debug check is
+  cooperative guest-side policy rather than server-authoritative; an entitled
+  positive-attach case is not automated yet; call 95 is the only AMFI call
+  currently implemented.
 
 ### M9 — Gatekeeper / notarization compatibility (2–4 w, research-heavy)
+
+**Status: not implemented.** The required real-macOS probes and notarization
+fixtures are not available in this environment. No `notarized` bit is set by
+this branch.
 
 - First deliverable is a written answer, from a real macOS, to: where the
   stapled ticket lives, which `SecAssessment`/`syspolicyd` surface is public
@@ -523,6 +589,9 @@ in `tests/security/fixtures/README.md`:
 
 ### M10 — Default switch and soak (2 w)
 
+**Status: not implemented.** No production default change or full match soak
+has been run. The current branch remains an opt-in prototype.
+
 - Run the full runtime with `enforce` for a release cycle; collect failures.
 - Update `docs/`, `README` and the launcher diagnostics; keep `warn` one flag
   away.
@@ -530,8 +599,9 @@ in `tests/security/fixtures/README.md`:
 - Acceptance: full match test on the reference machine with enforcement on
   and zero verification failures in the logs; documented rollback works.
 
-**Total: ~24–30 person-weeks.** M0–M3 are the useful, low-risk core
-(~7 weeks); M4–M7 deliver the actual security properties; M9 is optional.
+**Total: ~24–30 person-weeks.** M0–M8 now have prototypes and acceptance
+tests on this branch; M9 is optional/research and M10 still requires a
+production soak on a real reference machine.
 
 ---
 
@@ -544,12 +614,11 @@ tests/security/
   test_parser.py       cdhash/hash-type/slot cases
   test_mldr_gate.sh    exec: good/bad/unsigned/tampered, warn vs enforce
   test_csops.sh        status/cdhash/entitlements/teamid, pid reuse
-  test_lv_runtime.sh   library validation + disable-library-validation
-  test_runtime.sh      hardened runtime dyld env, get-task-allow
-  test_seal.sh         mseal/mprotect/mmap/ptrace negative cases
+  test_lv_runtime.sh   library validation, dyld env, get-task-allow
+  test_m5_seal.sh      mseal/mprotect/mmap negative cases
   test_trustcache.sh   local signed entries, forged entry, rollback
   test_sip.sh          protected paths, symlink/.. escapes (hardlinks deferred)
-  test_amfi.sh         known/unknown calls, entitlement checks
+  test_amfi.sh         unknown calls, get-task-allow ptrace denial
 ```
 
 Rules:
@@ -631,9 +700,10 @@ requirement matrix.
 | M2 loader gate | `off`, then `warn` | config to `off` |
 | M3 csops | on (truthful state) | state reports zero flags (old behavior was worse) |
 | M4 library validation | `warn` | config to `off` |
-| M5 page sealing | `warn` | config to `off` |
-| M6 trust cache | `off` until signed runtime exists | remove store, regenerate |
-| M7 SIP | `off` | config to `off` |
+| M5 page sealing | on when `mseal(2)` exists; no fallback | use a kernel without `mseal` |
+| M6 trust cache | `off` until signing populates runtime cdhashes | remove store + `.lastgen`, regenerate |
+| M7 SIP | `off` (`DARLING_SIP_ENFORCE`) | unset or set to `off` |
+| M8 AMFI/debug | unknown AMFI `ENOTSUP`; debug gate on | self/root exemption |
 | M10 default | `enforce` after soak | config to `warn` |
 
 Nothing in this plan requires a rebuild to turn off; that is a hard
