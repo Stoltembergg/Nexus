@@ -12,6 +12,9 @@
 #   --verify          verify after signing (default)
 #   --no-verify       skip the post-signing dc-codesign verify
 #   --no-thin         do not thin single-architecture x86_64 fat binaries
+#   --trust           add signed images to the local trust store
+#   --no-trust        do not update the trust store
+#   --trust-store P   trust store path (implies --trust)
 #   --allow-running   permit signing while darlingserver is running
 #   --quiet           only print the summary
 #
@@ -29,6 +32,7 @@ set -u
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 DCC=${DCC:-$here/dc-codesign/dc-codesign}
+DCT=${DCT:-$here/dc-trustcache.py}
 RCODESIGN=${RCODESIGN:-$(command -v rcodesign 2>/dev/null || true)}
 if [ -z "$RCODESIGN" ] && [ -x "${HOME:-/nonexistent}/.local/bin/rcodesign" ]; then
 	RCODESIGN="$HOME/.local/bin/rcodesign"
@@ -39,6 +43,8 @@ dry=0
 force=0
 verify=1
 thin=1
+trust=0
+trust_store=""
 allow_running=0
 quiet=0
 roots=""
@@ -51,7 +57,7 @@ usage() {
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1 ;;
+	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; trust=1 ;;
 	--prefix)
 		for d in "$HOME"/.darling/Users/*/RuntimeLibraries "$HOME"/.darling/Users/*/RuntimeFrameworks; do
 			[ -d "$d" ] && roots="$roots $d"
@@ -62,6 +68,9 @@ while [ $# -gt 0 ]; do
 	--verify) verify=1 ;;
 	--no-verify) verify=0 ;;
 	--no-thin) thin=0 ;;
+	--trust) trust=1 ;;
+	--no-trust) trust=0 ;;
+	--trust-store) trust=1; trust_store=$2; shift ;;
 	--allow-running) allow_running=1 ;;
 	--quiet) quiet=1 ;;
 	-h|--help) usage ;;
@@ -72,6 +81,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$explicit" -eq 0 ]; then
+	trust=1
 	roots="/usr/local/libexec/darling"
 	for d in "$HOME"/.darling/Users/*/RuntimeLibraries "$HOME"/.darling/Users/*/RuntimeFrameworks; do
 		[ -d "$d" ] && roots="$roots $d"
@@ -87,6 +97,10 @@ if [ -z "$RCODESIGN" ] || [ ! -x "$RCODESIGN" ]; then
 	echo "sign-darling-runtime.sh: rcodesign not found (install apple-codesign)" >&2
 	exit 2
 fi
+if [ "$trust" -eq 1 ] && { [ -z "$DCT" ] || [ ! -f "$DCT" ]; }; then
+	echo "sign-darling-runtime.sh: trust-cache tool not found at $DCT" >&2
+	exit 2
+fi
 
 if [ "$allow_running" -eq 0 ] && [ "$dry" -eq 0 ] && pgrep -x darlingserver >/dev/null 2>&1; then
 	echo "sign-darling-runtime.sh: darlingserver is running; run 'darling shutdown' first" >&2
@@ -96,6 +110,16 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+trust_entries=$tmp/trust-entries
+: > "$trust_entries"
+
+trust_hash() {
+	[ "$trust" -eq 1 ] || return 0
+	[ "$dry" -eq 0 ] || return 0
+	hash=$("$DCC" cdhash "$1" 2>/dev/null) || return 1
+	[ -n "$hash" ] || return 1
+	printf '%s 1\n' "$hash" >> "$trust_entries"
+}
 
 is_macho() { # path -> prints thin|fat|object|no
 	magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
@@ -179,7 +203,14 @@ for root in $roots; do
 			continue
 		fi
 		if [ "$force" -eq 0 ] && "$DCC" info "$f" >/dev/null 2>&1; then
+			if [ "$verify" -eq 1 ] && ! "$DCC" verify "$f" >/dev/null 2>&1; then
+				echo "verify FAILED (existing): $f" >&2
+				failed=$((failed + 1))
+				[ -n "$backup" ] && rm -f "$backup"
+				continue
+			fi
 			skipped=$((skipped + 1))
+			trust_hash "$f" || failed=$((failed + 1))
 			[ -n "$backup" ] && rm -f "$backup"
 			continue
 		fi
@@ -199,6 +230,7 @@ for root in $roots; do
 				continue
 			fi
 			signed=$((signed + 1))
+			trust_hash "$f" || failed=$((failed + 1))
 			[ -n "$backup" ] && rm -f "$backup"
 			[ "$quiet" -eq 1 ] || echo "signed: $f"
 		else
@@ -211,6 +243,16 @@ for root in $roots; do
 		fi
 	done < "$tmp/files"
 done
+
+if [ "$trust" -eq 1 ] && [ "$dry" -eq 0 ] && [ -s "$trust_entries" ]; then
+	if [ -z "$trust_store" ]; then
+		trust_store=$(python3 "$DCT" default-store) || failed=$((failed + 1))
+	fi
+	if ! python3 "$DCT" sync "$trust_store" --from "$trust_entries"; then
+		echo "trust-store FAILED: $trust_store" >&2
+		failed=$((failed + 1))
+	fi
+fi
 
 printf -- '----\n'
 printf 'total=%d signed=%d skipped=%d fat=%d thinned=%d object=%d failed=%d%s\n' \

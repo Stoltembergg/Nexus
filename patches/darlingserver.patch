@@ -3777,10 +3777,10 @@ index 0000000..6eedb66
 +#endif
 diff --git a/src/cs_verify.cpp b/src/cs_verify.cpp
 new file mode 100644
-index 0000000..07bd159
+index 0000000..b01c717
 --- /dev/null
 +++ b/src/cs_verify.cpp
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,272 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -4025,63 +4025,6 @@ index 0000000..07bd159
 +	return keyIsTrue(xml.empty() ? nullptr : xml.data(), xml.size(), key);
 +}
 +
-+static bool startsWith(const char* path, const std::string& prefix) {
-+	return prefix.size() <= strlen(path) &&
-+	       strncmp(path, prefix.c_str(), prefix.size()) == 0;
-+}
-+
-+static bool perUserOverlayPath(const char* path, const std::string& prefix, const char* leaf) {
-+	char resolved[PATH_MAX];
-+	char resolvedPrefix[PATH_MAX];
-+	std::string base;
-+	std::string wanted;
-+	const char* rest;
-+	const char* slash;
-+
-+	if (realpath(path, resolved) == nullptr ||
-+	    realpath(prefix.c_str(), resolvedPrefix) == nullptr)
-+		return false;
-+	base = std::string(resolvedPrefix) + "/Users/";
-+	if (!startsWith(resolved, base))
-+		return false;
-+	rest = resolved + base.size();
-+	slash = strchr(rest, '/');
-+	if (slash == nullptr || slash == rest || rest[0] == '.')
-+		return false;
-+	wanted = std::string("/") + leaf + "/";
-+	return strncmp(slash, wanted.c_str(), wanted.size()) == 0;
-+}
-+
-+static bool darlingRuntimePath(const char* path) {
-+	/* Darling's own runtime libraries are ad-hoc signed. Trust only the
-+	 * known library/framework locations, not every file under the prefix. */
-+	static const char* const systemRoots[] = {
-+		"/usr/local/libexec/darling/",
-+		"/usr/libexec/darling/",
-+	};
-+	std::string prefix = DarlingServer::Server::sharedInstance().prefix();
-+	size_t i;
-+
-+	for (i = 0; i < sizeof(systemRoots) / sizeof(systemRoots[0]); i++) {
-+		std::string root = systemRoots[i];
-+		if (startsWith(path, root + "usr/lib/") ||
-+		    startsWith(path, root + "System/Library/Frameworks/") ||
-+		    startsWith(path, root + "System/Library/PrivateFrameworks/"))
-+			return true;
-+	}
-+	if (!prefix.empty()) {
-+		prefix += '/';
-+		if (startsWith(path, prefix + "usr/lib/") ||
-+		    startsWith(path, prefix + "System/Library/Frameworks/") ||
-+		    startsWith(path, prefix + "System/Library/PrivateFrameworks/"))
-+			return true;
-+		if (perUserOverlayPath(path, prefix, "RuntimeLibraries") ||
-+		    perUserOverlayPath(path, prefix, "RuntimeFrameworks"))
-+			return true;
-+	}
-+	return false;
-+}
-+
 +bool DarlingServer::csImageAllowsLibraryValidation(const struct dc_cs_state& mainState,
 +    const std::vector<uint8_t>& mainEntitlements,
 +    const CsImageInfo& target, std::string* error) {
@@ -4099,8 +4042,6 @@ index 0000000..07bd159
 +	if (target.state.flags & DC_CS_PLATFORM_BINARY)
 +		return true;
 +	if (target.state.valid && trustCacheContains(target.state.cdhash, nullptr))
-+		return true;
-+	if (target.state.valid && darlingRuntimePath(target.state.image_path))
 +		return true;
 +	if (mainState.teamid_len > 0 && target.state.teamid_len > 0 &&
 +	    strcmp(mainState.teamid, target.state.teamid) == 0)
@@ -4863,10 +4804,10 @@ index 0000000..28c2109
 +#endif
 diff --git a/src/trustcache.cpp b/src/trustcache.cpp
 new file mode 100644
-index 0000000..a7d6ae8
+index 0000000..7cb0b89
 --- /dev/null
 +++ b/src/trustcache.cpp
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,257 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -4881,6 +4822,10 @@ index 0000000..a7d6ae8
 +#include <openssl/pem.h>
 +
 +#include <sys/stat.h>
++#include <unistd.h>
++
++#include <limits.h>
++#include <cstdlib>
 +
 +#include <cstdio>
 +#include <cstring>
@@ -4920,6 +4865,41 @@ index 0000000..a7d6ae8
 +		if (map >> inside >> outside >> count)
 +			return inside == 0 && outside != 0 && count != 0;
 +		return false;
++	}
++
++	std::string trustDirectory() {
++		const char* override = getenv("DARLING_TRUST_DIR");
++		if (override != nullptr && override[0] != '\0')
++			return override;
++		if (!rootlessUserNamespace() && geteuid() == 0)
++			return "/etc/darling";
++		const char* xdg = getenv("XDG_CONFIG_HOME");
++		if (xdg != nullptr && xdg[0] != '\0')
++			return std::string(xdg) + "/darling";
++		const char* home = getenv("HOME");
++		if (home != nullptr && home[0] != '\0')
++			return std::string(home) + "/.config/darling";
++		return "";
++	}
++
++	bool outsidePrefix(const std::string& directory) {
++		std::string prefix = DarlingServer::Server::sharedInstance().prefix();
++		char resolvedDirectory[PATH_MAX];
++		char resolvedPrefix[PATH_MAX];
++		std::string d, p;
++
++		if (realpath(directory.c_str(), resolvedDirectory) == nullptr ||
++		    realpath(prefix.c_str(), resolvedPrefix) == nullptr)
++			return false;
++		d = resolvedDirectory;
++		p = resolvedPrefix;
++		if (p.empty())
++			return true;
++		if (d == p)
++			return false;
++		if (d.size() > p.size() && d.compare(0, p.size(), p) == 0 && d[p.size()] == '/')
++			return false;
++		return true;
 +	}
 +
 +	bool rootOwned(const std::string& path, bool directory) {
@@ -4982,19 +4962,24 @@ index 0000000..a7d6ae8
 +}
 +
 +bool DarlingServer::trustCacheContains(const uint8_t cdhash[20], std::string* error) {
-+	std::string storePath = Server::sharedInstance().prefix() +
-+	    "/var/db/darling/trustcache";
-+	std::string pubPath = storePath + ".pub";
++	std::string trustDir = trustDirectory();
++	std::string storePath;
++	std::string pubPath;
 +	std::ifstream file;
 +	std::vector<uint8_t> data;
 +	struct stat st;
-+	std::string storeDir = storePath.substr(0, storePath.rfind('/'));
++	std::string storeDir;
 +
-+	/* The store is only meaningful when it cannot be replaced by an
-+	 * unprivileged guest. Rootless prefixes keep the M4 runtime fallback
-+	 * instead of trusting a same-uid key. */
-+	if (rootlessUserNamespace()) {
-+		if (error) *error = "trust store disabled in a rootless user namespace";
++	if (trustDir.empty()) {
++		if (error) *error = "no trust-store directory is available";
++		return false;
++	}
++	storePath = trustDir + "/trustcache";
++	pubPath = storePath + ".pub";
++	storeDir = trustDir;
++
++	if (!outsidePrefix(storeDir)) {
++		if (error) *error = "trust store must live outside the writable prefix";
 +		return false;
 +	}
 +	if (!rootOwned(storeDir, true) || !rootOwned(storePath, false) ||

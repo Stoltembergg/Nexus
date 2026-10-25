@@ -1,6 +1,6 @@
 #!/bin/sh
 # M6 acceptance: local Ed25519 trust store, add/remove, tamper and rollback.
-# Runs as root because adding entries requires root-equivalent policy.
+# Runs as root for the system store; the rootless CLI path is exercised too.
 
 set -u
 
@@ -13,12 +13,12 @@ fi
 DARLING=${DARLING:-$(command -v darling 2>/dev/null || true)}
 DCC=${DCC:-$repo/tools/dc-codesign/dc-codesign}
 TC=${TC:-$repo/tools/dc-trustcache.py}
+SIGNER=${SIGNER:-$repo/tools/sign-darling-runtime.sh}
 SDK=${DARLING_SDK_HEADERS:-$repo/build/darling-src/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk}
 if [ ! -f "$SDK/usr/include/stdio.h" ]; then
 	SDK=${DARLING_SDK:-/usr/local/libexec/darling}
 fi
 prefix=${DPREFIX:-${HOME:-/root}/.darling}
-store=$prefix/var/db/darling/trustcache
 
 pass=0; fail=0; skip=0
 ok()   { printf 'PASS  %s\n' "$1"; pass=$((pass+1)); }
@@ -31,7 +31,7 @@ if [ "$(id -u)" -ne 0 ]; then
 	finish
 	exit $?
 fi
-for tool in "$RCODESIGN" "$DARLING" "$DCC" "$TC"; do
+for tool in "$RCODESIGN" "$DARLING" "$DCC" "$TC" "$SIGNER"; do
 	if [ -z "$tool" ] || [ ! -x "$tool" ]; then
 		miss "required tool not found: ${tool:-unknown}"
 		finish
@@ -44,11 +44,18 @@ if ! command -v clang >/dev/null 2>&1 || [ ! -f "$SDK/usr/include/stdio.h" ]; th
 	exit $?
 fi
 
+store=$("$TC" default-store) || { miss "could not determine trust-store path"; finish; exit $?; }
+trust_dir=${store%/*}
+case "$store" in
+"$prefix"/*) bad "trust store is inside the mutable prefix: $store" ;;
+*) ok "trust store lives outside the writable prefix" ;;
+esac
+
 tmp=$(mktemp -d)
 backup=
-if [ -e "$prefix/var/db/darling" ]; then
-	backup=$tmp/darling-db
-	cp -a "$prefix/var/db/darling" "$backup"
+if [ -e "$trust_dir" ]; then
+	backup=$tmp/trust-backup
+	cp -a "$trust_dir" "$backup"
 fi
 started=0
 if ! pgrep -x darlingserver >/dev/null 2>&1; then
@@ -58,21 +65,35 @@ cleanup() {
 	if [ "$started" -eq 1 ]; then
 		timeout 30 "$DARLING" shutdown >/dev/null 2>&1 || true
 	fi
-	rm -rf "$prefix/var/db/darling"
+	rm -rf "$trust_dir"
 	if [ -n "$backup" ]; then
-		mkdir -p "$prefix/var/db"
-		cp -a "$backup" "$prefix/var/db/darling"
+		mkdir -p "$(dirname "$trust_dir")"
+		cp -a "$backup" "$trust_dir"
 	fi
 	rm -rf "$tmp"
 }
 trap cleanup EXIT HUP INT TERM
 
-# Start from a clean namespace and store so the server's rollback cache is
+# Start from a stopped namespace so the server's rollback cache is
 # deterministic.
 timeout 30 "$DARLING" shutdown >/dev/null 2>&1 || true
 started=1
-rm -rf "$prefix/var/db/darling"
 sleep 1
+
+# The installed runtime must be in the store before removing the M4 path
+# exception. Populate it once if the environment has not done so.
+if [ ! -f "$store" ]; then
+	if ! "$SIGNER" --sdk --quiet >/dev/null 2>&1; then
+		miss "runtime trust store is missing and the signer could not populate it"
+		finish
+		exit $?
+	fi
+fi
+if ! "$TC" verify "$store" >/dev/null 2>&1; then
+	miss "runtime trust store does not verify"
+	finish
+	exit $?
+fi
 
 build() { # source output extra...
 	src=$1; out=$2; shift 2
@@ -122,8 +143,8 @@ run() {
 	cat "$outfile"
 }
 
-"$TC" init "$store" >/dev/null || { miss "trust-store init failed"; finish; exit $?; }
 "$TC" add "$store" "$target_hash" >/dev/null || { miss "trust-store add failed"; finish; exit $?; }
+cp "$store" "$tmp/gen2"
 
 out=$(run)
 case "$out" in
@@ -131,7 +152,6 @@ case "$out" in
 *) bad "entry was not honored: $out" ;;
 esac
 
-cp "$store" "$tmp/gen2"
 "$TC" add "$store" 0000000000000000000000000000000000000000 >/dev/null 2>&1 || true
 cp "$store" "$tmp/gen3"
 out=$(run)
@@ -181,6 +201,37 @@ if "$TC" verify "$store" >/dev/null 2>&1; then
 	bad "store without a signature verifies"
 else
 	ok "store without a signature fails closed"
+fi
+
+# Rootless-style CLI selection and key creation. This does not spin up a
+# second user-namespace server; it verifies the default config path and that
+# an unprivileged owner can initialize a key/store outside the prefix.
+if command -v setpriv >/dev/null 2>&1; then
+	rootless_home=$tmp/rootless-home
+	rootless_config=$tmp/rootless-config
+	chmod 755 "$tmp"
+	mkdir -p "$rootless_home" "$rootless_config"
+	chown 1000:1000 "$rootless_home" "$rootless_config"
+	rootless_store=$(setpriv --reuid=1000 --regid=1000 --clear-groups \
+	    env HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
+	    python3 "$TC" default-store 2>/dev/null)
+	case "$rootless_store" in
+	"$rootless_config/darling/trustcache")
+		ok "rootless CLI selects \$XDG_CONFIG_HOME/darling/trustcache" ;;
+	*) bad "unexpected rootless store: ${rootless_store:-<empty>}" ;;
+	esac
+	if setpriv --reuid=1000 --regid=1000 --clear-groups \
+	    env HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
+	    python3 "$TC" init "$rootless_store" >/dev/null 2>&1 &&
+	   setpriv --reuid=1000 --regid=1000 --clear-groups \
+	    env HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
+	    python3 "$TC" verify "$rootless_store" >/dev/null 2>&1; then
+		ok "rootless store initializes and verifies under its owner"
+	else
+		bad "rootless store could not be initialized"
+	fi
+else
+	miss "setpriv not available for the rootless CLI check"
 fi
 
 finish

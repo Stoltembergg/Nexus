@@ -431,7 +431,8 @@ in `tests/security/fixtures/README.md`:
   the main executable does not require it, has
   `disable-library-validation`, shares its team ID, is a platform image, or
   both sides are ad-hoc with no team ID. Darling's own SDK/prefix libraries
-  are treated as platform images until M6 provides a real trust store.
+  must be present in the M6 local trust store; the old broad runtime-path
+  exemption has been removed.
   Hardened-runtime handling is in dyld: `DYLD_INSERT_LIBRARIES` is ignored
   unless the process carries `allow-dyld-environment-variables`; Darling's
   root/library path variables remain available so the runtime can load its
@@ -441,9 +442,9 @@ in `tests/security/fixtures/README.md`:
   `DYLD_INSERT_LIBRARIES` with and without the entitlement, and
   `CS_OPS_CLEAR_LV` followed by a different-team load: 14/14 passing.
   Known limits: CMS/Developer ID chains are not verified yet (M1 open item),
-  the runtime-path exemption is broader than the future trust store, and
-  `DYLD_*` path/root variables remain usable in hardened processes to keep
-  Darling's runtime loadable.
+  and `DYLD_*` path/root variables remain usable in hardened processes to keep
+  Darling's runtime loadable. The signer populates the runtime cdhashes into
+  the M6 store at install time.
 
 ### M5 — Running-page integrity (3 w)
 
@@ -478,11 +479,14 @@ in `tests/security/fixtures/README.md`:
 
 ### M6 — Local authenticated trust store (2 w)
 
-- Store: `$prefix/var/db/darling/trustcache` with a versioned header, a
-  monotonically increasing generation, and a signature by a **Darling-local**
-  key created at install time (Ed25519), not Apple's.
-- CLI: `dc_trustcache list|add|remove|verify`; adding requires root-equivalent
-  local policy (admin group).
+- Store: a trust directory outside the writable prefix (`/etc/darling` for
+  rootful, `$XDG_CONFIG_HOME/darling` or `$HOME/.config/darling` for rootless),
+  with a versioned header, a monotonically increasing generation, and a
+  signature by a **Darling-local** key created at install time (Ed25519), not
+  Apple's.
+- CLI: `dc-trustcache default-store|init|sync|list|add|remove|verify`; adding
+  requires root-equivalent local policy, or ownership of the rootless config
+  directory.
 - Entries: 20-byte cdhash + flags, matching the shape used by the vendored
   `trustcache.c`, with an explicit header field
   `issuer = "darling-local"` so nothing can mistake it for Apple's.
@@ -491,26 +495,31 @@ in `tests/security/fixtures/README.md`:
   fails closed.
 - Non-goal restated: this is **not** an Apple trust cache and must never be
   reported as one.
-- **Prototype (this branch):** `tools/dc-trustcache.py init|add|remove|list|
-  verify` creates an Ed25519 key pair next to
-  `$prefix/var/db/darling/trustcache`, signs a versioned binary store
-  (`DTC1`, issuer `darling-local`, generation, 20-byte cdhash + flags), and
-  requires root to mutate it. `darlingserver/src/trustcache.cpp` verifies the
-  signature with the local public key, fails closed on malformed/missing
-  signatures, and rejects lower generations using both an in-memory cache and
-  a persisted `.lastgen` anchor. `cs_verify.cpp` consults the store before the
-  runtime-path fallback. `tests/security/test_trustcache.sh` covers add,
-  higher-generation acceptance, rollback, tamper and missing-signature cases:
-  6/6 passing.
+- **Prototype (this branch):** `tools/dc-trustcache.py` supports
+  `default-store|init|sync|list|add|remove|verify`; `sync` accepts a batch of
+  cdhashes and signs the versioned store (`DTC1`, issuer `darling-local`,
+  generation, 20-byte cdhash + flags) with Ed25519. The default trust
+  directory is `/etc/darling` for a rootful install and the user config
+  directory for a rootless one; both are outside the writable prefix. The
+  private and public keys live beside the store. `tools/sign-darling-runtime.sh
+  --sdk` / `--prefix` now records every signed runtime cdhash through `sync`,
+  and `scripts/install-runtime.sh` invokes the signer.
+  `darlingserver/src/trustcache.cpp` verifies the signature with the public
+  key, requires the trust directory to be outside the prefix and to be
+  non-group/world-writable, fails closed on malformed/missing signatures, and
+  rejects lower generations using both an in-memory cache and a persisted
+  `.lastgen` anchor. `cs_verify.cpp` requires a trust-store entry for Darling
+  runtime libraries; the broad M4 runtime-path fallback is removed.
+  `tests/security/test_trustcache.sh` covers outside-prefix placement,
+  rootful add/rollback/tamper/missing-signature, runtime population, and a
+  rootless CLI path/key initialization: 9/9 passing.
   Known limits: this is not Apple's trust cache and no Apple chain is
-  validated; the server only honors a regular store/public-key pair in a
-  root-owned, non-group/world-writable directory and disables it when uid 0 is
-  a mapped host uid in a rootless user namespace, so rootless prefixes keep
-  the M4 runtime-path fallback; a root-equivalent attacker can still replace
-  both key and store; `.lastgen` is a local rollback anchor, not a hardware
-  monotonic counter; the runtime path exemption remains until install/signing
-  populates runtime cdhashes; the test restarts the prefix namespace after
-  store mutations so the server sees the new file under the overlay.
+  validated; a root-equivalent attacker can still replace both key and store;
+  in a rootless user namespace the guest shares the host uid, so the store is
+  cooperative policy rather than containment; `.lastgen` is a local rollback
+  anchor, not a hardware monotonic counter; the full rootless-server path is
+  not exercised by the automated test (only CLI selection/key creation); the
+  acceptance test restarts the namespace after store mutations.
 
 ### M7 — SIP configuration and path enforcement (4 w)
 
@@ -723,7 +732,7 @@ requirement matrix.
 | M3 csops | on (truthful state) | state reports zero flags (old behavior was worse) |
 | M4 library validation | `warn` | config to `off` |
 | M5 page sealing | on when `mseal(2)` exists; `DARLING_MSEAL=0` opts out | `DARLING_MSEAL=0` |
-| M6 trust cache | `off` until signing populates runtime cdhashes | remove store + `.lastgen`, regenerate |
+| M6 trust cache | store populated by signing/install; required for runtime LV | remove store + `.lastgen`, re-run signer |
 | M7 SIP | `off` (`DARLING_SIP_ENFORCE`) | unset or set to `off` |
 | M8 AMFI/debug | unknown AMFI `ENOTSUP`; debug gate active under `enforce` | use `off`/`warn` or self/root |
 | M10 default | `enforce` after soak | config to `warn` |

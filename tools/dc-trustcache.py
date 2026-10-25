@@ -6,7 +6,6 @@ map a 20-byte cdhash to a small flags word and are signed with an Ed25519 key
 created next to the store. The store must never be presented as Apple-issued.
 """
 import argparse
-import hashlib
 import os
 import struct
 import subprocess
@@ -26,6 +25,33 @@ DEFAULT_FLAGS = 1
 
 def fail(message):
     raise SystemExit(f"dc-trustcache: {message}")
+
+
+def rootless_namespace():
+    try:
+        fields = Path("/proc/self/uid_map").read_text().split()
+    except OSError:
+        return False
+    if len(fields) < 3:
+        return False
+    try:
+        inside, outside, count = (int(field) for field in fields[:3])
+    except ValueError:
+        return False
+    return inside == 0 and outside != 0 and count != 0
+
+
+def default_store():
+    override = os.environ.get("DARLING_TRUST_DIR")
+    if override:
+        return Path(override) / "trustcache"
+    if not rootless_namespace() and os.geteuid() == 0:
+        return Path("/etc/darling/trustcache")
+    home = os.environ.get("HOME")
+    if not home:
+        fail("HOME is not set; use --store or DARLING_TRUST_DIR")
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg else Path(home) / ".config") / "darling" / "trustcache"
 
 
 def key_paths(store, key=None, pub=None):
@@ -135,9 +161,17 @@ def write_store(store, key, pub, generation, entries):
         Path(temporary).unlink(missing_ok=True)
 
 
-def require_privilege():
-    if os.geteuid() != 0:
-        fail("adding/removing trust entries requires root (or an administrator)")
+def require_privilege(store):
+    if os.geteuid() == 0:
+        return
+    expected = default_store()
+    if store != expected:
+        fail("adding/removing this trust store requires root (or an administrator)")
+    parent = store.parent
+    if parent.exists():
+        info = parent.stat()
+        if info.st_uid != os.geteuid() or (info.st_mode & 0o022):
+            fail(f"trust-store directory is not owned by the current user or is writable by others: {parent}")
 
 
 def parse_cdhash(value):
@@ -173,8 +207,8 @@ def command_list(args):
 
 
 def command_add(args):
-    require_privilege()
     store, key, pub = key_paths(args.store, args.key, args.pub)
+    require_privilege(store)
     result = read_store(store, pub) if store.exists() else None
     generation = 1 if result is None else result[0] + 1
     entries = {} if result is None else dict(result[1])
@@ -186,8 +220,8 @@ def command_add(args):
 
 
 def command_remove(args):
-    require_privilege()
     store, key, pub = key_paths(args.store, args.key, args.pub)
+    require_privilege(store)
     result = read_store(store, pub)
     if result is None:
         fail(f"trust store not found: {store}")
@@ -201,9 +235,45 @@ def command_remove(args):
     return 0
 
 
-def command_init(args):
-    require_privilege()
+def command_default_store(args):
+    print(default_store())
+    return 0
+
+
+def read_entry_file(path):
+    entries = {}
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        fields = line.split()
+        try:
+            cdhash = parse_cdhash(fields[0])
+            flags = int(fields[1], 0) if len(fields) > 1 else DEFAULT_FLAGS
+        except (SystemExit, ValueError) as error:
+            fail(f"{path}:{number}: {error}")
+        if not 0 <= flags <= 0xffffffff:
+            fail(f"{path}:{number}: flags out of range")
+        entries[cdhash] = flags
+    return entries
+
+
+def command_sync(args):
     store, key, pub = key_paths(args.store, args.key, args.pub)
+    require_privilege(store)
+    result = read_store(store, pub) if store.exists() else None
+    generation = 1 if result is None else result[0] + 1
+    entries = {} if result is None else dict(result[1])
+    additions = read_entry_file(args.source)
+    entries.update(additions)
+    write_store(store, key, pub, generation, entries)
+    print(f"synced {len(additions)} entries generation={generation} total={len(entries)}")
+    return 0
+
+
+def command_init(args):
+    store, key, pub = key_paths(args.store, args.key, args.pub)
+    require_privilege(store)
     if store.exists():
         fail(f"trust store already exists: {store}")
     write_store(store, key, pub, 1, {})
@@ -214,6 +284,9 @@ def command_init(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    default = sub.add_parser("default-store")
+    default.set_defaults(function=command_default_store)
 
     for name, function in (("init", command_init), ("verify", command_verify), ("list", command_list)):
         cmd = sub.add_parser(name)
@@ -236,6 +309,13 @@ def main(argv=None):
     remove.add_argument("--key", type=Path)
     remove.add_argument("--pub", type=Path)
     remove.set_defaults(function=command_remove)
+
+    sync = sub.add_parser("sync")
+    sync.add_argument("store", type=Path)
+    sync.add_argument("--from", dest="source", type=Path, required=True)
+    sync.add_argument("--key", type=Path)
+    sync.add_argument("--pub", type=Path)
+    sync.set_defaults(function=command_sync)
 
     args = parser.parse_args(argv)
     return args.function(args)
