@@ -43,6 +43,7 @@ if ! pgrep -x darlingserver >/dev/null 2>&1; then
 fi
 cleanup() {
 	rm -f "$prefix/private/tmp/sip-link" "$prefix/usr/local/sip-test" "$prefix/private/etc/sip-test"
+	rm -f "$prefix/private/etc/sip-file" "$prefix/private/etc/sip-inode" "$prefix/private/etc/sip-newlink" "$prefix/private/tmp/sip-hardlink" "$prefix/private/tmp/sip-inode-link"
 	rm -rf "$tmp"
 	if [ "$started" -eq 1 ]; then
 		started=0
@@ -68,12 +69,21 @@ fi
 # Darling's vchroot, not by the host.
 timeout 60 "$DARLING" shell /bin/ln -sfn /private/etc /private/tmp/sip-link >/dev/null 2>&1 || true
 
+# Files used by the inode/hardlink and VFS probes. The hardlink is created
+# while SIP is off, outside the protected tree, then used by the "vfs" run.
+mkdir -p "$prefix/private/etc" "$prefix/private/tmp"
+printf 'sip\n' >"$prefix/private/etc/sip-file"
+printf 'sip\n' >"$prefix/private/etc/sip-inode"
+rm -f "$prefix/private/tmp/sip-inode-link"
+ln "$prefix/private/etc/sip-inode" "$prefix/private/tmp/sip-inode-link"
+
 guest_root=/Volumes/SystemRoot
 outfile=$tmp/out
-run() { # policy
-	DARLING_CODESIGN_ENFORCE=enforce DARLING_SIP_ENFORCE="$1" \
-	    timeout 120 "$DARLING" shell env DARLING_SIP_ENFORCE="$1" \
-	    "$guest_root$probe" >"$outfile" 2>&1
+run() { # policy [extra]
+	policy=$1; extra=${2:-}
+	DARLING_CODESIGN_ENFORCE=enforce DARLING_SIP_ENFORCE="$policy" \
+	    timeout 120 "$DARLING" shell env DARLING_SIP_ENFORCE="$policy" \
+	    "$guest_root$probe" $extra >"$outfile" 2>&1
 	cat "$outfile"
 }
 
@@ -87,6 +97,12 @@ out=$(run on)
 case "$out" in
 *"csr_config=0x00000000"*"SIP_ON_OK"*) ok "SIP on: protected writes refused, /usr/local and symlink/.. checks" ;;
 *) bad "SIP on probe: $out" ;;
+esac
+
+out=$(run on vfs)
+case "$out" in
+*"SIP_VFS_OK"*) ok "SIP on: chmod/chown/utimes/xattr/truncate/link/symlink/rmdir/fd/mmap and hardlink checks" ;;
+*) bad "SIP on VFS probe: $out" ;;
 esac
 
 finish

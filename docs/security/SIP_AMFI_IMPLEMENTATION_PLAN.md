@@ -542,19 +542,26 @@ in `tests/security/fixtures/README.md`:
   `csrctl(GET_ACTIVE_CONFIG)` reports `0` when enforcing and `CSR_VALID_FLAGS`
   when off; `CHECK` returns `EPERM` for every allow bit while enforcing;
   `SET_ACTIVE_CONFIG` is not implemented. `openat` (write/create/truncate/
-  append), `unlinkat`, `mkdirat` and `renameat` call a shared path policy after
-  `vchroot_expand()`; the policy allows `/usr/local` and rejects resolved
-  `/System`, `/bin`, `/sbin`, `/usr`, `/private/etc`, `/private/var/db` and
-  `/Library/Apple` paths. `tests/security/test_sip.sh` covers off/on,
-  protected writes, `/usr/local`, `..` and symlink escapes: 2/2 passing.
+  append), `unlinkat`, `mkdirat`, `renameat`, `fchmodat`/`fchmod`,
+  `fchownat`/`fchown`/`lchown`, `utimes`/`futimes`, `setxattr`/`fsetxattr`,
+  `truncate`/`ftruncate`, `linkat`, `symlinkat`, `rmdir` and writable
+  file-backed `mmap` call a shared path/fd policy. The policy allows
+  `/usr/local` and rejects resolved `/System`, `/bin`, `/sbin`, `/usr`,
+  `/private/etc`, `/private/var/db` and `/Library/Apple` paths. Protected
+  inodes are recorded by `(dev, ino)` and writable fd/path operations compare
+  against that set, so an outside hardlink to a protected file is refused once
+  the protected inode has been observed. `tests/security/test_sip.sh` covers
+  off/on, protected writes, `/usr/local`, `..`, symlink, the mutating wrappers,
+  writable `mmap` and a seeded hardlink escape: 3/3 passing.
   Known limits: policy is a per-process environment flag, not a prefix
-  `security.plist` or root-only `csrctl` setter; only four VFS wrappers are
-  hooked; `chmod`, `chown`, `utimes`, `setxattr`, `truncate`, `link`, `symlink`,
-  `rmdir` and writable `mmap` are not covered; hardlink decisions are deferred;
-  the host path is mapped back through `vchroot_unexpand()` and checked as a
-  guest absolute path, but the check still runs before the syscall, so a
-  racing symlink swap is not prevented; fallback is conservative if vchroot is
-  uninitialized; rootless redirects are not modeled.
+  `security.plist` or root-only `csrctl` setter; the inode registry has 4096
+  slots and only learns a protected inode when a protected path is inspected,
+  so a pre-existing hardlink used without touching its protected path is not
+  retroactively discovered; the host path is mapped back through
+  `vchroot_unexpand()` and checked as a guest absolute path, but the check
+  still runs before the syscall, so a racing symlink swap is not prevented;
+  fallback is conservative if vchroot is uninitialized; rootless redirects are
+  not modeled.
 
 ### M8 — Debug/injection restrictions and AMFI dispatch (2 w)
 
