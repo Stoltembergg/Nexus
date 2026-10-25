@@ -6278,10 +6278,10 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root_len = prefix_path_len;
  							}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-index f1ce3d3..1ed5716 100644
+index f1ce3d3..791899c 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-@@ -1,38 +1,384 @@
+@@ -1,38 +1,405 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
  
  #include <stdint.h>
@@ -6291,6 +6291,7 @@ index f1ce3d3..1ed5716 100644
 +#include <signal.h>
  #include <sys/codesign.h>
 -#include <strings.h>
++#include <mach/mach.h>
 +
 +#include <elfcalls.h>
 +#include <darlingserver/cs_state.h>
@@ -6458,6 +6459,26 @@ index f1ce3d3..1ed5716 100644
 +	ret = state_for(pid, self, &state);
 +	if (ret != 0)
 +		return ret;
++
++	if (ops == CS_OPS_DARLING_TASK_FOR_PID_RPC) {
++		struct dc_cs_debug_probe probe;
++		uint32_t port = 0;
++		int rpc;
++
++		if (useraddr == NULL || usersize < sizeof(probe))
++			return -EINVAL;
++		memcpy(&probe, useraddr, sizeof(probe));
++		rpc = probe.name_only
++		    ? dserver_rpc_task_name_for_pid(mach_task_self(), probe.pid, &port)
++		    : dserver_rpc_task_for_pid(mach_task_self(), probe.pid, &port);
++		if (rpc < 0)
++			return rpc;
++		if (rpc != 0 || port == 0)
++			return -EPERM;
++		probe.port = port;
++		memcpy(useraddr, &probe, sizeof(probe));
++		return 0;
++	}
  
  	switch (ops) {
 -		case CS_OPS_STATUS: {
@@ -6490,12 +6511,7 @@ index f1ce3d3..1ed5716 100644
 +		memcpy(useraddr, &bits, sizeof(bits));
 +		return 0;
 +	}
- 
--		case CS_OPS_BLOB:
--		case CS_OPS_ENTITLEMENTS_BLOB:
--		case CS_OPS_IDENTITY: {
--			memset(useraddr, 0, usersize);
--		} break;
++
 +	case CS_OPS_STATUS:
 +		if (useraddr != NULL) {
 +			if (usersize < sizeof(uint32_t))
@@ -6503,11 +6519,7 @@ index f1ce3d3..1ed5716 100644
 +			memcpy(useraddr, &state.flags, sizeof(state.flags));
 +		}
 +		return 0;
- 
--		// all other operations are completely unsupported
--		default: {
--			ret = -ENOSYS;
--		} break;
++
 +	case CS_OPS_CDHASH:
 +		if (usersize != DC_CS_CDHASH_LEN || state.cdhash_len != DC_CS_CDHASH_LEN)
 +			return -EINVAL;
@@ -6515,7 +6527,12 @@ index f1ce3d3..1ed5716 100644
 +			return -EFAULT;
 +		memcpy(useraddr, state.cdhash, DC_CS_CDHASH_LEN);
 +		return 0;
-+
+ 
+-		case CS_OPS_BLOB:
+-		case CS_OPS_ENTITLEMENTS_BLOB:
+-		case CS_OPS_IDENTITY: {
+-			memset(useraddr, 0, usersize);
+-		} break;
 +	case CS_OPS_PIDOFFSET:
 +		if (useraddr == NULL)
 +			return -EFAULT;
@@ -6523,7 +6540,11 @@ index f1ce3d3..1ed5716 100644
 +			return -ERANGE;
 +		memcpy(useraddr, &state.image_offset, sizeof(state.image_offset));
 +		return 0;
-+
+ 
+-		// all other operations are completely unsupported
+-		default: {
+-			ret = -ENOSYS;
+-		} break;
 +	case CS_OPS_PIDPATH:
 +		return copy_identity(state.image_path, strlen(state.image_path), useraddr, usersize);
 +
@@ -6773,10 +6794,16 @@ index 49bac54..eb1fcdb 100644
  			if (arg & ~FD_CLOEXEC)
  				return -EINVAL;
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
-index 6dc66b0..f532811 100644
+index 6dc66b0..ce6f2cc 100644
 --- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
 +++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
-@@ -7,4 +7,10 @@
+@@ -2,9 +2,26 @@
+ #define LINUX_CSOPS_H
+ 
+ #include <stddef.h>
++#include <stdint.h>
+ #include <mach/message.h>
+ 
  long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize);
  long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* audit_token);
  
@@ -6785,6 +6812,16 @@ index 6dc66b0..f532811 100644
 +
 +/* True when DARLING_CODESIGN_ENFORCE=enforce selected rejection policy. */
 +int dc_cs_signing_enforce(void);
++
++/* Darling test hook: issue task_for_pid/task_name_for_pid directly to the
++ * server, bypassing the guest-side entitlement check. The server policy is
++ * still authoritative. */
++#define CS_OPS_DARLING_TASK_FOR_PID_RPC 0x101
++struct dc_cs_debug_probe {
++	int32_t pid;
++	int32_t name_only;
++	uint32_t port;
++};
 +
  #endif // LINUX_CSOPS_H
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h

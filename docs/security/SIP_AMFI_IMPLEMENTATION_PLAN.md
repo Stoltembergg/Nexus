@@ -577,18 +577,21 @@ in `tests/security/fixtures/README.md`:
 - **Prototype (this branch):** AMFI call 95
   (`CDHASH_IN_TRUSTCACHE`) now queries the M6 local trust store through a
   `trustcache_contains` RPC and writes a truthful result; unknown AMFI calls
-  return `ENOTSUP` instead of fabricated success. `get-task-allow` is enforced
-  guest-side for `ptrace(PT_ATTACHEXC)` and `task_for_pid` while
-  `DARLING_CODESIGN_ENFORCE=enforce` (self and root are exempt);
-  `task_name_for_pid` remains an inspection-only operation.
-  `tests/security/test_amfi.sh` checks unknown AMFI failure and a non-entitled
-  ptrace denial: 1/1 passing.
+  return `ENOTSUP` instead of fabricated success. Under
+  `DARLING_CODESIGN_ENFORCE=enforce`, `get-task-allow` gates
+  `ptrace(PT_ATTACHEXC)` and `task_for_pid` (self/root exempt); `task_name_for_pid`
+  allows same-uid inspection or an entitled target. The same policy is enforced
+  in darlingserver by a task hook and in `Process::writeMemory`, so `mach_vm_write`
+  and the underlying `process_vm_writev` path cannot bypass it; a private
+  `csops` probe lets the test call the task-port RPC directly without the
+  guest-side check. `tests/security/test_amfi.sh` now covers unknown AMFI,
+  non-entitled ptrace, direct-RPC deny/allow, task_name deny/allow, and
+  `mach_vm_write` deny/allow: 7/7 passing.
   Known limits: the Seatbelt policy still soft-succeeds to keep Chromium's
-  probes alive and is not a real sandbox; `process_vm_*`, `mach_vm_write` and
-  direct darlingserver RPC bypass are not covered; the debug check is
-  cooperative guest-side policy rather than server-authoritative; an entitled
-  positive-attach case is not automated yet; call 95 is the only AMFI call
-  currently implemented.
+  probes alive and is not a real sandbox; raw Linux syscalls can bypass the
+  cooperative server path entirely; call 95 is the only AMFI call currently
+  implemented; the positive test obtains a task port and performs a memory
+  write but does not run a full interactive debugger session.
 
 ### M9 — Gatekeeper / notarization compatibility (2–4 w, research-heavy)
 

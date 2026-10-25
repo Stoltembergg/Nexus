@@ -1,244 +1,3 @@
-diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
-new file mode 100644
-index 0000000..28c2109
---- /dev/null
-+++ b/internal-include/darlingserver/trustcache.hpp
-@@ -0,0 +1,16 @@
-+#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
-+#define _DARLINGSERVER_TRUSTCACHE_HPP_
-+
-+#include <cstdint>
-+#include <string>
-+
-+namespace DarlingServer {
-+	/*
-+	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
-+	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
-+	 * is absent, malformed, rolled back, or does not contain the hash.
-+	 */
-+	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
-+};
-+
-+#endif
-diff --git a/src/trustcache.cpp b/src/trustcache.cpp
-new file mode 100644
-index 0000000..a7d6ae8
---- /dev/null
-+++ b/src/trustcache.cpp
-@@ -0,0 +1,213 @@
-+/**
-+ * This file is part of Darling.
-+ *
-+ * Local (Darling-only) authenticated trust store. The store format is shared
-+ * with tools/dc-trustcache.py; it is deliberately not Apple's trust cache.
-+ */
-+
-+#include <darlingserver/trustcache.hpp>
-+#include <darlingserver/server.hpp>
-+
-+#include <openssl/evp.h>
-+#include <openssl/pem.h>
-+
-+#include <sys/stat.h>
-+
-+#include <cstdio>
-+#include <cstring>
-+#include <fstream>
-+#include <mutex>
-+#include <string>
-+#include <unordered_map>
-+#include <vector>
-+
-+namespace {
-+	constexpr uint32_t kMagic = 0x44544331u; /* "DTC1" */
-+	constexpr uint32_t kVersion = 1;
-+	constexpr size_t kIssuerLen = 32;
-+	constexpr size_t kHeaderSize = 4 + 4 + 8 + kIssuerLen + 4;
-+	constexpr size_t kEntrySize = 24;
-+	constexpr size_t kSignatureLen = 64;
-+
-+	uint32_t le32(const uint8_t* p) {
-+		return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-+		       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-+	}
-+
-+	uint64_t le64(const uint8_t* p) {
-+		uint64_t value = 0;
-+		for (int i = 7; i >= 0; i--)
-+			value = (value << 8) | p[i];
-+		return value;
-+	}
-+
-+	std::mutex generationMutex;
-+	std::unordered_map<std::string, uint64_t> lastGeneration;
-+
-+	bool rootlessUserNamespace() {
-+		std::ifstream map("/proc/self/uid_map");
-+		unsigned long inside = 0, outside = 0, count = 0;
-+
-+		if (map >> inside >> outside >> count)
-+			return inside == 0 && outside != 0 && count != 0;
-+		return false;
-+	}
-+
-+	bool rootOwned(const std::string& path, bool directory) {
-+		struct stat st;
-+		if (lstat(path.c_str(), &st) != 0)
-+			return false;
-+		if (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode))
-+			return false;
-+		if (st.st_uid != 0)
-+			return false;
-+		return (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
-+	}
-+
-+	uint64_t persistedGeneration(const std::string& storePath) {
-+		std::ifstream file(storePath + ".lastgen");
-+		uint64_t generation = 0;
-+		if (file)
-+			file >> generation;
-+		return generation;
-+	}
-+
-+	void persistGeneration(const std::string& storePath, uint64_t generation) {
-+		std::string path = storePath + ".lastgen";
-+		std::string temporary = path + ".tmp";
-+		{
-+			std::ofstream file(temporary, std::ios::trunc);
-+			if (!file)
-+				return;
-+			file << generation << "\n";
-+		}
-+		if (std::rename(temporary.c_str(), path.c_str()) != 0)
-+			std::remove(temporary.c_str());
-+	}
-+
-+	bool verifySignature(const std::vector<uint8_t>& payload,
-+	    const uint8_t* signature, size_t signatureLen, const std::string& pubPath) {
-+		BIO* bio = BIO_new_file(pubPath.c_str(), "r");
-+		EVP_PKEY* key;
-+		EVP_MD_CTX* ctx;
-+		bool ok = false;
-+
-+		if (bio == nullptr)
-+			return false;
-+		key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
-+		BIO_free(bio);
-+		if (key == nullptr)
-+			return false;
-+		ctx = EVP_MD_CTX_new();
-+		if (ctx == nullptr) {
-+			EVP_PKEY_free(key);
-+			return false;
-+		}
-+		if (EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, key) == 1)
-+			ok = EVP_DigestVerify(ctx, signature, signatureLen,
-+			    payload.data(), payload.size()) == 1;
-+		EVP_MD_CTX_free(ctx);
-+		EVP_PKEY_free(key);
-+		return ok;
-+	}
-+}
-+
-+bool DarlingServer::trustCacheContains(const uint8_t cdhash[20], std::string* error) {
-+	std::string storePath = Server::sharedInstance().prefix() +
-+	    "/var/db/darling/trustcache";
-+	std::string pubPath = storePath + ".pub";
-+	std::ifstream file;
-+	std::vector<uint8_t> data;
-+	struct stat st;
-+	std::string storeDir = storePath.substr(0, storePath.rfind('/'));
-+
-+	/* The store is only meaningful when it cannot be replaced by an
-+	 * unprivileged guest. Rootless prefixes keep the M4 runtime fallback
-+	 * instead of trusting a same-uid key. */
-+	if (rootlessUserNamespace()) {
-+		if (error) *error = "trust store disabled in a rootless user namespace";
-+		return false;
-+	}
-+	if (!rootOwned(storeDir, true) || !rootOwned(storePath, false) ||
-+	    !rootOwned(pubPath, false)) {
-+		if (error) *error = "trust store is not root-owned and write-protected";
-+		return false;
-+	}
-+
-+	file.open(storePath, std::ios::binary);
-+	uint64_t generation;
-+	uint32_t count;
-+	size_t entriesEnd;
-+	uint32_t signatureLength;
-+
-+	if (!file) {
-+		if (error) *error = "trust store not present";
-+		return false;
-+	}
-+	file.seekg(0, std::ios::end);
-+	auto size = file.tellg();
-+	if (size < 0 || (uint64_t) size > 64ull * 1024ull * 1024ull) {
-+		if (error) *error = "trust store is too large";
-+		return false;
-+	}
-+	file.seekg(0, std::ios::beg);
-+	data.resize((size_t) size);
-+	if (!file.read((char*) data.data(), data.size()) ||
-+	    data.size() < kHeaderSize + 4) {
-+		if (error) *error = "cannot read trust store";
-+		return false;
-+	}
-+
-+	if (le32(data.data()) != kMagic || le32(data.data() + 4) != kVersion) {
-+		if (error) *error = "bad trust-store magic or version";
-+		return false;
-+	}
-+	generation = le64(data.data() + 8);
-+	if (memcmp(data.data() + 16, "darling-local", 13) != 0) {
-+		if (error) *error = "trust store is not darling-local";
-+		return false;
-+	}
-+	count = le32(data.data() + 48);
-+	if (count > (data.size() - kHeaderSize) / kEntrySize) {
-+		if (error) *error = "trust-store entry count is out of range";
-+		return false;
-+	}
-+	entriesEnd = kHeaderSize + (size_t) count * kEntrySize;
-+	if (entriesEnd + 4 > data.size()) {
-+		if (error) *error = "trust-store entries are truncated";
-+		return false;
-+	}
-+	signatureLength = le32(data.data() + entriesEnd);
-+	if (signatureLength != kSignatureLen ||
-+	    entriesEnd + 4 + signatureLength != data.size()) {
-+		if (error) *error = "bad trust-store signature length";
-+		return false;
-+	}
-+	if (!verifySignature(std::vector<uint8_t>(data.begin(), data.begin() + entriesEnd),
-+	        data.data() + entriesEnd + 4, signatureLength, pubPath)) {
-+		if (error) *error = "trust-store signature does not verify";
-+		return false;
-+	}
-+
-+	{
-+		std::lock_guard<std::mutex> lock(generationMutex);
-+		auto it = lastGeneration.find(storePath);
-+		uint64_t persisted = persistedGeneration(storePath);
-+		uint64_t previous = it == lastGeneration.end() ? persisted : it->second;
-+		if (generation < previous) {
-+			if (error) *error = "trust-store generation rolled back";
-+			return false;
-+		}
-+		lastGeneration[storePath] = generation;
-+		if (generation > persisted)
-+			persistGeneration(storePath, generation);
-+	}
-+
-+	for (uint32_t i = 0; i < count; i++) {
-+		const uint8_t* entry = data.data() + kHeaderSize + (size_t) i * kEntrySize;
-+		if (memcmp(entry, cdhash, 20) == 0)
-+			return true;
-+	}
-+	if (error) *error = "cdhash is not in the trust store";
-+	return false;
-+}
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 4920879..01f1cab 100644
 --- a/CMakeLists.txt
@@ -326,7 +85,7 @@ index a5ddfc7..607cf17 100644
  void dtape_semaphore_destroy(dtape_semaphore_t* semaphore);
  
 diff --git a/duct-tape/include/darlingserver/duct-tape/hooks.h b/duct-tape/include/darlingserver/duct-tape/hooks.h
-index 1dde8b7..f319f1f 100644
+index 1dde8b7..c88845f 100644
 --- a/duct-tape/include/darlingserver/duct-tape/hooks.h
 +++ b/duct-tape/include/darlingserver/duct-tape/hooks.h
 @@ -28,6 +28,8 @@ typedef dtape_thread_t* (*dtape_hook_current_thread_f)(void);
@@ -338,7 +97,23 @@ index 1dde8b7..f319f1f 100644
  typedef void (*dtape_hook_get_load_info_f)(dtape_load_info_t* load_info);
  
  typedef void (*dtape_hook_thread_suspend_f)(void* thread_context, dtape_thread_continuation_callback_f continuation_callback, void* continuation_contex, libsimple_lock_t* unlock_me);
-@@ -122,6 +124,8 @@ typedef struct dtape_hooks {
+@@ -52,6 +54,7 @@ typedef void (*dtape_hook_current_thread_set_bsd_retval_f)(uint32_t retval);
+ typedef bool (*dtape_hook_task_read_memory_f)(void* task_context, uintptr_t remote_address, void* local_buffer, size_t length);
+ typedef bool (*dtape_hook_task_write_memory_f)(void* task_context, uintptr_t remote_address, const void* local_buffer, size_t length);
+ typedef dtape_task_t* (*dtape_hook_task_lookup_f)(int id, bool id_is_nsid, bool retain);
++typedef bool (*dtape_hook_task_allows_debug_f)(void* caller_context, void* target_context, bool name_only);
+ typedef dtape_task_t* (*dtape_hook_task_lookup_eternal_f)(dtape_eternal_id_t eid, bool retain);
+ typedef void (*dtape_hook_task_get_memory_info_f)(void* task_context, dtape_memory_info_t* memory_info);
+ typedef bool (*dtape_hook_task_get_memory_region_info_f)(void* task_context, uintptr_t address, dtape_memory_region_info_t* memory_region_info);
+@@ -103,6 +106,7 @@ typedef struct dtape_hooks {
+ 	dtape_hook_task_read_memory_f task_read_memory;
+ 	dtape_hook_task_write_memory_f task_write_memory;
+ 	dtape_hook_task_lookup_f task_lookup;
++	dtape_hook_task_allows_debug_f task_allows_debug;
+ 	dtape_hook_task_lookup_eternal_f task_lookup_eternal;
+ 	dtape_hook_task_get_memory_info_f task_get_memory_info;
+ 	dtape_hook_task_get_memory_region_info_f task_get_memory_region_info;
+@@ -122,6 +126,8 @@ typedef struct dtape_hooks {
  	dtape_hook_task_remove_port_set_member_f task_remove_port_set_member;
  	dtape_hook_task_clear_port_set_f task_clear_port_set;
  #endif
@@ -1291,7 +1066,7 @@ index dc1cfa5..39a8c8d 100644
  
  bool work_interval_port_type_render_server(mach_port_name_t port_name) {
 diff --git a/duct-tape/src/task.c b/duct-tape/src/task.c
-index a9eb4bc..7ef2800 100644
+index a9eb4bc..82bf0b8 100644
 --- a/duct-tape/src/task.c
 +++ b/duct-tape/src/task.c
 @@ -521,7 +521,9 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
@@ -1324,6 +1099,22 @@ index a9eb4bc..7ef2800 100644
  };
  
  kern_return_t task_set_state(task_t task, int flavor, thread_state_t state, mach_msg_type_number_t state_count) {
+@@ -629,6 +632,15 @@ static kern_return_t task_for_pid_internal(mach_port_name_t target_tport, int pi
+ 		goto out;
+ 	}
+ 
++	{
++		dtape_task_t* caller_task = (dtape_hooks->current_task)();
++		if (caller_task && caller_task->context && looked_up_task->context &&
++		    !dtape_hooks->task_allows_debug(caller_task->context, looked_up_task->context, task_name)) {
++			kr = KERN_PROTECTION_FAILURE;
++			goto out;
++		}
++	}
++
+ 	if (task_name) {
+ 		right = convert_task_name_to_port(&looked_up_task->xnu_task);
+ 	} else {
 diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
 index f4ce909..a6cdb2c 100644
 --- a/duct-tape/src/thread.c
@@ -1831,7 +1622,7 @@ index 708f3f3..fd46ab8 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..5b413b5 100644
+index c97be30..efb045a 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
 @@ -21,6 +21,8 @@
@@ -1892,7 +1683,7 @@ index c97be30..5b413b5 100644
  		bool _dead = false;
  		std::shared_ptr<Process> _selfReference = nullptr;
  		std::vector<uint32_t> _groups;
-@@ -194,6 +217,19 @@ namespace DarlingServer {
+@@ -194,6 +217,21 @@ namespace DarlingServer {
  		std::string executablePath() const;
  		void setExecutablePath(std::string path);
  
@@ -1908,6 +1699,8 @@ index c97be30..5b413b5 100644
 +		    std::vector<uint8_t>* entitlements,
 +		    std::vector<uint8_t>* derEntitlements) const;
 +		uint32_t updateCsFlags(uint32_t setFlags, uint32_t clearFlags, int valid);
++		bool signingEnforce() const;
++		bool allowsDebugFrom(const Process& caller, bool nameOnly) const;
 +
  		uintptr_t allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite);
  		void freePages(uintptr_t address, size_t pageCount);
@@ -3052,7 +2845,7 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..e5366cc 100644
+index 9cd7b81..1dd039a 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,9 +25,16 @@
@@ -3138,7 +2931,24 @@ index 9cd7b81..e5366cc 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -245,6 +276,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -221,6 +252,16 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+ 		return false;
+ 	}
+ 
++	if (isWrite) {
++		auto thread = DarlingServer::Thread::currentThread();
++		auto caller = thread ? thread->process() : nullptr;
++		if (caller && caller.get() != this && !allowsDebugFrom(*caller, false)) {
++			if (errorCode)
++				*errorCode = EPERM;
++			return false;
++		}
++	}
++
+ 	local.iov_base = localBuffer;
+ 	local.iov_len = length;
+ 
+@@ -245,6 +286,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -3183,7 +2993,7 @@ index 9cd7b81..e5366cc 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -283,6 +352,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -283,6 +362,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  
  	bool didExec = _pendingReplacement;
  
@@ -3196,7 +3006,7 @@ index 9cd7b81..e5366cc 100644
  	if (didExec) {
  		// exec case
  
-@@ -369,7 +444,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +454,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -3216,7 +3026,7 @@ index 9cd7b81..e5366cc 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +551,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +561,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -3324,7 +3134,7 @@ index 9cd7b81..e5366cc 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +658,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +668,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -3387,7 +3197,7 @@ index 9cd7b81..e5366cc 100644
  
  		info.protection = 0;
  
-@@ -607,6 +816,74 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +826,90 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
@@ -3459,10 +3269,26 @@ index 9cd7b81..e5366cc 100644
 +	return flags;
 +};
 +
++bool DarlingServer::Process::signingEnforce() const {
++	std::shared_lock lock(_csMutex);
++	return _csState.signing_enforce != 0;
++}
++
++bool DarlingServer::Process::allowsDebugFrom(const Process& caller, bool nameOnly) const {
++	if (!caller.signingEnforce())
++		return true;
++	if (this == &caller || caller.uid() == 0)
++		return true;
++	if (nameOnly && caller.uid() == uid())
++		return true;
++	std::shared_lock lock(_csMutex);
++	return _csState.verified != 0 && (_csState.flags & DC_CS_GET_TASK_ALLOW) != 0;
++}
++
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +934,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +960,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -3509,7 +3335,7 @@ index 9cd7b81..e5366cc 100644
  			continue;
  		}
 diff --git a/src/server.cpp b/src/server.cpp
-index e502e28..8d1cf2b 100644
+index e502e28..20926bc 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
 @@ -28,6 +28,8 @@
@@ -3625,7 +3451,22 @@ index e502e28..8d1cf2b 100644
  	static void dtape_hook_log(dtape_log_level_t level, const char* message) {
  		static const auto log = DarlingServer::Log("dtape");
  		auto process = DarlingServer::Process::currentProcess();
-@@ -271,11 +352,23 @@ struct DTapeHooks {
+@@ -244,6 +325,14 @@ struct DTapeHooks {
+ 		return static_cast<DarlingServer::Process*>(task_context)->writeMemory(remote_address, local_buffer, length);
+ 	};
+ 
++	static bool dtape_hook_task_allows_debug(void* caller_context, void* target_context, bool name_only) {
++		if (!caller_context || !target_context)
++			return true;
++		auto caller = static_cast<DarlingServer::Process*>(caller_context);
++		auto target = static_cast<DarlingServer::Process*>(target_context);
++		return target->allowsDebugFrom(*caller, name_only);
++	};
++
+ 	static dtape_task_t* dtape_hook_task_lookup(int id, bool id_is_nsid, bool retain) {
+ 		auto& registry = DarlingServer::processRegistry();
+ 		auto maybeProcess = (id_is_nsid) ? registry.lookupEntryByNSID(id) : registry.lookupEntryByID(id);
+@@ -271,11 +360,23 @@ struct DTapeHooks {
  	};
  
  	static void dtape_hook_task_get_memory_info(void* task_context, dtape_memory_info_t* memory_info) {
@@ -3654,7 +3495,7 @@ index e502e28..8d1cf2b 100644
  	};
  
  	static bool dtape_hook_task_get_memory_region_info(void* task_context, uintptr_t address, dtape_memory_region_info_t* memory_region_info) {
-@@ -392,6 +485,7 @@ struct DTapeHooks {
+@@ -392,6 +493,7 @@ struct DTapeHooks {
  		.timer_arm = dtape_hook_timer_arm,
  
  		.log = dtape_hook_log,
@@ -3662,7 +3503,15 @@ index e502e28..8d1cf2b 100644
  		.get_load_info = dtape_hook_get_load_info,
  
  		.thread_suspend = dtape_hook_thread_suspend,
-@@ -445,6 +539,13 @@ DarlingServer::Server::Server(std::string prefix):
+@@ -416,6 +518,7 @@ struct DTapeHooks {
+ 		.task_read_memory = dtape_hook_task_read_memory,
+ 		.task_write_memory = dtape_hook_task_write_memory,
+ 		.task_lookup = dtape_hook_task_lookup,
++		.task_allows_debug = dtape_hook_task_allows_debug,
+ 		.task_lookup_eternal = dtape_hook_task_lookup_eternal,
+ 		.task_get_memory_info = dtape_hook_task_get_memory_info,
+ 		.task_get_memory_region_info = dtape_hook_task_get_memory_region_info,
+@@ -445,6 +548,13 @@ DarlingServer::Server::Server(std::string prefix):
  {
  	sharedInstancePointer = this;
  
@@ -3676,7 +3525,7 @@ index e502e28..8d1cf2b 100644
  	// remove the old socket (if it exists)
  	unlink(_socketPath.c_str());
  
-@@ -540,6 +641,7 @@ void DarlingServer::Server::start() {
+@@ -540,6 +650,7 @@ void DarlingServer::Server::start() {
  				// TODO: this could be done concurrently
  				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
  				if (call) {
@@ -3684,7 +3533,7 @@ index e502e28..8d1cf2b 100644
  					_workQueue.push(call->thread());
  				}
  			}
-@@ -549,13 +651,15 @@ void DarlingServer::Server::start() {
+@@ -549,13 +660,15 @@ void DarlingServer::Server::start() {
  		eventfd_t value;
  		eventfd_read(_wakeupFD, &value);
  
@@ -3702,7 +3551,7 @@ index e502e28..8d1cf2b 100644
  
  		if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
  			throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
-@@ -604,6 +708,25 @@ void DarlingServer::Server::start() {
+@@ -604,6 +717,25 @@ void DarlingServer::Server::start() {
  					continue;
  				}
  
@@ -3728,7 +3577,7 @@ index e502e28..8d1cf2b 100644
  				// we're done handling the timerfd;
  				// we don't need to lock anymore (and the following call might need to arm the timer again)
  				lock.unlock();
-@@ -681,6 +804,7 @@ std::string DarlingServer::Server::prefix() const {
+@@ -681,6 +813,7 @@ std::string DarlingServer::Server::prefix() const {
  };
  
  void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
@@ -3736,7 +3585,7 @@ index e502e28..8d1cf2b 100644
  	thread->doWork();
  };
  
-@@ -815,5 +939,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
+@@ -815,5 +948,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
@@ -4990,3 +4839,244 @@ index 0000000..f272720
 +void dc_flags_to_string(uint32_t flags, char *out, size_t outlen);
 +
 +#endif /* DC_CODESIGN_H */
+diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
+new file mode 100644
+index 0000000..28c2109
+--- /dev/null
++++ b/internal-include/darlingserver/trustcache.hpp
+@@ -0,0 +1,16 @@
++#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
++#define _DARLINGSERVER_TRUSTCACHE_HPP_
++
++#include <cstdint>
++#include <string>
++
++namespace DarlingServer {
++	/*
++	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
++	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
++	 * is absent, malformed, rolled back, or does not contain the hash.
++	 */
++	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
++};
++
++#endif
+diff --git a/src/trustcache.cpp b/src/trustcache.cpp
+new file mode 100644
+index 0000000..a7d6ae8
+--- /dev/null
++++ b/src/trustcache.cpp
+@@ -0,0 +1,213 @@
++/**
++ * This file is part of Darling.
++ *
++ * Local (Darling-only) authenticated trust store. The store format is shared
++ * with tools/dc-trustcache.py; it is deliberately not Apple's trust cache.
++ */
++
++#include <darlingserver/trustcache.hpp>
++#include <darlingserver/server.hpp>
++
++#include <openssl/evp.h>
++#include <openssl/pem.h>
++
++#include <sys/stat.h>
++
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++namespace {
++	constexpr uint32_t kMagic = 0x44544331u; /* "DTC1" */
++	constexpr uint32_t kVersion = 1;
++	constexpr size_t kIssuerLen = 32;
++	constexpr size_t kHeaderSize = 4 + 4 + 8 + kIssuerLen + 4;
++	constexpr size_t kEntrySize = 24;
++	constexpr size_t kSignatureLen = 64;
++
++	uint32_t le32(const uint8_t* p) {
++		return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++		       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++	}
++
++	uint64_t le64(const uint8_t* p) {
++		uint64_t value = 0;
++		for (int i = 7; i >= 0; i--)
++			value = (value << 8) | p[i];
++		return value;
++	}
++
++	std::mutex generationMutex;
++	std::unordered_map<std::string, uint64_t> lastGeneration;
++
++	bool rootlessUserNamespace() {
++		std::ifstream map("/proc/self/uid_map");
++		unsigned long inside = 0, outside = 0, count = 0;
++
++		if (map >> inside >> outside >> count)
++			return inside == 0 && outside != 0 && count != 0;
++		return false;
++	}
++
++	bool rootOwned(const std::string& path, bool directory) {
++		struct stat st;
++		if (lstat(path.c_str(), &st) != 0)
++			return false;
++		if (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode))
++			return false;
++		if (st.st_uid != 0)
++			return false;
++		return (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
++	}
++
++	uint64_t persistedGeneration(const std::string& storePath) {
++		std::ifstream file(storePath + ".lastgen");
++		uint64_t generation = 0;
++		if (file)
++			file >> generation;
++		return generation;
++	}
++
++	void persistGeneration(const std::string& storePath, uint64_t generation) {
++		std::string path = storePath + ".lastgen";
++		std::string temporary = path + ".tmp";
++		{
++			std::ofstream file(temporary, std::ios::trunc);
++			if (!file)
++				return;
++			file << generation << "\n";
++		}
++		if (std::rename(temporary.c_str(), path.c_str()) != 0)
++			std::remove(temporary.c_str());
++	}
++
++	bool verifySignature(const std::vector<uint8_t>& payload,
++	    const uint8_t* signature, size_t signatureLen, const std::string& pubPath) {
++		BIO* bio = BIO_new_file(pubPath.c_str(), "r");
++		EVP_PKEY* key;
++		EVP_MD_CTX* ctx;
++		bool ok = false;
++
++		if (bio == nullptr)
++			return false;
++		key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
++		BIO_free(bio);
++		if (key == nullptr)
++			return false;
++		ctx = EVP_MD_CTX_new();
++		if (ctx == nullptr) {
++			EVP_PKEY_free(key);
++			return false;
++		}
++		if (EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, key) == 1)
++			ok = EVP_DigestVerify(ctx, signature, signatureLen,
++			    payload.data(), payload.size()) == 1;
++		EVP_MD_CTX_free(ctx);
++		EVP_PKEY_free(key);
++		return ok;
++	}
++}
++
++bool DarlingServer::trustCacheContains(const uint8_t cdhash[20], std::string* error) {
++	std::string storePath = Server::sharedInstance().prefix() +
++	    "/var/db/darling/trustcache";
++	std::string pubPath = storePath + ".pub";
++	std::ifstream file;
++	std::vector<uint8_t> data;
++	struct stat st;
++	std::string storeDir = storePath.substr(0, storePath.rfind('/'));
++
++	/* The store is only meaningful when it cannot be replaced by an
++	 * unprivileged guest. Rootless prefixes keep the M4 runtime fallback
++	 * instead of trusting a same-uid key. */
++	if (rootlessUserNamespace()) {
++		if (error) *error = "trust store disabled in a rootless user namespace";
++		return false;
++	}
++	if (!rootOwned(storeDir, true) || !rootOwned(storePath, false) ||
++	    !rootOwned(pubPath, false)) {
++		if (error) *error = "trust store is not root-owned and write-protected";
++		return false;
++	}
++
++	file.open(storePath, std::ios::binary);
++	uint64_t generation;
++	uint32_t count;
++	size_t entriesEnd;
++	uint32_t signatureLength;
++
++	if (!file) {
++		if (error) *error = "trust store not present";
++		return false;
++	}
++	file.seekg(0, std::ios::end);
++	auto size = file.tellg();
++	if (size < 0 || (uint64_t) size > 64ull * 1024ull * 1024ull) {
++		if (error) *error = "trust store is too large";
++		return false;
++	}
++	file.seekg(0, std::ios::beg);
++	data.resize((size_t) size);
++	if (!file.read((char*) data.data(), data.size()) ||
++	    data.size() < kHeaderSize + 4) {
++		if (error) *error = "cannot read trust store";
++		return false;
++	}
++
++	if (le32(data.data()) != kMagic || le32(data.data() + 4) != kVersion) {
++		if (error) *error = "bad trust-store magic or version";
++		return false;
++	}
++	generation = le64(data.data() + 8);
++	if (memcmp(data.data() + 16, "darling-local", 13) != 0) {
++		if (error) *error = "trust store is not darling-local";
++		return false;
++	}
++	count = le32(data.data() + 48);
++	if (count > (data.size() - kHeaderSize) / kEntrySize) {
++		if (error) *error = "trust-store entry count is out of range";
++		return false;
++	}
++	entriesEnd = kHeaderSize + (size_t) count * kEntrySize;
++	if (entriesEnd + 4 > data.size()) {
++		if (error) *error = "trust-store entries are truncated";
++		return false;
++	}
++	signatureLength = le32(data.data() + entriesEnd);
++	if (signatureLength != kSignatureLen ||
++	    entriesEnd + 4 + signatureLength != data.size()) {
++		if (error) *error = "bad trust-store signature length";
++		return false;
++	}
++	if (!verifySignature(std::vector<uint8_t>(data.begin(), data.begin() + entriesEnd),
++	        data.data() + entriesEnd + 4, signatureLength, pubPath)) {
++		if (error) *error = "trust-store signature does not verify";
++		return false;
++	}
++
++	{
++		std::lock_guard<std::mutex> lock(generationMutex);
++		auto it = lastGeneration.find(storePath);
++		uint64_t persisted = persistedGeneration(storePath);
++		uint64_t previous = it == lastGeneration.end() ? persisted : it->second;
++		if (generation < previous) {
++			if (error) *error = "trust-store generation rolled back";
++			return false;
++		}
++		lastGeneration[storePath] = generation;
++		if (generation > persisted)
++			persistGeneration(storePath, generation);
++	}
++
++	for (uint32_t i = 0; i < count; i++) {
++		const uint8_t* entry = data.data() + kHeaderSize + (size_t) i * kEntrySize;
++		if (memcmp(entry, cdhash, 20) == 0)
++			return true;
++	}
++	if (error) *error = "cdhash is not in the trust store";
++	return false;
++}

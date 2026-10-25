@@ -1,6 +1,7 @@
 #!/bin/sh
-# M8 acceptance: unknown AMFI calls fail closed; a non-entitled process
-# cannot attach with ptrace. Requires a working Darling installation.
+# M8 acceptance: unknown AMFI calls fail closed; a non-entitled process cannot
+# attach; server-side task-port policy rejects a direct RPC; an entitled
+# process can obtain a task port through that same RPC.
 
 set -u
 
@@ -56,23 +57,77 @@ if ! clang -target x86_64-apple-macosx11.0 -DPLATFORM_MacOSX -D_DARWIN_C_SOURCE 
 	finish
 	exit $?
 fi
-if ! "$RCODESIGN" sign --binary-identifier amfi-probe "$probe" >/dev/null 2>&1; then
-	miss "failed to sign the AMFI probe"
+
+negative=$tmp/amfi-negative
+positive=$tmp/amfi-positive
+cp "$probe" "$negative"
+cp "$probe" "$positive"
+cat >"$tmp/entitlements.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.apple.security.get-task-allow</key><true/></dict></plist>
+PLIST
+if ! "$RCODESIGN" sign --binary-identifier amfi-negative "$negative" >/dev/null 2>&1; then
+	miss "failed to sign the non-entitled AMFI probe"
+	finish
+	exit $?
+fi
+if ! "$RCODESIGN" sign --binary-identifier amfi-positive \
+    --entitlements-xml-file "$tmp/entitlements.plist" "$positive" >/dev/null 2>&1; then
+	miss "failed to sign the entitled AMFI probe"
 	finish
 	exit $?
 fi
 
 guest_root=/Volumes/SystemRoot
 outfile=$tmp/out
-DARLING_CODESIGN_ENFORCE=enforce timeout 120 "$DARLING" shell \
-    "$guest_root$probe" >"$outfile" 2>&1
-out=$(cat "$outfile")
+run() { # binary [arg]
+	bin=$1; shift
+	DARLING_CODESIGN_ENFORCE=enforce timeout 120 "$DARLING" shell \
+	    "$guest_root$bin" "$@" >"$outfile" 2>&1
+	cat "$outfile"
+}
 
+out=$(run "$negative")
 case "$out" in
-*"AMFI_OK"*)
-	ok "unknown AMFI call is ENOTSUP and non-entitled ptrace is EPERM" ;;
-*)
-	bad "M8 probe failed: $out" ;;
+*"AMFI_OK"*) ok "unknown AMFI call is ENOTSUP and non-entitled ptrace is EPERM" ;;
+*) bad "M8 negative probe failed: $out" ;;
+esac
+
+out=$(run "$negative" direct-deny)
+case "$out" in
+*"DIRECT_DENY"*) ok "direct task_for_pid RPC is denied without get-task-allow" ;;
+*) bad "direct task_for_pid denial probe failed: $out" ;;
+esac
+
+out=$(run "$positive" direct)
+case "$out" in
+*"DIRECT_ALLOW"*) ok "direct task_for_pid RPC succeeds for an entitled target" ;;
+*) bad "entitled direct task_for_pid probe failed: $out" ;;
+esac
+
+out=$(run "$negative" direct-name-deny)
+case "$out" in
+*"DIRECT_DENY"*) ok "direct task_name_for_pid RPC is denied across uids" ;;
+*) bad "direct task_name_for_pid denial probe failed: $out" ;;
+esac
+
+out=$(run "$positive" direct-name)
+case "$out" in
+*"DIRECT_ALLOW"*) ok "direct task_name_for_pid RPC is allowed for an entitled target" ;;
+*) bad "entitled direct task_name_for_pid probe failed: $out" ;;
+esac
+
+out=$(run "$negative" write-deny)
+case "$out" in
+*"WRITE_DENY"*) ok "mach_vm_write/process_vm_writev is denied without get-task-allow" ;;
+*) bad "mach_vm_write denial probe failed: $out" ;;
+esac
+
+out=$(run "$positive" write)
+case "$out" in
+*"WRITE_ALLOW"*) ok "mach_vm_write/process_vm_writev succeeds for an entitled target" ;;
+*) bad "entitled mach_vm_write probe failed: $out" ;;
 esac
 
 finish
