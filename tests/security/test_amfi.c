@@ -49,18 +49,18 @@ static int mach_write_probe(pid_t child) {
 	kr = task_for_pid(mach_task_self(), child, &task);
 	if (kr != KERN_SUCCESS) {
 		printf("TASK_PORT_FAIL kr=%d\n", kr);
-		return 1;
+		return -1;
 	}
 	if (seteuid(1000) != 0) {
 		printf("SETEUID_FAIL errno=%d\n", errno);
 		mach_port_deallocate(mach_task_self(), task);
-		return 1;
+		return -2;
 	}
 	kr = mach_vm_allocate(task, &address, 4096, VM_FLAGS_ANYWHERE);
 	if (kr != KERN_SUCCESS) {
 		printf("VM_ALLOCATE_FAIL kr=%d\n", kr);
 		mach_port_deallocate(mach_task_self(), task);
-		return 1;
+		return -3;
 	}
 	kr = mach_vm_write(task, address, (vm_offset_t) data, sizeof(data));
 	printf("mach_vm_write kr=%d\n", kr);
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
 		busy(30000000UL);
 		write_rc = mach_write_probe(child);
 		kill(child, SIGKILL);
-		if ((!deny && write_rc != 0) || (deny && write_rc == 0)) {
+		if ((!deny && write_rc != 0) || (deny && write_rc <= 0)) {
 			printf("WRITE_FAIL\n");
 			return 1;
 		}

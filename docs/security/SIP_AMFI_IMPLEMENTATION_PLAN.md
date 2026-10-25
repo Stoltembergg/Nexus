@@ -362,8 +362,10 @@ in `tests/security/fixtures/README.md`:
   actual exec path. Cost: ~4 ms to verify a 4.8 MB dylib including process
   startup; no measurable change in `darling shell` startup.
   The loader reopens the path, but now compares the opened fd's device, inode,
-  size and nanosecond mtime with the verified snapshot and refuses a mismatch;
-  this is the minimum documented fallback rather than a single shared fd.
+  size, nanosecond mtime and ctime with the verified snapshot and refuses a
+  mismatch. This is the minimum fallback, **not** the M2 no-TOCTOU acceptance
+  criterion; mapping through the exact verified descriptor is still required
+  and M2's single-fd criterion remains unmet.
 - Risk: breaks the runtime if M0/M7 prerequisites are skipped. Ship with
   `off` default and a documented `warn` soak period.
 
@@ -402,7 +404,11 @@ in `tests/security/fixtures/README.md`:
   replaying the RPC.
   Known limits: only the main image is verified by mldr (M4 covers `dlopen`);
   there is no MACF layer, so setter policy is self/root/`get-task-allow`;
-  `exec` derives a new state and never inherits across images. The local
+  `exec` derives a new state and never inherits across images.
+  `update_cs_state` may clear flags or mark invalid, never restore validity
+  (`valid=1` is ignored); a cross-process update additionally requires caller
+  root or target `get-task-allow`. Only the one-shot `set_cs_state` after
+  checkin/exec can establish a new valid state. The local
   generation is not refreshed in a forked child until exec, so audittoken
   generation checks are deferred until a real pidversion mapping exists.
 - Risk: Chromium probes may change behavior once they see truth. Audit call
@@ -566,7 +572,8 @@ in `tests/security/fixtures/README.md`:
   `security.plist` or root-only `csrctl` setter; the inode registry has 4096
   slots and only learns a protected inode when a protected path is inspected,
   so a pre-existing hardlink used without touching its protected path is not
-  retroactively discovered; the host path is mapped back through
+  retroactively discovered; when the registry is full, non-`/usr/local` writes
+  fail closed for the life of the process; the host path is mapped back through
   `vchroot_unexpand()` and checked as a guest absolute path, but the check
   still runs before the syscall, so a racing symlink swap is not prevented;
   fallback is conservative if vchroot is uninitialized; rootless redirects are
@@ -588,8 +595,11 @@ in `tests/security/fixtures/README.md`:
   `trustcache_contains` RPC and writes a truthful result; unknown AMFI calls
   return `ENOTSUP` instead of fabricated success. Under
   `DARLING_CODESIGN_ENFORCE=enforce`, `get-task-allow` gates
-  `ptrace(PT_ATTACHEXC)` and `task_for_pid` (self/root exempt); `task_name_for_pid`
-  allows same-uid inspection or an entitled target. The same policy is enforced
+  `ptrace(PT_ATTACHEXC)` and `task_for_pid` (self and true root exempt; root
+  means both the host and guest uids are 0); `task_name_for_pid` allows
+  same-uid inspection or an entitled target. The target's own signing
+  policy is authoritative, so a caller cannot opt out of an enforced target by
+  launching itself with `off`/`warn`. The same policy is enforced
   in darlingserver by a task hook and in `Process::writeMemory`, so `mach_vm_write`
   and the underlying `process_vm_writev` path cannot bypass it; a private
   `csops` probe lets the test call the task-port RPC directly without the
@@ -600,7 +610,9 @@ in `tests/security/fixtures/README.md`:
   probes alive and is not a real sandbox; raw Linux syscalls can bypass the
   cooperative server path entirely; call 95 is the only AMFI call currently
   implemented; the positive test obtains a task port and performs a memory
-  write but does not run a full interactive debugger session.
+  write but does not run a full interactive debugger session; debug authority
+  combines host-verified uid with the guest-visible uid so a guest cannot
+  obtain root authority merely by requesting uid 0 in a rootless namespace.
 
 ### M9 — Gatekeeper / notarization compatibility (2–4 w, research-heavy)
 

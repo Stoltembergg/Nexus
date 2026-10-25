@@ -1622,7 +1622,7 @@ index 708f3f3..fd46ab8 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..efb045a 100644
+index c97be30..dcba643 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
 @@ -21,6 +21,8 @@
@@ -1683,11 +1683,12 @@ index c97be30..efb045a 100644
  		bool _dead = false;
  		std::shared_ptr<Process> _selfReference = nullptr;
  		std::vector<uint32_t> _groups;
-@@ -194,6 +217,21 @@ namespace DarlingServer {
+@@ -194,6 +217,22 @@ namespace DarlingServer {
  		std::string executablePath() const;
  		void setExecutablePath(std::string path);
  
 +		uid_t uid() const;
++		uid_t hostUid() const;
 +		void setUid(uid_t uid);
 +
 +		bool setCsState(const struct dc_cs_state& state,
@@ -2845,10 +2846,10 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..1dd039a 100644
+index 9cd7b81..c583c8e 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
-@@ -25,9 +25,16 @@
+@@ -25,17 +25,34 @@
  #include <darlingserver/logging.hpp>
  
  #include <fstream>
@@ -2865,7 +2866,17 @@ index 9cd7b81..1dd039a 100644
  
  static DarlingServer::Log processLog("process");
  
-@@ -36,6 +43,7 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
++static bool rootlessUserNamespace() {
++	std::ifstream map("/proc/self/uid_map");
++	unsigned long inside = 0, outside = 0, count = 0;
++
++	if (map >> inside >> outside >> count)
++		return inside == 0 && outside != 0 && count != 0;
++	return false;
++}
++
+ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int pipe):
+ 	_pid(id),
  	_nspid(nsid),
  	_architecture(architecture)
  {
@@ -2873,7 +2884,7 @@ index 9cd7b81..1dd039a 100644
  	int pidfd = (pipe >= 0) ? pipe : syscall(SYS_pidfd_open, _pid, 0);
  	if (pidfd < 0) {
  		throw std::system_error(errno, std::generic_category(), "Failed to open pidfd for process");
-@@ -66,8 +74,15 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+@@ -66,8 +83,15 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
  				parentProcess = *maybeParentProcess;
  				_parentProcess = parentProcess;
  			}
@@ -2891,7 +2902,7 @@ index 9cd7b81..1dd039a 100644
  		}
  	}
  
-@@ -78,8 +93,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+@@ -78,8 +102,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
  		_vchrootDescriptor = parentProcess->_vchrootDescriptor;
  		_cachedVchrootPath = parentProcess->_cachedVchrootPath;
  
@@ -2912,7 +2923,7 @@ index 9cd7b81..1dd039a 100644
  	}
  
  	// NOTE: see thread.cpp for why it's okay to use `this` here
-@@ -93,6 +119,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -93,6 +128,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  	_pid(-1),
  	_nspid(0)
  {
@@ -2920,7 +2931,7 @@ index 9cd7b81..1dd039a 100644
  #if __x86_64__
  	_architecture = Architecture::x86_64;
  #elif __i386__
-@@ -109,6 +136,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -109,6 +145,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  
  DarlingServer::Process::~Process() {
  	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
@@ -2931,7 +2942,7 @@ index 9cd7b81..1dd039a 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -221,6 +252,16 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -221,6 +261,16 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  		return false;
  	}
  
@@ -2948,7 +2959,7 @@ index 9cd7b81..1dd039a 100644
  	local.iov_base = localBuffer;
  	local.iov_len = length;
  
-@@ -245,6 +286,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +295,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -2993,7 +3004,7 @@ index 9cd7b81..1dd039a 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -283,6 +362,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -283,6 +371,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  
  	bool didExec = _pendingReplacement;
  
@@ -3006,7 +3017,7 @@ index 9cd7b81..1dd039a 100644
  	if (didExec) {
  		// exec case
  
-@@ -369,7 +454,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +463,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -3026,7 +3037,7 @@ index 9cd7b81..1dd039a 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +561,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +570,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -3134,7 +3145,7 @@ index 9cd7b81..1dd039a 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +668,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +677,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -3197,12 +3208,39 @@ index 9cd7b81..1dd039a 100644
  
  		info.protection = 0;
  
-@@ -607,6 +826,90 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +835,125 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
 +uid_t DarlingServer::Process::uid() const {
 +	return _uid.load();
++};
++
++uid_t DarlingServer::Process::hostUid() const {
++	/* Debug authority must come from host-verified credentials, not from a
++	 * guest-supplied setuid request. */
++	std::ifstream statusFile("/proc/" + std::to_string(_pid) + "/status");
++	std::string line;
++
++	while (std::getline(statusFile, line)) {
++		if (line.substr(0, sizeof("Uid") - 1) != "Uid")
++			continue;
++		auto colon = line.find(':');
++		if (colon == line.npos)
++			break;
++		std::string rest = line.substr(colon + 1);
++		char* end = nullptr;
++		/* Uid: real effective saved fs. Debug authority is the effective
++		 * host uid; the real uid of a process that called seteuid remains 0. */
++		(void) strtoul(rest.c_str(), &end, 10);
++		if (end == rest.c_str())
++			break;
++		unsigned long effective = strtoul(end, &end, 10);
++		if (end != rest.c_str())
++			return (uid_t) effective;
++		break;
++	}
++	return (uid_t) -1;
 +};
 +
 +void DarlingServer::Process::setUid(uid_t uid) {
@@ -3275,9 +3313,17 @@ index 9cd7b81..1dd039a 100644
 +}
 +
 +bool DarlingServer::Process::allowsDebugFrom(const Process& caller, bool nameOnly) const {
-+	if (!caller.signingEnforce())
++	/* The target's own policy is authoritative; a caller cannot opt out of
++	 * an enforced target's protection by launching itself with off/warn. */
++	if (!signingEnforce())
 +		return true;
-+	if (this == &caller || caller.uid() == 0)
++	if (this == &caller)
++		return true;
++	/* Root is privileged only when both the host credential and the
++	 * guest-visible uid are root. This keeps rootful host-root debugging
++	 * working while preventing a guest that merely requested uid 0 from
++	 * becoming a debugger authority. */
++	if (caller.hostUid() == 0 && caller.uid() == 0)
 +		return true;
 +	if (nameOnly && caller.uid() == uid())
 +		return true;
@@ -3288,7 +3334,7 @@ index 9cd7b81..1dd039a 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +960,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +1004,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -3609,10 +3655,10 @@ index e502e28..20926bc 100644
  };
 diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
 new file mode 100644
-index 0000000..5256e5c
+index 0000000..6faa042
 --- /dev/null
 +++ b/include/darlingserver/cs_state.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,114 @@
 +/*
 + * cs_state.h - code-signing state shared by mldr, libsystem_kernel and
 + * darlingserver.
@@ -3706,6 +3752,7 @@ index 0000000..5256e5c
 +	uint64_t image_ino;
 +	uint64_t image_size;
 +	uint64_t image_mtime;
++	uint64_t image_ctime;
 +
 +	uint8_t cdhash[DC_CS_CDHASH_LEN];
 +	char teamid[DC_CS_TEAMID_MAX];
