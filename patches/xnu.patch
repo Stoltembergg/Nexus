@@ -91,10 +91,10 @@ index 7fe0b4e..7e00a00 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
 new file mode 100644
-index 0000000..764f540
+index 0000000..46e4051
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,146 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +
 +#include <errno.h>
@@ -211,8 +211,7 @@ index 0000000..764f540
 +	 * /Users/alice/System is not mistaken for the protected root. */
 +	if (strlen(path) < sizeof(unexpanded.path)) {
 +		strcpy(unexpanded.path, path);
-+		vchroot_unexpand(&unexpanded);
-+		if (unexpanded.path[0] == '/') {
++		if (vchroot_unexpand(&unexpanded) == 0 && unexpanded.path[0] == '/') {
 +			path = unexpanded.path;
 +			guest_path = 1;
 +		}

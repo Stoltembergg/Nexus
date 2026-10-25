@@ -500,7 +500,8 @@ in `tests/security/fixtures/README.md`:
   6/6 passing.
   Known limits: this is not Apple's trust cache and no Apple chain is
   validated; the server only honors a regular store/public-key pair in a
-  root-owned, non-group/world-writable directory, so rootless prefixes keep
+  root-owned, non-group/world-writable directory and disables it when uid 0 is
+  a mapped host uid in a rootless user namespace, so rootless prefixes keep
   the M4 runtime-path fallback; a root-equivalent attacker can still replace
   both key and store; `.lastgen` is a local rollback anchor, not a hardware
   monotonic counter; the runtime path exemption remains until install/signing

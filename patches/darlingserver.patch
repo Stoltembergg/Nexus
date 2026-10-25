@@ -1,9 +1,31 @@
+diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
+new file mode 100644
+index 0000000..28c2109
+--- /dev/null
++++ b/internal-include/darlingserver/trustcache.hpp
+@@ -0,0 +1,16 @@
++#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
++#define _DARLINGSERVER_TRUSTCACHE_HPP_
++
++#include <cstdint>
++#include <string>
++
++namespace DarlingServer {
++	/*
++	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
++	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
++	 * is absent, malformed, rolled back, or does not contain the hash.
++	 */
++	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
++};
++
++#endif
 diff --git a/src/trustcache.cpp b/src/trustcache.cpp
 new file mode 100644
-index 0000000..09c2e83
+index 0000000..a7d6ae8
 --- /dev/null
 +++ b/src/trustcache.cpp
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,213 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -49,6 +71,15 @@ index 0000000..09c2e83
 +
 +	std::mutex generationMutex;
 +	std::unordered_map<std::string, uint64_t> lastGeneration;
++
++	bool rootlessUserNamespace() {
++		std::ifstream map("/proc/self/uid_map");
++		unsigned long inside = 0, outside = 0, count = 0;
++
++		if (map >> inside >> outside >> count)
++			return inside == 0 && outside != 0 && count != 0;
++		return false;
++	}
 +
 +	bool rootOwned(const std::string& path, bool directory) {
 +		struct stat st;
@@ -121,6 +152,10 @@ index 0000000..09c2e83
 +	/* The store is only meaningful when it cannot be replaced by an
 +	 * unprivileged guest. Rootless prefixes keep the M4 runtime fallback
 +	 * instead of trusting a same-uid key. */
++	if (rootlessUserNamespace()) {
++		if (error) *error = "trust store disabled in a rootless user namespace";
++		return false;
++	}
 +	if (!rootOwned(storeDir, true) || !rootOwned(storePath, false) ||
 +	    !rootOwned(pubPath, false)) {
 +		if (error) *error = "trust store is not root-owned and write-protected";
@@ -204,28 +239,6 @@ index 0000000..09c2e83
 +	if (error) *error = "cdhash is not in the trust store";
 +	return false;
 +}
-diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
-new file mode 100644
-index 0000000..28c2109
---- /dev/null
-+++ b/internal-include/darlingserver/trustcache.hpp
-@@ -0,0 +1,16 @@
-+#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
-+#define _DARLINGSERVER_TRUSTCACHE_HPP_
-+
-+#include <cstdint>
-+#include <string>
-+
-+namespace DarlingServer {
-+	/*
-+	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
-+	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
-+	 * is absent, malformed, rolled back, or does not contain the hash.
-+	 */
-+	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
-+};
-+
-+#endif
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 4920879..01f1cab 100644
 --- a/CMakeLists.txt
