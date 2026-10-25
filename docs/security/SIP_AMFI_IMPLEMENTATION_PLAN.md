@@ -5,9 +5,10 @@ tracking PR #50 (which carries `docs/security/SIP_AMFI_ENFORCEMENT.md`). This
 document is the engineering plan: it names the code seams, the data model, the
 phases, the acceptance tests and the honest limits. M0–M8 have prototypes on
 this branch, each behind its acceptance tests. M9 (Gatekeeper/notarization)
-and M10 (production default + soak) remain open because they require a real
+and M10 (production default + soak) now have local preparation tools and
+smoke tests, but their real acceptance remains open because it requires a real
 macOS/notarization corpus and a full reference-machine match test; they are
-not claimed as implemented.
+not claimed as fully implemented.
 
 Author: fork maintainers (`obrientatsuya/darling-lol`).
 
@@ -617,35 +618,49 @@ in `tests/security/fixtures/README.md`:
 
 ### M9 — Gatekeeper / notarization compatibility (2–4 w, research-heavy)
 
-**Status: not implemented.** The required real-macOS probes and notarization
-fixtures are not available in this environment. No `notarized` bit is set by
-this branch.
+**Status: local preparation implemented; Apple acceptance still blocked.**
+The required real-macOS probes, Apple trust material and notarization fixtures
+are not available here. No `notarized` bit is set by this branch.
 
-- First deliverable is a written answer, from a real macOS, to: where the
-  stapled ticket lives, which `SecAssessment`/`syspolicyd` surface is public
-  enough to reproduce, and what a quarantine-flagged app does at first launch.
-- Then implement only what is documented and testable: quarantine xattr
-  handling, ticket presence check, and a truthful `notarized` flag.
-- Hard rule: if no real ticket was validated, `notarized` is false. No
-  heuristic "looks notarized".
-- Acceptance: notarized fixture reports true; stripped-ticket fixture reports
-  false; quarantine flow matches the documented behavior.
+- `tools/dc-notary.py` implements `com.apple.quarantine` get/set/clear and
+  detects the appended `t8lr` ticket trailer used by the vendored Security
+  code. A detected ticket is reported as `present=true`, `validated=false` and
+  `notarized=false`.
+- `tools/dc-cms-verify.py` extracts the Mach-O CMS blob and verifies its CMS
+  signature against a caller-supplied **local test CA**, including signer
+  chain verification. It deliberately reports `content_binding=unverified`
+  until real-macOS ground truth establishes Apple's signed-content semantics.
+  It never claims Apple Developer ID or Apple notarization trust.
+- `tests/security/test_notary.sh` exercises quarantine round-trip, ticket
+  detection, the permanent `notarized=false`, local-CA CMS success and
+  unrelated-CA rejection: 7/7 passing.
+- Real acceptance still requires a genuine notarized Apple fixture, the
+  ticket/`syspolicyd` surface probes, and Apple chain policy. Hard rule: if no
+  real ticket was validated, `notarized` is false. No heuristic "looks
+  notarized".
 
 ### M10 — Default switch and soak (2 w)
 
-**Status: not implemented.** No production default change or full match soak
-has been run. The current branch remains an opt-in prototype.
+**Status: local harness implemented; production soak still blocked.** No
+production default change or full match soak has been run. The current branch
+remains an opt-in prototype.
 
-- Run the full runtime with `enforce` for a release cycle; collect failures.
+- `tools/security-soak.py` runs representative commands under
+  `DARLING_CODESIGN_ENFORCE=enforce`, writes a JSON/log report, and scans for
+  signature, library-validation, crash and signing-state failures. `analyze`
+  can audit existing logs. `tests/security/test_m10_soak.sh` runs the smoke
+  harness and checks the analyzer against a synthetic failure: 2/2 passing.
+- The full game/match soak and production default switch remain the real M10
+  acceptance gate and require the reference machine.
 - Update `docs/`, `README` and the launcher diagnostics; keep `warn` one flag
   away.
 - Replace callers that relied on fabricated success (audit list from M3/M8).
 - Acceptance: full match test on the reference machine with enforcement on
   and zero verification failures in the logs; documented rollback works.
 
-**Total: ~24–30 person-weeks.** M0–M8 now have prototypes and acceptance
-tests on this branch; M9 is optional/research and M10 still requires a
-production soak on a real reference machine.
+**Total: ~24–30 person-weeks.** M0–M8 have prototypes and acceptance tests on
+this branch; M9/M10 now have local preparation tools and smoke tests, but
+their real Apple-policy/match acceptance still requires a reference machine.
 
 ---
 
@@ -663,6 +678,8 @@ tests/security/
   test_trustcache.sh   local signed entries, forged entry, rollback
   test_sip.sh          protected paths, symlink/.. escapes (hardlinks deferred)
   test_amfi.sh         unknown calls, get-task-allow ptrace denial
+  test_notary.sh       quarantine, ticket presence, local-CA CMS
+  test_m10_soak.sh     enforce smoke harness + log analyzer
 ```
 
 Rules:
