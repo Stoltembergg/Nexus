@@ -1,3 +1,45 @@
+diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
+index 1e9ec25d..53ea9183 100644
+--- a/src/startup/mldr/loader.c
++++ b/src/startup/mldr/loader.c
+@@ -6,6 +6,7 @@
+ #include <stdio.h>
+ #include <stdbool.h>
+ #include <sys/mman.h>
++#include <sys/syscall.h>
+ #include <errno.h>
+ #include <string.h>
+ 
+@@ -227,6 +228,29 @@ no_slide:
+ 				if (seg->vmaddr + slide + seg->vmsize > lr->vm_addr_max)
+ 					lr->vm_addr_max = seg->vmaddr + slide + seg->vmsize;
+ 
++				/* M5: seal the signed read-only ranges against later
++				 * mprotect/munmap/mmap(MAP_FIXED). mseal is available on
++				 * Linux >= 6.10; older kernels keep the previous behavior. */
++#ifdef __NR_mseal
++				{
++					const char* sealPolicy = getenv("DARLING_MSEAL");
++					bool sealEnabled = !(sealPolicy != NULL &&
++					    (strcmp(sealPolicy, "0") == 0 || strcmp(sealPolicy, "off") == 0 ||
++					     strcmp(sealPolicy, "false") == 0 || strcmp(sealPolicy, "no") == 0));
++					if (sealEnabled && (seg->initprot & PROT_WRITE) == 0 &&
++					    (strcmp(seg->segname, "__TEXT") == 0 ||
++					     strcmp(seg->segname, "__LINKEDIT") == 0)) {
++						uintptr_t sealAddr = seg->vmaddr + slide;
++						size_t sealLen = PAGE_ROUNDUP(seg->vmsize);
++						if (syscall(__NR_mseal, (void*) sealAddr, sealLen, 0) != 0 &&
++						    errno != ENOSYS) {
++							fprintf(stderr, "mldr: cannot seal %s at %p: %s\n",
++								seg->segname, (void*) sealAddr, strerror(errno));
++						}
++					}
++				}
++#endif
++
+ 				if (strcmp(SEG_DATA, seg->segname) == 0)
+ 				{
+ 					// Look for section named __all_image_info for GDB integration
 diff --git a/src/CoreAudio/AudioToolbox/AUComponent.cpp b/src/CoreAudio/AudioToolbox/AUComponent.cpp
 index d48eec1ef..1deb304e9 100644
 --- a/src/CoreAudio/AudioToolbox/AUComponent.cpp
@@ -8526,7 +8568,7 @@ index fee1bde8..14733ac4 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82..b3115f24 100644
+index 6617ef82..1b59c7e3 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -42,6 +42,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -8538,7 +8580,7 @@ index 6617ef82..b3115f24 100644
  
  #ifndef PAGE_SIZE
  #	define PAGE_SIZE	4096
-@@ -106,6 +108,209 @@ void* __mldr_main_stack_top = NULL;
+@@ -106,6 +108,210 @@ void* __mldr_main_stack_top = NULL;
  static int kernel_major = -1;
  static int kernel_minor = -1;
  
@@ -8632,6 +8674,7 @@ index 6617ef82..b3115f24 100644
 +		fprintf(stderr, "mldr: codesign: unknown policy '%s' (use off|warn|enforce)\n", policy);
 +		return -1;
 +	}
++	state->signing_enforce = enforce ? 1 : 0;
 +	verbose = !quiet && getenv("DARLING_CODESIGN_VERBOSE") != NULL;
 +
 +	fd = open(path, O_RDONLY);
@@ -8748,7 +8791,7 @@ index 6617ef82..b3115f24 100644
  int main(int argc, char** argv, char** envp)
  {
  	void** sp;
-@@ -154,10 +359,15 @@ int main(int argc, char** argv, char** envp)
+@@ -154,10 +360,15 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -8765,7 +8808,7 @@ index 6617ef82..b3115f24 100644
  #ifdef __i386__
  	load(filename, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
  #else
-@@ -563,6 +773,16 @@ static socket_bitmap_t socket_bitmap = {
+@@ -563,6 +774,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -8782,7 +8825,7 @@ index 6617ef82..b3115f24 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +868,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +869,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -8794,7 +8837,7 @@ index 6617ef82..b3115f24 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +898,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +899,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -8809,7 +8852,7 @@ index 6617ef82..b3115f24 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +916,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +917,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -8835,7 +8878,7 @@ index 6617ef82..b3115f24 100644
  		}
  	}
  
-@@ -698,6 +937,22 @@ out:
+@@ -698,6 +938,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -8858,7 +8901,7 @@ index 6617ef82..b3115f24 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +962,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +963,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -8878,7 +8921,7 @@ index 6617ef82..b3115f24 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +1020,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1021,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -8897,7 +8940,7 @@ index 6617ef82..b3115f24 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1131,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1132,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  
@@ -12324,39 +12367,3 @@ index 00000000..0bdd7fac
 +void dc_flags_to_string(uint32_t flags, char *out, size_t outlen);
 +
 +#endif /* DC_CODESIGN_H */
-diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
-index 1e9ec25d..0a5dd025 100644
---- a/src/startup/mldr/loader.c
-+++ b/src/startup/mldr/loader.c
-@@ -6,6 +6,7 @@
- #include <stdio.h>
- #include <stdbool.h>
- #include <sys/mman.h>
-+#include <sys/syscall.h>
- #include <errno.h>
- #include <string.h>
- 
-@@ -227,6 +228,23 @@ no_slide:
- 				if (seg->vmaddr + slide + seg->vmsize > lr->vm_addr_max)
- 					lr->vm_addr_max = seg->vmaddr + slide + seg->vmsize;
- 
-+				/* M5: seal the signed read-only ranges against later
-+				 * mprotect/munmap/mmap(MAP_FIXED). mseal is available on
-+				 * Linux >= 6.10; older kernels keep the previous behavior. */
-+#ifdef __NR_mseal
-+				if ((seg->initprot & PROT_WRITE) == 0 &&
-+				    (strcmp(seg->segname, "__TEXT") == 0 ||
-+				     strcmp(seg->segname, "__LINKEDIT") == 0)) {
-+					uintptr_t sealAddr = seg->vmaddr + slide;
-+					size_t sealLen = PAGE_ROUNDUP(seg->vmsize);
-+					if (syscall(__NR_mseal, (void*) sealAddr, sealLen, 0) != 0 &&
-+					    errno != ENOSYS) {
-+						fprintf(stderr, "mldr: cannot seal %s at %p: %s\n",
-+							seg->segname, (void*) sealAddr, strerror(errno));
-+					}
-+				}
-+#endif
-+
- 				if (strcmp(SEG_DATA, seg->segname) == 0)
- 				{
- 					// Look for section named __all_image_info for GDB integration

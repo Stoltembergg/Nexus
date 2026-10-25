@@ -1,31 +1,9 @@
-diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
-new file mode 100644
-index 0000000..28c2109
---- /dev/null
-+++ b/internal-include/darlingserver/trustcache.hpp
-@@ -0,0 +1,16 @@
-+#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
-+#define _DARLINGSERVER_TRUSTCACHE_HPP_
-+
-+#include <cstdint>
-+#include <string>
-+
-+namespace DarlingServer {
-+	/*
-+	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
-+	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
-+	 * is absent, malformed, rolled back, or does not contain the hash.
-+	 */
-+	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
-+};
-+
-+#endif
 diff --git a/src/trustcache.cpp b/src/trustcache.cpp
 new file mode 100644
-index 0000000..c087b95
+index 0000000..09c2e83
 --- /dev/null
 +++ b/src/trustcache.cpp
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,200 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -71,6 +49,17 @@ index 0000000..c087b95
 +
 +	std::mutex generationMutex;
 +	std::unordered_map<std::string, uint64_t> lastGeneration;
++
++	bool rootOwned(const std::string& path, bool directory) {
++		struct stat st;
++		if (lstat(path.c_str(), &st) != 0)
++			return false;
++		if (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode))
++			return false;
++		if (st.st_uid != 0)
++			return false;
++		return (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
++	}
 +
 +	uint64_t persistedGeneration(const std::string& storePath) {
 +		std::ifstream file(storePath + ".lastgen");
@@ -124,9 +113,21 @@ index 0000000..c087b95
 +	std::string storePath = Server::sharedInstance().prefix() +
 +	    "/var/db/darling/trustcache";
 +	std::string pubPath = storePath + ".pub";
-+	std::ifstream file(storePath, std::ios::binary);
++	std::ifstream file;
 +	std::vector<uint8_t> data;
 +	struct stat st;
++	std::string storeDir = storePath.substr(0, storePath.rfind('/'));
++
++	/* The store is only meaningful when it cannot be replaced by an
++	 * unprivileged guest. Rootless prefixes keep the M4 runtime fallback
++	 * instead of trusting a same-uid key. */
++	if (!rootOwned(storeDir, true) || !rootOwned(storePath, false) ||
++	    !rootOwned(pubPath, false)) {
++		if (error) *error = "trust store is not root-owned and write-protected";
++		return false;
++	}
++
++	file.open(storePath, std::ios::binary);
 +	uint64_t generation;
 +	uint32_t count;
 +	size_t entriesEnd;
@@ -203,6 +204,28 @@ index 0000000..c087b95
 +	if (error) *error = "cdhash is not in the trust store";
 +	return false;
 +}
+diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
+new file mode 100644
+index 0000000..28c2109
+--- /dev/null
++++ b/internal-include/darlingserver/trustcache.hpp
+@@ -0,0 +1,16 @@
++#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
++#define _DARLINGSERVER_TRUSTCACHE_HPP_
++
++#include <cstdint>
++#include <string>
++
++namespace DarlingServer {
++	/*
++	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
++	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
++	 * is absent, malformed, rolled back, or does not contain the hash.
++	 */
++	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
++};
++
++#endif
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 4920879..01f1cab 100644
 --- a/CMakeLists.txt
@@ -3702,10 +3725,10 @@ index e502e28..8d1cf2b 100644
  };
 diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
 new file mode 100644
-index 0000000..6183db5
+index 0000000..5256e5c
 --- /dev/null
 +++ b/include/darlingserver/cs_state.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,113 @@
 +/*
 + * cs_state.h - code-signing state shared by mldr, libsystem_kernel and
 + * darlingserver.
@@ -3781,6 +3804,7 @@ index 0000000..6183db5
 +	uint32_t darling_entitlements; /* DC_CS_ENT_* */
 +	uint32_t lv_required;          /* effective library-validation policy */
 +	uint32_t sip_enabled;          /* Darling SIP prototype (DARLING_SIP_ENFORCE) */
++	uint32_t signing_enforce;      /* DARLING_CODESIGN_ENFORCE=1 for debug mediation */
 +
 +	uint32_t hash_type;
 +	uint32_t page_size_log2;

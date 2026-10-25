@@ -462,7 +462,9 @@ in `tests/security/fixtures/README.md`:
   segment it maps. The kernel then rejects later `mprotect`, `munmap` and
   `mmap(MAP_FIXED)` over those ranges on Linux ≥ 6.10.
   `tests/security/test_m5_seal.sh` checks the main image and a `dlopen()`ed
-  dylib: both reject `mprotect(PROT_WRITE)`: 1/1 passing on the 7.3 test host.
+  dylib: both reject `mprotect(PROT_WRITE)` and `mmap(MAP_FIXED)`: 1/1 passing
+  on the 7.3 test host. `DARLING_MSEAL=0` opts out for the main image and
+  dyld-loaded images without a rebuild.
   Known limits: there is no registry fallback on kernels without `mseal`;
   sealing errors are logged but do not currently abort the image (best-effort
   prototype, not fail-closed); JIT allocations are not sealed; `dlclose()`
@@ -497,11 +499,13 @@ in `tests/security/fixtures/README.md`:
   higher-generation acceptance, rollback, tamper and missing-signature cases:
   6/6 passing.
   Known limits: this is not Apple's trust cache and no Apple chain is
-  validated; a local root-equivalent attacker can replace both key and store;
-  `.lastgen` is a local rollback anchor, not a hardware monotonic counter; the
-  runtime path exemption remains until install/signing populates runtime
-  cdhashes; the test restarts the prefix namespace after store mutations so
-  the server sees the new file under the overlay.
+  validated; the server only honors a regular store/public-key pair in a
+  root-owned, non-group/world-writable directory, so rootless prefixes keep
+  the M4 runtime-path fallback; a root-equivalent attacker can still replace
+  both key and store; `.lastgen` is a local rollback anchor, not a hardware
+  monotonic counter; the runtime path exemption remains until install/signing
+  populates runtime cdhashes; the test restarts the prefix namespace after
+  store mutations so the server sees the new file under the overlay.
 
 ### M7 — SIP configuration and path enforcement (4 w)
 
@@ -542,10 +546,10 @@ in `tests/security/fixtures/README.md`:
   `security.plist` or root-only `csrctl` setter; only four VFS wrappers are
   hooked; `chmod`, `chown`, `utimes`, `setxattr`, `truncate`, `link`, `symlink`,
   `rmdir` and writable `mmap` are not covered; hardlink decisions are deferred;
-  the host-path check runs after expansion but before the syscall, so a racing
-  symlink swap is not prevented; the substring check is deliberately
-  conservative and is not a full VFS policy; rootless redirects are not
-  modeled.
+  the host path is mapped back through `vchroot_unexpand()` and checked as a
+  guest absolute path, but the check still runs before the syscall, so a
+  racing symlink swap is not prevented; fallback is conservative if vchroot is
+  uninitialized; rootless redirects are not modeled.
 
 ### M8 — Debug/injection restrictions and AMFI dispatch (2 w)
 
@@ -562,8 +566,9 @@ in `tests/security/fixtures/README.md`:
   (`CDHASH_IN_TRUSTCACHE`) now queries the M6 local trust store through a
   `trustcache_contains` RPC and writes a truthful result; unknown AMFI calls
   return `ENOTSUP` instead of fabricated success. `get-task-allow` is enforced
-  guest-side for `ptrace(PT_ATTACHEXC)`, `task_for_pid` and
-  `task_name_for_pid` (self and root are exempt).
+  guest-side for `ptrace(PT_ATTACHEXC)` and `task_for_pid` while
+  `DARLING_CODESIGN_ENFORCE=enforce` (self and root are exempt);
+  `task_name_for_pid` remains an inspection-only operation.
   `tests/security/test_amfi.sh` checks unknown AMFI failure and a non-entitled
   ptrace denial: 1/1 passing.
   Known limits: the Seatbelt policy still soft-succeeds to keep Chromium's
@@ -702,10 +707,10 @@ requirement matrix.
 | M2 loader gate | `off`, then `warn` | config to `off` |
 | M3 csops | on (truthful state) | state reports zero flags (old behavior was worse) |
 | M4 library validation | `warn` | config to `off` |
-| M5 page sealing | on when `mseal(2)` exists; no fallback | use a kernel without `mseal` |
+| M5 page sealing | on when `mseal(2)` exists; `DARLING_MSEAL=0` opts out | `DARLING_MSEAL=0` |
 | M6 trust cache | `off` until signing populates runtime cdhashes | remove store + `.lastgen`, regenerate |
 | M7 SIP | `off` (`DARLING_SIP_ENFORCE`) | unset or set to `off` |
-| M8 AMFI/debug | unknown AMFI `ENOTSUP`; debug gate on | self/root exemption |
+| M8 AMFI/debug | unknown AMFI `ENOTSUP`; debug gate active under `enforce` | use `off`/`warn` or self/root |
 | M10 default | `enforce` after soak | config to `warn` |
 
 Nothing in this plan requires a rebuild to turn off; that is a hard

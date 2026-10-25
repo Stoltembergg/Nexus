@@ -51,7 +51,7 @@ int main(void) {
 	unlink("/private/etc/sip-test");
 
 	if (config == 0) {
-		if (protected_write == 0 || protected_mkdir == 0 || dotdot_write == 0 || symlink_write == 0 || local_write != 0) {
+		if (protected_write == 0 || protected_mkdir == 0 || dotdot_write == 0 || localdotdot_write == 0 || symlink_write == 0 || local_write != 0) {
 			printf("SIP_FAIL\n");
 			return 1;
 		}
