@@ -397,6 +397,9 @@ in `tests/security/fixtures/README.md`:
   `CS_GenericBlob` header, `get-task-allow` sets `0x4`, a forked child inherits
   its parent's state for the same image (with a fresh server generation), and
   a dead pid returns `ESRCH`.
+  Registration is one-shot per checkin/exec: the server rejects a later
+  `set_cs_state`, so `MARKINVALID` or a root flag clear cannot be undone by
+  replaying the RPC.
   Known limits: only the main image is verified by mldr (M4 covers `dlopen`);
   there is no MACF layer, so setter policy is self/root/`get-task-allow`;
   `exec` derives a new state and never inherits across images. The local

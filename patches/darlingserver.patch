@@ -1831,7 +1831,7 @@ index 708f3f3..fd46ab8 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..48f5ad2 100644
+index c97be30..5b413b5 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
 @@ -21,6 +21,8 @@
@@ -1873,7 +1873,7 @@ index c97be30..48f5ad2 100644
  		bool _startSuspended = false;
  		bool _pendingReplacement = false;
  		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
-@@ -102,6 +113,16 @@ namespace DarlingServer {
+@@ -102,6 +113,18 @@ namespace DarlingServer {
  		Architecture _architecture;
  		std::weak_ptr<Process> _tracerProcess;
  		std::string _executablePath;
@@ -1883,6 +1883,8 @@ index c97be30..48f5ad2 100644
 +		// while writing into another task.
 +		mutable std::shared_mutex _csMutex;
 +		struct dc_cs_state _csState = {};
++		/* Set by checkin for the initial exec and again on every exec. */
++		std::atomic<bool> _allowCsStateRegistration{false};
 +		std::vector<uint8_t> _csBlob;
 +		std::vector<uint8_t> _csEntitlements;
 +		std::vector<uint8_t> _csDerEntitlements;
@@ -1890,14 +1892,14 @@ index c97be30..48f5ad2 100644
  		bool _dead = false;
  		std::shared_ptr<Process> _selfReference = nullptr;
  		std::vector<uint32_t> _groups;
-@@ -194,6 +215,19 @@ namespace DarlingServer {
+@@ -194,6 +217,19 @@ namespace DarlingServer {
  		std::string executablePath() const;
  		void setExecutablePath(std::string path);
  
 +		uid_t uid() const;
 +		void setUid(uid_t uid);
 +
-+		void setCsState(const struct dc_cs_state& state,
++		bool setCsState(const struct dc_cs_state& state,
 +		    const uint8_t* blob, size_t blobLen,
 +		    const uint8_t* entitlements, size_t entitlementsLen,
 +		    const uint8_t* derEntitlements, size_t derEntitlementsLen);
@@ -2018,7 +2020,7 @@ index e35221c..cb399e1 100755
  
  ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..cba4698 100644
+index cc10f1d..7fd366d 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
 @@ -18,27 +18,102 @@
@@ -2266,7 +2268,7 @@ index cc10f1d..cba4698 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
-@@ -1040,6 +1223,241 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+@@ -1040,6 +1223,245 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
  	_sendReply(code, fullLength);
  }
  
@@ -2315,11 +2317,15 @@ index cc10f1d..cba4698 100644
 +					code = -code;
 +				} else if (!derEntitlements.empty() && !process->readMemory((uintptr_t) _body.der_entitlements, derEntitlements.data(), derEntitlements.size(), &code)) {
 +					code = -code;
++				} else if (!process->setCsState(state,
++				    blob.empty() ? nullptr : blob.data(), blob.size(),
++				    entitlements.empty() ? nullptr : entitlements.data(), entitlements.size(),
++				    derEntitlements.empty() ? nullptr : derEntitlements.data(), derEntitlements.size())) {
++					/* Registration is one-shot per checkin/exec; a process
++					 * must not revalidate itself after MARKINVALID or a
++					 * cross-process flag clear. */
++					code = -EPERM;
 +				} else {
-+					process->setCsState(state,
-+					    blob.empty() ? nullptr : blob.data(), blob.size(),
-+					    entitlements.empty() ? nullptr : entitlements.data(), entitlements.size(),
-+					    derEntitlements.empty() ? nullptr : derEntitlements.data(), derEntitlements.size());
 +					generation = process->eternalID();
 +				}
 +			}
@@ -3046,7 +3052,7 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..57320fa 100644
+index 9cd7b81..e5366cc 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,9 +25,16 @@
@@ -3177,7 +3183,20 @@ index 9cd7b81..57320fa 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -369,7 +438,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -283,6 +352,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+ 
+ 	bool didExec = _pendingReplacement;
+ 
++	{
++		std::lock_guard csLock(_csMutex);
++		if (didExec || !_csState.verified)
++			_allowCsStateRegistration.store(true);
++	}
++
+ 	if (didExec) {
+ 		// exec case
+ 
+@@ -369,7 +444,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -3197,7 +3216,7 @@ index 9cd7b81..57320fa 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +545,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +551,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -3305,7 +3324,7 @@ index 9cd7b81..57320fa 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +652,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +658,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -3368,7 +3387,7 @@ index 9cd7b81..57320fa 100644
  
  		info.protection = 0;
  
-@@ -607,6 +810,71 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +816,74 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
@@ -3380,11 +3399,13 @@ index 9cd7b81..57320fa 100644
 +	_uid.store(uid);
 +};
 +
-+void DarlingServer::Process::setCsState(const struct dc_cs_state& state,
++bool DarlingServer::Process::setCsState(const struct dc_cs_state& state,
 +    const uint8_t* blob, size_t blobLen,
 +    const uint8_t* entitlements, size_t entitlementsLen,
 +    const uint8_t* derEntitlements, size_t derEntitlementsLen) {
 +	std::unique_lock lock(_csMutex);
++	if (!_allowCsStateRegistration.exchange(false))
++		return false;
 +	_csState = state;
 +	_csState.version = DC_CS_STATE_VERSION;
 +	_csState.generation = eternalID();
@@ -3403,6 +3424,7 @@ index 9cd7b81..57320fa 100644
 +		_csDerEntitlements.assign(derEntitlements, derEntitlements + derEntitlementsLen);
 +	else
 +		_csDerEntitlements.clear();
++	return true;
 +};
 +
 +void DarlingServer::Process::copyCsState(struct dc_cs_state* state,
@@ -3440,7 +3462,7 @@ index 9cd7b81..57320fa 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +925,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +934,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
