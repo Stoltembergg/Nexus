@@ -44,6 +44,7 @@ force=0
 verify=1
 thin=1
 trust=0
+no_trust=0
 trust_store=""
 allow_running=0
 quiet=0
@@ -57,21 +58,21 @@ usage() {
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; trust=1 ;;
+	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; [ "$no_trust" -eq 1 ] || trust=1 ;;
 	--prefix)
 		prefix_root=${DPREFIX:-${HOME}/.darling}
 		for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
 			[ -d "$d" ] && roots="$roots $d"
 		done
-		explicit=1 ;;
+		explicit=1; [ "$no_trust" -eq 1 ] || trust=1 ;;
 	--dry-run) dry=1 ;;
 	--force) force=1 ;;
 	--verify) verify=1 ;;
 	--no-verify) verify=0 ;;
 	--no-thin) thin=0 ;;
-	--trust) trust=1 ;;
-	--no-trust) trust=0 ;;
-	--trust-store) trust=1; trust_store=$2; shift ;;
+	--trust) trust=1; no_trust=0 ;;
+	--no-trust) trust=0; no_trust=1 ;;
+	--trust-store) trust=1; no_trust=0; trust_store=$2; shift ;;
 	--allow-running) allow_running=1 ;;
 	--quiet) quiet=1 ;;
 	-h|--help) usage ;;
@@ -82,7 +83,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$explicit" -eq 0 ]; then
-	trust=1
+	[ "$no_trust" -eq 1 ] || trust=1
 	roots="/usr/local/libexec/darling"
 	prefix_root=${DPREFIX:-${HOME}/.darling}
 	for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
@@ -248,11 +249,17 @@ done
 
 if [ "$trust" -eq 1 ] && [ "$dry" -eq 0 ] && [ -s "$trust_entries" ]; then
 	if [ -z "$trust_store" ]; then
-		trust_store=$(python3 "$DCT" default-store) || failed=$((failed + 1))
+		trust_store=$(python3 "$DCT" default-store) || {
+			echo "trust-store FAILED: cannot determine default store" >&2
+			failed=$((failed + 1))
+			trust_store=""
+		}
 	fi
-	if ! python3 "$DCT" sync "$trust_store" --from "$trust_entries"; then
-		echo "trust-store FAILED: $trust_store" >&2
-		failed=$((failed + 1))
+	if [ -n "$trust_store" ]; then
+		if ! python3 "$DCT" sync "$trust_store" --from "$trust_entries"; then
+			echo "trust-store FAILED: $trust_store" >&2
+			failed=$((failed + 1))
+		fi
 	fi
 fi
 

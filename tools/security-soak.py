@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -43,8 +44,11 @@ def analyze_text(text):
 
 
 def command_run(args):
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    if args.out is None:
+        out = Path(tempfile.mkdtemp(prefix="darling-soak-"))
+    else:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["DARLING_CODESIGN_ENFORCE"] = "enforce"
     env.setdefault("DARLING_SIP_ENFORCE", "off")
@@ -110,7 +114,7 @@ def main(argv=None):
     run = sub.add_parser("run")
     run.add_argument("--smoke", action="store_true", required=True)
     run.add_argument("--darling", default=os.environ.get("DARLING", "darling"))
-    run.add_argument("--out", default=f"/tmp/opencode/darling-soak-{int(time.time())}")
+    run.add_argument("--out", default=None, help="output directory (default: a private temp directory)")
     run.add_argument("--timeout", type=int, default=120)
     run.set_defaults(function=command_run)
 

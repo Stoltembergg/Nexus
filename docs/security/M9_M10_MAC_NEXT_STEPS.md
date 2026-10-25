@@ -140,12 +140,13 @@ The M10 acceptance is **a full match on the reference machine with enforcement
 on and zero verification failures**, not merely the smoke command. If that
 cannot be run, say so explicitly; we will keep #49 open.
 
-### 6. Rootless server path (optional but valuable)
+### 6. Rootless server path (currently blocked by trust boundary)
 
-Run a full second server in a rootless user namespace, with the user-config
-trust store (`$XDG_CONFIG_HOME/darling/trustcache`), and confirm the same
-runtime/LV behavior. The current automated test covers only the rootless CLI
-path and key creation, not a rootless server.
+The server deliberately disables the trust store in a rootless user namespace:
+uid 0 maps to the host user, and a guest can write the same user config path.
+Do not enable or claim rootless runtime LV until the project has a host-private
+trust boundary. The current automated test covers only the rootless CLI path
+and key creation, not a rootless server.
 
 ## How to report back
 

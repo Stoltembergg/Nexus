@@ -487,11 +487,11 @@ in `tests/security/fixtures/README.md`:
 
 ### M6 — Local authenticated trust store (2 w)
 
-- Store: a trust directory outside the writable prefix (`/etc/darling` for
-  rootful, `$XDG_CONFIG_HOME/darling` or `$HOME/.config/darling` for rootless),
-  with a versioned header, a monotonically increasing generation, and a
-  signature by a **Darling-local** key created at install time (Ed25519), not
-  Apple's.
+- Store: a root-owned trust directory outside the writable prefix
+  (`/etc/darling`) with a versioned header, a monotonically increasing
+  generation, and a signature by a **Darling-local** key created at install
+  time (Ed25519), not Apple's. Rootless mode has no authenticated store
+  boundary yet and the server disables the store there.
 - CLI: `dc-trustcache default-store|init|sync|list|add|remove|verify`; adding
   requires root-equivalent local policy, or ownership of the rootless config
   directory.
@@ -507,9 +507,10 @@ in `tests/security/fixtures/README.md`:
   `default-store|init|sync|list|add|remove|verify`; `sync` accepts a batch of
   cdhashes and signs the versioned store (`DTC1`, issuer `darling-local`,
   generation, 20-byte cdhash + flags) with Ed25519. The default trust
-  directory is `/etc/darling` for a rootful install and the user config
-  directory for a rootless one; both are outside the writable prefix. The
-  private and public keys live beside the store. `tools/sign-darling-runtime.sh
+  directory used by the server is `/etc/darling` for a rootful install; the
+  CLI can prepare a user-config store for rootless testing, but the server
+  disables it because uid 0 maps to a host user that a guest can impersonate.
+  The private and public keys live beside the store. `tools/sign-darling-runtime.sh
   --sdk` / `--prefix` now records every signed runtime cdhash through `sync`,
   and `scripts/install-runtime.sh` invokes the signer.
   `darlingserver/src/trustcache.cpp` verifies the signature with the public
@@ -523,11 +524,13 @@ in `tests/security/fixtures/README.md`:
   rootless CLI path/key initialization: 9/9 passing.
   Known limits: this is not Apple's trust cache and no Apple chain is
   validated; a root-equivalent attacker can still replace both key and store;
-  in a rootless user namespace the guest shares the host uid, so the store is
-  cooperative policy rather than containment; `.lastgen` is a local rollback
-  anchor, not a hardware monotonic counter; the full rootless-server path is
-  not exercised by the automated test (only CLI selection/key creation); the
-  acceptance test restarts the namespace after store mutations.
+  rootless mode has no authenticated store boundary: uid 0 maps to the host
+  user, so the server returns no trust directory and rootless runtime LV is
+  not considered supported until a host-private boundary exists; `.lastgen` is
+  a local rollback anchor, not a hardware monotonic counter; the full
+  rootless-server path is not exercised by the automated test (only CLI
+  selection/key creation); the acceptance test restarts the namespace after
+  store mutations.
 
 ### M7 — SIP configuration and path enforcement (4 w)
 
@@ -763,7 +766,7 @@ requirement matrix.
 | M3 csops | on (truthful state) | state reports zero flags (old behavior was worse) |
 | M4 library validation | `warn` | config to `off` |
 | M5 page sealing | on when `mseal(2)` exists; `DARLING_MSEAL=0` opts out | `DARLING_MSEAL=0` |
-| M6 trust cache | store populated by signing/install; required for runtime LV | remove store + `.lastgen`, re-run signer |
+| M6 trust cache | store populated by signing/install; required for runtime LV | **recovery, not rollback:** restore the store and re-run the signer. Removing it disables runtime LV; there is no no-rebuild M6 opt-out. |
 | M7 SIP | `off` (`DARLING_SIP_ENFORCE`) | unset or set to `off` |
 | M8 AMFI/debug | unknown AMFI `ENOTSUP`; debug gate active under `enforce` | use `off`/`warn` or self/root |
 | M10 default | `enforce` after soak | config to `warn` |

@@ -55,24 +55,35 @@ tmp=$(mktemp -d)
 backup=
 if [ -e "$trust_dir" ]; then
 	backup=$tmp/trust-backup
-	cp -a "$trust_dir" "$backup"
+	if ! cp -a "$trust_dir" "$backup"; then
+		echo "test_trustcache: could not back up $trust_dir; aborting" >&2
+		rm -rf "$tmp"
+		exit 1
+	fi
 fi
 started=0
+cleaned=0
 if ! pgrep -x darlingserver >/dev/null 2>&1; then
 	started=1
 fi
 cleanup() {
+	[ "$cleaned" -eq 0 ] || return 0
+	cleaned=1
 	if [ "$started" -eq 1 ]; then
 		timeout 30 "$DARLING" shutdown >/dev/null 2>&1 || true
 	fi
 	rm -rf "$trust_dir"
 	if [ -n "$backup" ]; then
 		mkdir -p "$(dirname "$trust_dir")"
-		cp -a "$backup" "$trust_dir"
+		if ! cp -a "$backup" "$trust_dir"; then
+			echo "test_trustcache: could not restore $trust_dir; backup kept at $backup" >&2
+			return 0
+		fi
 	fi
 	rm -rf "$tmp"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 # Start from a stopped namespace so the server's rollback cache is
 # deterministic.
@@ -213,7 +224,7 @@ if command -v setpriv >/dev/null 2>&1; then
 	mkdir -p "$rootless_home" "$rootless_config"
 	chown 1000:1000 "$rootless_home" "$rootless_config"
 	rootless_store=$(setpriv --reuid=1000 --regid=1000 --clear-groups \
-	    env HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
+	    env -u DARLING_TRUST_DIR HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
 	    python3 "$TC" default-store 2>/dev/null)
 	case "$rootless_store" in
 	"$rootless_config/darling/trustcache")
@@ -221,10 +232,10 @@ if command -v setpriv >/dev/null 2>&1; then
 	*) bad "unexpected rootless store: ${rootless_store:-<empty>}" ;;
 	esac
 	if setpriv --reuid=1000 --regid=1000 --clear-groups \
-	    env HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
+	    env -u DARLING_TRUST_DIR HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
 	    python3 "$TC" init "$rootless_store" >/dev/null 2>&1 &&
 	   setpriv --reuid=1000 --regid=1000 --clear-groups \
-	    env HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
+	    env -u DARLING_TRUST_DIR HOME="$rootless_home" XDG_CONFIG_HOME="$rootless_config" \
 	    python3 "$TC" verify "$rootless_store" >/dev/null 2>&1; then
 		ok "rootless store initializes and verifies under its owner"
 	else
