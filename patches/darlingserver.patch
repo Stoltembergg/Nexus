@@ -1,3 +1,208 @@
+diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
+new file mode 100644
+index 0000000..28c2109
+--- /dev/null
++++ b/internal-include/darlingserver/trustcache.hpp
+@@ -0,0 +1,16 @@
++#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
++#define _DARLINGSERVER_TRUSTCACHE_HPP_
++
++#include <cstdint>
++#include <string>
++
++namespace DarlingServer {
++	/*
++	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
++	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
++	 * is absent, malformed, rolled back, or does not contain the hash.
++	 */
++	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
++};
++
++#endif
+diff --git a/src/trustcache.cpp b/src/trustcache.cpp
+new file mode 100644
+index 0000000..c087b95
+--- /dev/null
++++ b/src/trustcache.cpp
+@@ -0,0 +1,177 @@
++/**
++ * This file is part of Darling.
++ *
++ * Local (Darling-only) authenticated trust store. The store format is shared
++ * with tools/dc-trustcache.py; it is deliberately not Apple's trust cache.
++ */
++
++#include <darlingserver/trustcache.hpp>
++#include <darlingserver/server.hpp>
++
++#include <openssl/evp.h>
++#include <openssl/pem.h>
++
++#include <sys/stat.h>
++
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++namespace {
++	constexpr uint32_t kMagic = 0x44544331u; /* "DTC1" */
++	constexpr uint32_t kVersion = 1;
++	constexpr size_t kIssuerLen = 32;
++	constexpr size_t kHeaderSize = 4 + 4 + 8 + kIssuerLen + 4;
++	constexpr size_t kEntrySize = 24;
++	constexpr size_t kSignatureLen = 64;
++
++	uint32_t le32(const uint8_t* p) {
++		return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++		       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++	}
++
++	uint64_t le64(const uint8_t* p) {
++		uint64_t value = 0;
++		for (int i = 7; i >= 0; i--)
++			value = (value << 8) | p[i];
++		return value;
++	}
++
++	std::mutex generationMutex;
++	std::unordered_map<std::string, uint64_t> lastGeneration;
++
++	uint64_t persistedGeneration(const std::string& storePath) {
++		std::ifstream file(storePath + ".lastgen");
++		uint64_t generation = 0;
++		if (file)
++			file >> generation;
++		return generation;
++	}
++
++	void persistGeneration(const std::string& storePath, uint64_t generation) {
++		std::string path = storePath + ".lastgen";
++		std::string temporary = path + ".tmp";
++		{
++			std::ofstream file(temporary, std::ios::trunc);
++			if (!file)
++				return;
++			file << generation << "\n";
++		}
++		if (std::rename(temporary.c_str(), path.c_str()) != 0)
++			std::remove(temporary.c_str());
++	}
++
++	bool verifySignature(const std::vector<uint8_t>& payload,
++	    const uint8_t* signature, size_t signatureLen, const std::string& pubPath) {
++		BIO* bio = BIO_new_file(pubPath.c_str(), "r");
++		EVP_PKEY* key;
++		EVP_MD_CTX* ctx;
++		bool ok = false;
++
++		if (bio == nullptr)
++			return false;
++		key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
++		BIO_free(bio);
++		if (key == nullptr)
++			return false;
++		ctx = EVP_MD_CTX_new();
++		if (ctx == nullptr) {
++			EVP_PKEY_free(key);
++			return false;
++		}
++		if (EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, key) == 1)
++			ok = EVP_DigestVerify(ctx, signature, signatureLen,
++			    payload.data(), payload.size()) == 1;
++		EVP_MD_CTX_free(ctx);
++		EVP_PKEY_free(key);
++		return ok;
++	}
++}
++
++bool DarlingServer::trustCacheContains(const uint8_t cdhash[20], std::string* error) {
++	std::string storePath = Server::sharedInstance().prefix() +
++	    "/var/db/darling/trustcache";
++	std::string pubPath = storePath + ".pub";
++	std::ifstream file(storePath, std::ios::binary);
++	std::vector<uint8_t> data;
++	struct stat st;
++	uint64_t generation;
++	uint32_t count;
++	size_t entriesEnd;
++	uint32_t signatureLength;
++
++	if (!file) {
++		if (error) *error = "trust store not present";
++		return false;
++	}
++	file.seekg(0, std::ios::end);
++	auto size = file.tellg();
++	if (size < 0 || (uint64_t) size > 64ull * 1024ull * 1024ull) {
++		if (error) *error = "trust store is too large";
++		return false;
++	}
++	file.seekg(0, std::ios::beg);
++	data.resize((size_t) size);
++	if (!file.read((char*) data.data(), data.size()) ||
++	    data.size() < kHeaderSize + 4) {
++		if (error) *error = "cannot read trust store";
++		return false;
++	}
++
++	if (le32(data.data()) != kMagic || le32(data.data() + 4) != kVersion) {
++		if (error) *error = "bad trust-store magic or version";
++		return false;
++	}
++	generation = le64(data.data() + 8);
++	if (memcmp(data.data() + 16, "darling-local", 13) != 0) {
++		if (error) *error = "trust store is not darling-local";
++		return false;
++	}
++	count = le32(data.data() + 48);
++	if (count > (data.size() - kHeaderSize) / kEntrySize) {
++		if (error) *error = "trust-store entry count is out of range";
++		return false;
++	}
++	entriesEnd = kHeaderSize + (size_t) count * kEntrySize;
++	if (entriesEnd + 4 > data.size()) {
++		if (error) *error = "trust-store entries are truncated";
++		return false;
++	}
++	signatureLength = le32(data.data() + entriesEnd);
++	if (signatureLength != kSignatureLen ||
++	    entriesEnd + 4 + signatureLength != data.size()) {
++		if (error) *error = "bad trust-store signature length";
++		return false;
++	}
++	if (!verifySignature(std::vector<uint8_t>(data.begin(), data.begin() + entriesEnd),
++	        data.data() + entriesEnd + 4, signatureLength, pubPath)) {
++		if (error) *error = "trust-store signature does not verify";
++		return false;
++	}
++
++	{
++		std::lock_guard<std::mutex> lock(generationMutex);
++		auto it = lastGeneration.find(storePath);
++		uint64_t persisted = persistedGeneration(storePath);
++		uint64_t previous = it == lastGeneration.end() ? persisted : it->second;
++		if (generation < previous) {
++			if (error) *error = "trust-store generation rolled back";
++			return false;
++		}
++		lastGeneration[storePath] = generation;
++		if (generation > persisted)
++			persistGeneration(storePath, generation);
++	}
++
++	for (uint32_t i = 0; i < count; i++) {
++		const uint8_t* entry = data.data() + kHeaderSize + (size_t) i * kEntrySize;
++		if (memcmp(entry, cdhash, 20) == 0)
++			return true;
++	}
++	if (error) *error = "cdhash is not in the trust store";
++	return false;
++}
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 4920879..01f1cab 100644
 --- a/CMakeLists.txt
@@ -3664,10 +3869,10 @@ index 0000000..6eedb66
 +#endif
 diff --git a/src/cs_verify.cpp b/src/cs_verify.cpp
 new file mode 100644
-index 0000000..66cf652
+index 0000000..07bd159
 --- /dev/null
 +++ b/src/cs_verify.cpp
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,331 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -3684,6 +3889,7 @@ index 0000000..66cf652
 +#include <unistd.h>
 +
 +#include <limits.h>
++#include <cstdlib>
 +
 +#include <cerrno>
 +#include <cstdio>
@@ -3916,6 +4122,28 @@ index 0000000..66cf652
 +	       strncmp(path, prefix.c_str(), prefix.size()) == 0;
 +}
 +
++static bool perUserOverlayPath(const char* path, const std::string& prefix, const char* leaf) {
++	char resolved[PATH_MAX];
++	char resolvedPrefix[PATH_MAX];
++	std::string base;
++	std::string wanted;
++	const char* rest;
++	const char* slash;
++
++	if (realpath(path, resolved) == nullptr ||
++	    realpath(prefix.c_str(), resolvedPrefix) == nullptr)
++		return false;
++	base = std::string(resolvedPrefix) + "/Users/";
++	if (!startsWith(resolved, base))
++		return false;
++	rest = resolved + base.size();
++	slash = strchr(rest, '/');
++	if (slash == nullptr || slash == rest || rest[0] == '.')
++		return false;
++	wanted = std::string("/") + leaf + "/";
++	return strncmp(slash, wanted.c_str(), wanted.size()) == 0;
++}
++
 +static bool darlingRuntimePath(const char* path) {
 +	/* Darling's own runtime libraries are ad-hoc signed. Trust only the
 +	 * known library/framework locations, not every file under the prefix. */
@@ -3939,9 +4167,8 @@ index 0000000..66cf652
 +		    startsWith(path, prefix + "System/Library/Frameworks/") ||
 +		    startsWith(path, prefix + "System/Library/PrivateFrameworks/"))
 +			return true;
-+		if (startsWith(path, prefix + "Users/") &&
-+		    (strstr(path, "/RuntimeLibraries/") != nullptr ||
-+		     strstr(path, "/RuntimeFrameworks/") != nullptr))
++		if (perUserOverlayPath(path, prefix, "RuntimeLibraries") ||
++		    perUserOverlayPath(path, prefix, "RuntimeFrameworks"))
 +			return true;
 +	}
 +	return false;
@@ -4704,208 +4931,3 @@ index 0000000..f272720
 +void dc_flags_to_string(uint32_t flags, char *out, size_t outlen);
 +
 +#endif /* DC_CODESIGN_H */
-diff --git a/src/trustcache.cpp b/src/trustcache.cpp
-new file mode 100644
-index 0000000..c087b95
---- /dev/null
-+++ b/src/trustcache.cpp
-@@ -0,0 +1,177 @@
-+/**
-+ * This file is part of Darling.
-+ *
-+ * Local (Darling-only) authenticated trust store. The store format is shared
-+ * with tools/dc-trustcache.py; it is deliberately not Apple's trust cache.
-+ */
-+
-+#include <darlingserver/trustcache.hpp>
-+#include <darlingserver/server.hpp>
-+
-+#include <openssl/evp.h>
-+#include <openssl/pem.h>
-+
-+#include <sys/stat.h>
-+
-+#include <cstdio>
-+#include <cstring>
-+#include <fstream>
-+#include <mutex>
-+#include <string>
-+#include <unordered_map>
-+#include <vector>
-+
-+namespace {
-+	constexpr uint32_t kMagic = 0x44544331u; /* "DTC1" */
-+	constexpr uint32_t kVersion = 1;
-+	constexpr size_t kIssuerLen = 32;
-+	constexpr size_t kHeaderSize = 4 + 4 + 8 + kIssuerLen + 4;
-+	constexpr size_t kEntrySize = 24;
-+	constexpr size_t kSignatureLen = 64;
-+
-+	uint32_t le32(const uint8_t* p) {
-+		return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-+		       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-+	}
-+
-+	uint64_t le64(const uint8_t* p) {
-+		uint64_t value = 0;
-+		for (int i = 7; i >= 0; i--)
-+			value = (value << 8) | p[i];
-+		return value;
-+	}
-+
-+	std::mutex generationMutex;
-+	std::unordered_map<std::string, uint64_t> lastGeneration;
-+
-+	uint64_t persistedGeneration(const std::string& storePath) {
-+		std::ifstream file(storePath + ".lastgen");
-+		uint64_t generation = 0;
-+		if (file)
-+			file >> generation;
-+		return generation;
-+	}
-+
-+	void persistGeneration(const std::string& storePath, uint64_t generation) {
-+		std::string path = storePath + ".lastgen";
-+		std::string temporary = path + ".tmp";
-+		{
-+			std::ofstream file(temporary, std::ios::trunc);
-+			if (!file)
-+				return;
-+			file << generation << "\n";
-+		}
-+		if (std::rename(temporary.c_str(), path.c_str()) != 0)
-+			std::remove(temporary.c_str());
-+	}
-+
-+	bool verifySignature(const std::vector<uint8_t>& payload,
-+	    const uint8_t* signature, size_t signatureLen, const std::string& pubPath) {
-+		BIO* bio = BIO_new_file(pubPath.c_str(), "r");
-+		EVP_PKEY* key;
-+		EVP_MD_CTX* ctx;
-+		bool ok = false;
-+
-+		if (bio == nullptr)
-+			return false;
-+		key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
-+		BIO_free(bio);
-+		if (key == nullptr)
-+			return false;
-+		ctx = EVP_MD_CTX_new();
-+		if (ctx == nullptr) {
-+			EVP_PKEY_free(key);
-+			return false;
-+		}
-+		if (EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, key) == 1)
-+			ok = EVP_DigestVerify(ctx, signature, signatureLen,
-+			    payload.data(), payload.size()) == 1;
-+		EVP_MD_CTX_free(ctx);
-+		EVP_PKEY_free(key);
-+		return ok;
-+	}
-+}
-+
-+bool DarlingServer::trustCacheContains(const uint8_t cdhash[20], std::string* error) {
-+	std::string storePath = Server::sharedInstance().prefix() +
-+	    "/var/db/darling/trustcache";
-+	std::string pubPath = storePath + ".pub";
-+	std::ifstream file(storePath, std::ios::binary);
-+	std::vector<uint8_t> data;
-+	struct stat st;
-+	uint64_t generation;
-+	uint32_t count;
-+	size_t entriesEnd;
-+	uint32_t signatureLength;
-+
-+	if (!file) {
-+		if (error) *error = "trust store not present";
-+		return false;
-+	}
-+	file.seekg(0, std::ios::end);
-+	auto size = file.tellg();
-+	if (size < 0 || (uint64_t) size > 64ull * 1024ull * 1024ull) {
-+		if (error) *error = "trust store is too large";
-+		return false;
-+	}
-+	file.seekg(0, std::ios::beg);
-+	data.resize((size_t) size);
-+	if (!file.read((char*) data.data(), data.size()) ||
-+	    data.size() < kHeaderSize + 4) {
-+		if (error) *error = "cannot read trust store";
-+		return false;
-+	}
-+
-+	if (le32(data.data()) != kMagic || le32(data.data() + 4) != kVersion) {
-+		if (error) *error = "bad trust-store magic or version";
-+		return false;
-+	}
-+	generation = le64(data.data() + 8);
-+	if (memcmp(data.data() + 16, "darling-local", 13) != 0) {
-+		if (error) *error = "trust store is not darling-local";
-+		return false;
-+	}
-+	count = le32(data.data() + 48);
-+	if (count > (data.size() - kHeaderSize) / kEntrySize) {
-+		if (error) *error = "trust-store entry count is out of range";
-+		return false;
-+	}
-+	entriesEnd = kHeaderSize + (size_t) count * kEntrySize;
-+	if (entriesEnd + 4 > data.size()) {
-+		if (error) *error = "trust-store entries are truncated";
-+		return false;
-+	}
-+	signatureLength = le32(data.data() + entriesEnd);
-+	if (signatureLength != kSignatureLen ||
-+	    entriesEnd + 4 + signatureLength != data.size()) {
-+		if (error) *error = "bad trust-store signature length";
-+		return false;
-+	}
-+	if (!verifySignature(std::vector<uint8_t>(data.begin(), data.begin() + entriesEnd),
-+	        data.data() + entriesEnd + 4, signatureLength, pubPath)) {
-+		if (error) *error = "trust-store signature does not verify";
-+		return false;
-+	}
-+
-+	{
-+		std::lock_guard<std::mutex> lock(generationMutex);
-+		auto it = lastGeneration.find(storePath);
-+		uint64_t persisted = persistedGeneration(storePath);
-+		uint64_t previous = it == lastGeneration.end() ? persisted : it->second;
-+		if (generation < previous) {
-+			if (error) *error = "trust-store generation rolled back";
-+			return false;
-+		}
-+		lastGeneration[storePath] = generation;
-+		if (generation > persisted)
-+			persistGeneration(storePath, generation);
-+	}
-+
-+	for (uint32_t i = 0; i < count; i++) {
-+		const uint8_t* entry = data.data() + kHeaderSize + (size_t) i * kEntrySize;
-+		if (memcmp(entry, cdhash, 20) == 0)
-+			return true;
-+	}
-+	if (error) *error = "cdhash is not in the trust store";
-+	return false;
-+}
-diff --git a/internal-include/darlingserver/trustcache.hpp b/internal-include/darlingserver/trustcache.hpp
-new file mode 100644
-index 0000000..28c2109
---- /dev/null
-+++ b/internal-include/darlingserver/trustcache.hpp
-@@ -0,0 +1,16 @@
-+#ifndef _DARLINGSERVER_TRUSTCACHE_HPP_
-+#define _DARLINGSERVER_TRUSTCACHE_HPP_
-+
-+#include <cstdint>
-+#include <string>
-+
-+namespace DarlingServer {
-+	/*
-+	 * Check a 20-byte cdhash against the local, Ed25519-signed trust store at
-+	 * $prefix/var/db/darling/trustcache. Returns false when the store or key
-+	 * is absent, malformed, rolled back, or does not contain the hash.
-+	 */
-+	bool trustCacheContains(const uint8_t cdhash[20], std::string* error);
-+};
-+
-+#endif
