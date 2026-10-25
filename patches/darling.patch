@@ -1,14 +1,22 @@
 diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
-index 1e9ec25d..53ea9183 100644
+index 1e9ec25d..0e616141 100644
 --- a/src/startup/mldr/loader.c
 +++ b/src/startup/mldr/loader.c
-@@ -6,6 +6,7 @@
+@@ -6,13 +6,14 @@
  #include <stdio.h>
  #include <stdbool.h>
  #include <sys/mman.h>
 +#include <sys/syscall.h>
  #include <errno.h>
  #include <string.h>
+ 
+ #include "loader.h"
+ 
+ static int native_prot(int prot);
+-static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
++static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, bool verify_identity, char** argv, struct load_results* lr);
+ static void setup_space(struct load_results* lr, bool is_64_bit);
+ static void* compatible_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
  
 @@ -227,6 +228,29 @@ no_slide:
  				if (seg->vmaddr + slide + seg->vmsize > lr->vm_addr_max)
@@ -40,6 +48,15 @@ index 1e9ec25d..53ea9183 100644
  				if (strcmp(SEG_DATA, seg->segname) == 0)
  				{
  					// Look for section named __all_image_info for GDB integration
+@@ -308,7 +332,7 @@ no_slide:
+ 					exit(1);
+ 				}
+ 
+-				load(path, header.cputype, true, NULL, lr);
++				load(path, header.cputype, true, false, NULL, lr);
+ 
+ 				break;
+ 			}
 diff --git a/src/CoreAudio/AudioToolbox/AUComponent.cpp b/src/CoreAudio/AudioToolbox/AUComponent.cpp
 index d48eec1ef..1deb304e9 100644
 --- a/src/CoreAudio/AudioToolbox/AUComponent.cpp
@@ -8568,7 +8585,7 @@ index fee1bde8..14733ac4 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82..1b59c7e3 100644
+index 6617ef82..d94edcbd 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -42,6 +42,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -8580,7 +8597,17 @@ index 6617ef82..1b59c7e3 100644
  
  #ifndef PAGE_SIZE
  #	define PAGE_SIZE	4096
-@@ -106,6 +108,210 @@ void* __mldr_main_stack_top = NULL;
+@@ -70,7 +72,8 @@ static void reexec32(char** argv);
+ #endif
+ static void load32(int fd, bool expect_dylinker, struct load_results* lr);
+ static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
+-static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
++static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, bool verify_identity, char** argv, struct load_results* lr);
++static int codesign_fd_matches(int fd);
+ static int native_prot(int prot);
+ static void setup_space(struct load_results* lr, bool is_64_bit);
+ static void process_special_env(struct load_results* lr);
+@@ -106,6 +109,211 @@ void* __mldr_main_stack_top = NULL;
  static int kernel_major = -1;
  static int kernel_minor = -1;
  
@@ -8694,7 +8721,8 @@ index 6617ef82..1b59c7e3 100644
 +	state->image_dev = (uint64_t) st.st_dev;
 +	state->image_ino = (uint64_t) st.st_ino;
 +	state->image_size = (uint64_t) st.st_size;
-+	state->image_mtime = (uint64_t) st.st_mtime;
++	state->image_mtime = (uint64_t) st.st_mtim.tv_sec * 1000000000ull +
++	    (uint64_t) st.st_mtim.tv_nsec;
 +	snprintf(state->image_path, sizeof(state->image_path), "%s", path);
 +
 +	map = mmap(NULL, (size_t) st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -8791,7 +8819,7 @@ index 6617ef82..1b59c7e3 100644
  int main(int argc, char** argv, char** envp)
  {
  	void** sp;
-@@ -154,10 +360,15 @@ int main(int argc, char** argv, char** envp)
+@@ -154,14 +362,19 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -8806,9 +8834,52 @@ index 6617ef82..1b59c7e3 100644
 +	}
 +
  #ifdef __i386__
- 	load(filename, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
+-	load(filename, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
++	load(filename, CPU_TYPE_X86, false, true, argv, &mldr_load_results); // accept i386 only
  #else
-@@ -563,6 +774,16 @@ static socket_bitmap_t socket_bitmap = {
+-	load(filename, 0, false, argv, &mldr_load_results);
++	load(filename, 0, false, true, argv, &mldr_load_results);
+ #endif
+ 
+ 	// this was previously necessary when we were loading the binary from the LKM
+@@ -280,7 +493,22 @@ int main(int argc, char** argv, char** envp)
+ 	__builtin_unreachable();
+ }
+ 
+-void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, char** argv, struct load_results* lr)
++static int codesign_fd_matches(int fd) {
++	const struct dc_cs_state* state = &mldr_cs_state.state;
++	struct stat st;
++	uint64_t mtime;
++
++	if (fstat(fd, &st) != 0)
++		return 0;
++	mtime = (uint64_t) st.st_mtim.tv_sec * 1000000000ull +
++	    (uint64_t) st.st_mtim.tv_nsec;
++	return (uint64_t) st.st_dev == state->image_dev &&
++	       (uint64_t) st.st_ino == state->image_ino &&
++	       (uint64_t) st.st_size == state->image_size &&
++	       mtime == state->image_mtime;
++}
++
++void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, bool verify_identity, char** argv, struct load_results* lr)
+ {
+ 	int fd;
+ 	uint32_t magic;
+@@ -291,6 +519,12 @@ void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, char**
+ 		fprintf(stderr, "Cannot open %s: %s\n", path, strerror(errno));
+ 		exit(1);
+ 	}
++	if (verify_identity && !codesign_fd_matches(fd))
++	{
++		fprintf(stderr, "mldr: %s changed between verification and load\n", path);
++		close(fd);
++		exit(1);
++	}
+ 
+ 	// We need to read argv[1] and detect whether it's a 32 or 64-bit application.
+ 	// Then load the appropriate version of dyld from the fat file.
+@@ -563,6 +797,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -8825,7 +8896,7 @@ index 6617ef82..1b59c7e3 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +869,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +892,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -8837,7 +8908,7 @@ index 6617ef82..1b59c7e3 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +899,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +922,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -8852,7 +8923,7 @@ index 6617ef82..1b59c7e3 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +917,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +940,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -8878,7 +8949,7 @@ index 6617ef82..1b59c7e3 100644
  		}
  	}
  
-@@ -698,6 +938,22 @@ out:
+@@ -698,6 +961,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -8901,7 +8972,7 @@ index 6617ef82..1b59c7e3 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +963,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +986,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -8921,7 +8992,7 @@ index 6617ef82..1b59c7e3 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +1021,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1044,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -8940,7 +9011,7 @@ index 6617ef82..1b59c7e3 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1132,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1155,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  

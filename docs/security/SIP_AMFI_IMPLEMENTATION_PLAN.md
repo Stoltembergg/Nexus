@@ -361,8 +361,9 @@ in `tests/security/fixtures/README.md`:
   logs `bash`, `path_helper` and `true` as unsigned, so the gate sits on the
   actual exec path. Cost: ~4 ms to verify a 4.8 MB dylib including process
   startup; no measurable change in `darling shell` startup.
-  Known limit: the gate opens the path itself, so the TOCTOU window against the
-  loader's own open remains until the loader hands over its fd.
+  The loader reopens the path, but now compares the opened fd's device, inode,
+  size and nanosecond mtime with the verified snapshot and refuses a mismatch;
+  this is the minimum documented fallback rather than a single shared fd.
 - Risk: breaks the runtime if M0/M7 prerequisites are skipped. Ship with
   `off` default and a documented `warn` soak period.
 
