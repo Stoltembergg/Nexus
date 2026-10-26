@@ -1,5 +1,6 @@
 """Exercise the shutdown script without stopping the host's Darling session."""
 import errno
+import io
 import os
 from pathlib import Path
 import runpy
@@ -26,11 +27,14 @@ class StopRuntimeTests(unittest.TestCase):
         self.prefix.mkdir()
         self.calls = []
         self.signals = []
+        self.signal_start_ticks = []
         self.clock = 0
         self.status_error = None
         self.window_state = False
         self.window_states = []
         self.window_checks = 0
+        self.window_backend = 'x11'
+        self.on_window_check = lambda owner, count: None
         self.shutdown = lambda: None
         self.on_signal = lambda pid, sig: self.status(pid, 'Z')
 
@@ -98,6 +102,8 @@ class StopRuntimeTests(unittest.TestCase):
 
         def kill(pid, sig):
             self.signals.append((pid, sig))
+            stat = self.proc / str(pid) / 'stat'
+            self.signal_start_ticks.append(stat.read_text().rsplit(')', 1)[1].split()[19])
             self.on_signal(pid, sig)
 
         def monotonic():
@@ -106,12 +112,14 @@ class StopRuntimeTests(unittest.TestCase):
 
         def window_check(check_output=None):
             self.window_checks += 1
+            self.on_window_check(self, self.window_checks)
             if self.window_states:
                 return self.window_states.pop(0)
             return self.window_state
 
         client_window_module = types.SimpleNamespace(
-            client_windows_present=window_check)
+            client_windows_present=window_check,
+            backend=lambda: self.window_backend)
 
         with patch.dict(sys.modules, {'pathlib': types.SimpleNamespace(Path=RuntimePath)}), \
                 patch.dict(sys.modules, {'client_window_state': client_window_module}), \
@@ -191,6 +199,26 @@ class StopRuntimeTests(unittest.TestCase):
             self.run_script()
         self.assertEqual(self.calls, [])
 
+    def test_mldr_without_command_line_is_unknown(self):
+        self.process(101, comm='mldr')
+        with self.assertRaisesRegex(SystemExit, 'process inventory unknown'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+
+    def test_mldr_with_empty_argv_is_unknown(self):
+        self.process(101, comm='mldr', cmdline=b'\0')
+        with self.assertRaisesRegex(SystemExit, 'process inventory unknown'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+
+    def test_prefix_owner_without_command_line_is_unknown(self):
+        owner = b'__mldr_sockpath=' + os.fsencode(
+            self.prefix / '.darlingserver.sock') + b'\0'
+        self.process(101, comm='guest-helper', environ=owner)
+        with self.assertRaisesRegex(SystemExit, 'process inventory unknown'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+
     def test_client_window_blocks_before_shutdown(self):
         self.window_state = True
         with self.assertRaisesRegex(SystemExit, 'client window'):
@@ -202,6 +230,30 @@ class StopRuntimeTests(unittest.TestCase):
         self.window_state = None
         with self.assertRaisesRegex(SystemExit, 'window state unknown'):
             self.run_script()
+        self.assertEqual(self.calls, [])
+
+    def test_xprop_failure_refusal_identifies_backend_and_dependency(self):
+        # The mocked tri-state API reports unknown, as it does when xprop fails.
+        self.window_state = None
+        diagnostic = io.StringIO()
+        with patch('sys.stderr', diagnostic), \
+                self.assertRaisesRegex(SystemExit, 'window state unknown'):
+            self.run_script()
+        self.assertIn('backend x11 is unknown', diagnostic.getvalue())
+        self.assertIn('DISPLAY', diagnostic.getvalue())
+        self.assertIn('xprop', diagnostic.getvalue())
+        self.assertEqual(self.calls, [])
+
+    def test_native_wayland_without_xwayland_is_explicitly_blocked(self):
+        self.window_state = None
+        self.window_backend = 'unsupported-wayland'
+        diagnostic = io.StringIO()
+        with patch('sys.stderr', diagnostic), \
+                self.assertRaisesRegex(SystemExit, 'window state unknown'):
+            self.run_script()
+        self.assertIn('Native Wayland without Xwayland DISPLAY is unsupported',
+                      diagnostic.getvalue())
+        self.assertIn('no override', diagnostic.getvalue())
         self.assertEqual(self.calls, [])
 
     def test_non_boolean_false_window_state_blocks(self):
@@ -245,12 +297,43 @@ class StopRuntimeTests(unittest.TestCase):
         self.assertEqual(self.signals, [(101, signal.SIGTERM)])
         self.assert_finished()
 
+    def test_sigterm_guard_precedes_identity_check(self):
+        self.server(children=(101,))
+        self.process(101, parent=100, riot=True)
+        self.shutdown = lambda: self.status(100, 'Z')
+
+        def replace_during_signal_guard(owner, checks):
+            if checks == 3:
+                stat = owner.proc / '101/stat'
+                stat.write_text(stat.read_text().replace('12345', '54321'))
+
+        self.on_window_check = replace_during_signal_guard
+        self.run_script()
+        self.assertEqual(self.signals, [])
+        self.assertNotIn('54321', self.signal_start_ticks)
+        self.assert_finished()
+
     def test_stubborn_orphan_gets_sigkill(self):
         self.process(101, riot=True)
         self.on_signal = lambda pid, sig: (
             self.status(pid, 'Z') if sig == signal.SIGKILL else None)
         self.run_script()
         self.assertEqual(self.signals, [(101, signal.SIGTERM), (101, signal.SIGKILL)])
+        self.assert_finished()
+
+    def test_sigkill_guard_precedes_identity_check(self):
+        self.process(101, riot=True)
+        self.on_signal = lambda pid, sig: None
+
+        def replace_during_kill_guard(owner, checks):
+            if checks == 5:
+                stat = owner.proc / '101/stat'
+                stat.write_text(stat.read_text().replace('12345', '54321'))
+
+        self.on_window_check = replace_during_kill_guard
+        self.run_script()
+        self.assertEqual(self.signals, [(101, signal.SIGTERM)])
+        self.assertNotIn('54321', self.signal_start_ticks)
         self.assert_finished()
 
     def test_surviving_helper_blocks_runtime_changes(self):

@@ -8,10 +8,12 @@ import sys
 import time
 prefix = Path(os.environ.get('DPREFIX', str(Path.home() / '.darling'))).expanduser()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from client_window_state import backend as client_window_backend
 from client_window_state import client_windows_present
 
 GAME_NAME = 'LeagueofLegends'
 SOCK_VARIABLE = b'__mldr_sockpath'
+DARLING_LOADER_COMMS = {'mldr'}
 
 try:
     old_pid = int((prefix / '.init.pid').read_text().strip())
@@ -72,11 +74,36 @@ def game_process_inventory():
             os.path.basename(os.fsdecode(part))
             for part in raw_command.split(b'\0') if part
         ]
-        is_candidate = comm == GAME_NAME or (names and names[0] == GAME_NAME)
+        command_name = names[0] if names else None
+        command_unavailable = command_name is None
+        is_candidate = comm == GAME_NAME or command_name == GAME_NAME
         if not is_candidate:
+            if command_unavailable:
+                # mldr is the guest loader, so an unreadable command line
+                # cannot establish whether it is associated with a game.
+                if comm in DARLING_LOADER_COMMS:
+                    return None
+                # An ownership marker with no readable command identity is
+                # likewise enough to make this a relevant, unknown process.
+                try:
+                    environment = (proc / 'environ').read_bytes().split(b'\0')
+                except OSError:
+                    environment = []
+                sockets = [item.split(b'=', 1)[1] for item in environment
+                           if item.startswith(SOCK_VARIABLE + b'=')]
+                if sockets:
+                    if len(sockets) != 1:
+                        return None
+                    try:
+                        socket_path = Path(os.fsdecode(sockets[0]))
+                        if (not socket_path.is_absolute() or
+                                socket_path.parent.resolve() == owner):
+                            return None
+                    except (OSError, RuntimeError, ValueError):
+                        return None
             # If both identity sources are inaccessible for a still-present
             # process, it is impossible to rule out a game process.
-            if comm is None and raw_command is None and proc.exists():
+            if comm is None and command_unavailable and proc.exists():
                 return None
             continue
 
@@ -112,7 +139,24 @@ def require_safe_session_state():
     """Stop before mutation unless both process and window probes are clear."""
     if game_process_inventory() is not False:
         raise SystemExit('League game process present or process inventory unknown; runtime remains untouched')
-    if client_windows_present(check_output=subprocess.check_output) is not False:
+    window_state = client_windows_present(check_output=subprocess.check_output)
+    if window_state is not False:
+        selected = client_window_backend()
+        if window_state is True:
+            advice = 'Close the Riot/League client windows, then retry.'
+        elif selected == 'x11':
+            advice = ('Check that DISPLAY reaches X11/Xwayland and that xprop is '
+                      'installed and runnable.')
+        elif selected == 'niri':
+            advice = 'Check that niri msg --json windows is available in this session.'
+        else:
+            advice = ('Native Wayland without Xwayland DISPLAY is unsupported; '
+                      'use Niri native inventory or an Xwayland session with DISPLAY. '
+                      'This guard has no override.')
+        print('stop-darling-runtime: refusing shutdown; window inventory backend '
+              '%s is %s. %s' % (
+                  selected, 'present' if window_state is True else 'unknown', advice),
+              file=sys.stderr, flush=True)
         raise SystemExit('Riot/League client window present or window state unknown; runtime remains untouched')
 
 def riot_descendants(server_pid):
@@ -188,8 +232,14 @@ if live(old_pid):
 # Stop the observed descendants and verified serverless Riot processes in this
 # prefix, guarding against PID reuse. Leave other live Darling sessions alone.
 for pid, identity in owned_riot.items():
+    require_safe_session_state()
     if identity is not None and process_identity(pid) == identity and live(pid):
-        require_safe_session_state()
+        # Re-read both values immediately before signaling. The procfs check
+        # and kill are not atomic; a PID could still be reused between them.
+        same_process = process_identity(pid) == identity
+        still_live = live(pid)
+        if not same_process or not still_live:
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -198,14 +248,21 @@ deadline = time.monotonic() + 3
 while any(process_identity(pid) == identity and live(pid)
           for pid, identity in owned_riot.items()) and time.monotonic() < deadline:
     time.sleep(.1)
+require_safe_session_state()
 remaining = {pid: identity for pid, identity in owned_riot.items()
              if process_identity(pid) == identity and live(pid)}
 # These helpers have no live server and ignored graceful termination. They
 # cannot complete guest RPCs after shutdown. Kill only the previously observed
 # Riot descendants, with the same PID/start-time guard used above.
 for pid, identity in remaining.items():
+    require_safe_session_state()
     if process_identity(pid) == identity and live(pid):
-        require_safe_session_state()
+        # As above, identity/liveness are revalidated right before os.kill,
+        # but procfs validation cannot close the final check-to-signal race.
+        same_process = process_identity(pid) == identity
+        still_live = live(pid)
+        if not same_process or not still_live:
+            continue
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:

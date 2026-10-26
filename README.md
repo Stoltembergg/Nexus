@@ -52,6 +52,11 @@ Game files, Riot installers, account databases, tokens, local prefixes, captures
 - X11/XCB/SHM development files for the current runtime helpers.
 - Enough free disk for Darling sources/build, Git LFS assets and the game: budget at least 50 GB. Building is substantially larger than this source-only repository.
 
+Runtime installation/update safety checks use Niri's native window inventory,
+or `xprop` through X11/Xwayland when `DISPLAY` is set (including Hyprland with
+working Xwayland). Non-Niri native Wayland without Xwayland remains blocked;
+there is no safety-check override.
+
 Use the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff) for your distribution. `tools/env-check.sh` provides a starting check; its legacy package names may need adapting to your distro.
 
 Build and runtime installation now run a [version-aware host preflight](docs/HOST_PREFLIGHT.md)
