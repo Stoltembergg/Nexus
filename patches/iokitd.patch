@@ -437,10 +437,10 @@ index 50c10fe..7026e1c 100644
 +	return kIOReturnSuccess;
 +}
 diff --git a/src/IOSurfaceRoot.mm b/src/IOSurfaceRoot.mm
-index d7e6fab..d860582 100644
+ index d7e6fab..8b868b0 100644
 --- a/src/IOSurfaceRoot.mm
 +++ b/src/IOSurfaceRoot.mm
-@@ -21,13 +21,17 @@
+@@ -21,13 +21,28 @@
  #include "iokitd.h"
  #include "IOSurface.h"
  #include "IODisplayConnectX11.h"
@@ -448,6 +448,7 @@ index d7e6fab..d860582 100644
  #include <IOKit/IOCFUnserialize.h>
  #include <stdexcept>
  #include <iostream>
++#include <cstdlib>
  
  IOSurfaceRoot::IOSurfaceRoot()
  {
@@ -455,10 +456,30 @@ index d7e6fab..d860582 100644
 +	// The native display is an Xlib Display. eglGetDisplay() would let Mesa
 +	// guess the platform from EGL_PLATFORM, which Wayland sessions often set
 +	// to "wayland"; Mesa then treats the Display as a wl_display and crashes.
-+	m_display = eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR, IODisplayConnectX11::getDisplay(), NULL);
++	Display* display = IODisplayConnectX11::getDisplay();
++	if (!display)
++	{
++		m_display = EGL_NO_DISPLAY;
++		const char* displayName = std::getenv("DISPLAY");
++		std::cerr << "iokitd: X display unavailable (DISPLAY="
++			<< (displayName ? displayName : "unset")
++			<< "); IOSurface rendering disabled" << std::endl;
++		return;
++	}
++	m_display = eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR, display, NULL);
  
      if (m_display == EGL_NO_DISPLAY)
          return;
+@@ -48,7 +63,8 @@
+     eglBindAPI(EGL_OPENGL_API);
+ }
+ 
+ IOSurfaceRoot::~IOSurfaceRoot()
+ {
+-	eglTerminate(m_display);
++	if (m_display != EGL_NO_DISPLAY)
++		eglTerminate(m_display);
+ }
 diff --git a/src/PowerSources.mm b/src/PowerSources.mm
 new file mode 100644
 index 0000000..70ca9bd

@@ -439,6 +439,8 @@ The installer adds a CarbonCore framework override and the matching absolute Cor
 
 `iokitd` crashed in host glibc's `pthread_mutex_lock` and launchd restarted it every 10 seconds. It called `eglGetDisplay()` with an Xlib display, so Mesa picked the platform from `EGL_PLATFORM`. Wayland sessions often set that to `wayland`, and the first `darling` command passes its environment to every guest service, including `iokitd`. `scripts/run.sh` sets `EGL_PLATFORM=x11` and was unaffected, but `darling shell` from a Wayland terminal (including the one in `scripts/install-runtime.sh`) started the loop. `iokitd` now requests the X11 platform explicitly. The fix is part of the base install (`sudo cmake --install`); until then, start Darling with `EGL_PLATFORM=x11`.
 
+If the X server rejects the connection (for example, because `XAUTHORITY` is missing or points to an unreadable cookie), `iokitd` now stays running with IOSurface rendering disabled instead of repeatedly crashing. Check that `DISPLAY` names the intended X11/Xwayland server and that the Darling process can read the matching `XAUTHORITY` cookie. This prevents the daemon restart loop; it does not enable game rendering without a working display.
+
 ## Blocky video or flickering startup logo
 
 The first dynamically resolved GL call could lose floating-point arguments during ELF symbol lookup. Chromium's linear sampler request then failed and left nearest sampling. The generated resolver now preserves those registers. Install both the rebuilt native `libGL.dylib` in `RuntimeLibraries` and the OpenGL framework's library copy using the paired runtime installer; the framework alone is insufficient.
