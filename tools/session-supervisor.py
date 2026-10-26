@@ -6,7 +6,9 @@ handles SIGINT/SIGTERM/SIGHUP in ordinary control flow. Automatic cleanup after
 the child exits is opt-in; when enabled, it may ask darlingserver to shut down
 and stop any process still inside the guest PID namespace. Every destructive
 action requires a positive idle game and shared client-window inventory; active
-or unknown state preserves the session.
+or unknown state preserves the session. Signals to leftover guest processes use
+pidfds and fail closed if the kernel or Python runtime lacks pidfd support.
+The loader's child process group still uses killpg so descendants stay included.
 
 The guest namespace is captured while the session runs, from a process that
 carries this prefix's `__mldr_sockpath`; without that evidence cleanup never
@@ -229,71 +231,159 @@ def wrapper(proc, name):
         return None
 
 
-def stop_processes(members, kill=os.kill, sleep=time.sleep, proc_root=Path('/proc'),
+def stop_processes(members, pidfd_open=None, pidfd_send_signal=None,
+                   close_pidfd=None, sleep=time.sleep, proc_root=Path('/proc'),
                    out=sys.stdout, term_grace=TERM_GRACE, kill_grace=KILL_GRACE,
                    clock=time.monotonic, safety_check=None):
     """Signal members; None means a safety veto aborted the cleanup pass."""
     # This low-level helper has no prefix/window context of its own. Callers
     # must explicitly supply the live safety gate; absence fails closed.
     safe = safety_check or (lambda: False)
+    pidfd_open = getattr(os, 'pidfd_open', None) if pidfd_open is None else pidfd_open
+    pidfd_send_signal = (getattr(signal, 'pidfd_send_signal', None)
+                         if pidfd_send_signal is None else pidfd_send_signal)
+    close_pidfd = os.close if close_pidfd is None else close_pidfd
+    gone = set()
+    pidfds = {}
 
     def alive(candidate):
+        if candidate[0] in gone:
+            return False
         info = candidate_info(candidate)
         return info is not None and info[0] != 'Z'
 
     def present(candidate):
-        return candidate_info(candidate) is not None
+        return candidate[0] not in gone and candidate_info(candidate) is not None
+
+    def survivors(candidates):
+        return [candidate for candidate in candidates if present(candidate)]
+
+    def close_one(pid):
+        fd = pidfds.pop(pid, None)
+        if fd is not None:
+            try:
+                close_pidfd(fd)
+            except OSError:
+                pass
+
+    def close_all():
+        for fd in tuple(pidfds.values()):
+            try:
+                close_pidfd(fd)
+            except OSError:
+                pass
+        pidfds.clear()
 
     remaining = [candidate for candidate in members if alive(candidate)]
-    for candidate in deepest_first(remaining, proc_root):
-        pid = candidate[0]
-        if not safe():
-            log('cleanup protected: game/window state is active or unknown', out)
-            return None
-        if not alive(candidate):
-            continue
-        # The final /proc identity check and kill(2) cannot be atomic: a PID
-        # can still be reused in the small interval between this check and the
-        # syscall. The check prevents signaling identities already observed as
-        # replacements, but does not claim to close that kernel-level race.
-        try:
-            kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = clock() + term_grace
-    while remaining and clock() < deadline:
-        sleep(POLL_SECONDS)
+    if not remaining:
+        return []
+    if not callable(pidfd_open) or not callable(pidfd_send_signal):
+        log('pidfd signaling is unavailable; refusing guest cleanup', out)
+        return remaining
+
+    try:
+        # Acquire every descriptor before signaling anything. Unsupported
+        # kernels, permission errors or fd exhaustion therefore fail closed
+        # without a partial numeric-PID fallback.
+        ordered = deepest_first(remaining, proc_root)
+        for candidate in ordered:
+            pid = candidate[0]
+            if not safe():
+                log('cleanup protected: game/window state is active or unknown', out)
+                return None
+            if not alive(candidate):
+                continue
+            try:
+                fd = pidfd_open(pid, 0)
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    gone.add(pid)
+                    continue
+                log('pidfd_open failed for PID %d (%s); refusing guest cleanup'
+                    % (pid, exc), out)
+                return survivors(remaining)
+            except NotImplementedError as exc:
+                log('pidfd_open is unavailable (%s); refusing guest cleanup' % exc, out)
+                return survivors(remaining)
+
+            # Store immediately so even an exception during revalidation closes it.
+            pidfds[pid] = fd
+            if not alive(candidate):
+                close_one(pid)
+
         remaining = [candidate for candidate in remaining if alive(candidate)]
-    if not safe():
-        log('cleanup protected: game/window state is active or unknown', out)
-        return None
-    # Re-read once before escalating: a zero grace period must not SIGKILL a
-    # process that already exited on SIGTERM. Identity checks also discard a
-    # PID that was reused during the grace period.
-    remaining = [candidate for candidate in remaining if alive(candidate)]
-    for candidate in deepest_first(remaining, proc_root):
-        pid = candidate[0]
+        for candidate in ordered:
+            pid = candidate[0]
+            fd = pidfds.get(pid)
+            if fd is None or not alive(candidate):
+                continue
+            if not safe():
+                log('cleanup protected: game/window state is active or unknown', out)
+                return None
+            # The same pidfd is retained through escalation. A PID reused after
+            # open can never redirect either signal to its replacement.
+            if not alive(candidate):
+                continue
+            try:
+                pidfd_send_signal(fd, signal.SIGTERM, None, 0)
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    gone.add(pid)
+                    continue
+                log('pidfd_send_signal failed for PID %d (%s); refusing further cleanup'
+                    % (pid, exc), out)
+                return survivors(remaining)
+            except NotImplementedError as exc:
+                log('pidfd_send_signal is unavailable (%s); refusing further cleanup'
+                    % exc, out)
+                return survivors(remaining)
+
+        deadline = clock() + term_grace
+        while remaining and clock() < deadline:
+            sleep(POLL_SECONDS)
+            remaining = [candidate for candidate in remaining if alive(candidate)]
         if not safe():
             log('cleanup protected: game/window state is active or unknown', out)
             return None
-        if not alive(candidate):
-            continue
-        # The same non-atomic /proc-check-to-kill(2) gap applies to escalation.
-        try:
-            kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-    deadline = clock() + kill_grace
-    while remaining and clock() < deadline:
-        sleep(POLL_SECONDS)
-        remaining = [candidate for candidate in remaining if present(candidate)]
-    # Re-read once even when a grace period is zero, so the caller never gets a
-    # stale "still running" answer for a process that SIGKILL already removed.
-    return [candidate for candidate in remaining if present(candidate)]
+        # Re-read even with a zero grace period before escalating.
+        remaining = [candidate for candidate in remaining if alive(candidate)]
+        for candidate in deepest_first(remaining, proc_root):
+            pid = candidate[0]
+            fd = pidfds.get(pid)
+            if fd is None:
+                continue
+            if not safe():
+                log('cleanup protected: game/window state is active or unknown', out)
+                return None
+            if not alive(candidate):
+                continue
+            try:
+                pidfd_send_signal(fd, signal.SIGKILL, None, 0)
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    gone.add(pid)
+                    continue
+                log('pidfd_send_signal failed for PID %d (%s); refusing further cleanup'
+                    % (pid, exc), out)
+                return survivors(remaining)
+            except NotImplementedError as exc:
+                log('pidfd_send_signal is unavailable (%s); refusing further cleanup'
+                    % exc, out)
+                return survivors(remaining)
+
+        deadline = clock() + kill_grace
+        while remaining and clock() < deadline:
+            sleep(POLL_SECONDS)
+            remaining = [candidate for candidate in remaining if present(candidate)]
+        # Preserve the final presence check even when the grace period is zero.
+        return survivors(remaining)
+    finally:
+        close_all()
 
 
 def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.run,
-            kill=os.kill, sleep=time.sleep, out=sys.stdout, own_namespace=None,
+            pidfd_open=None, pidfd_send_signal=None, close_pidfd=None,
+            sleep=time.sleep, out=sys.stdout, own_namespace=None,
             term_grace=TERM_GRACE, kill_grace=KILL_GRACE, clock=time.monotonic,
             safety_check=None, window_probe=None):
     """Shut down only under positive idle evidence; None means protected."""
@@ -331,7 +421,9 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
         log('runtime and guest processes are gone', out)
         return []
     log('stopping %d leftover guest process(es)' % len(members), out)
-    remaining = stop_processes(members, kill=kill, sleep=sleep,
+    remaining = stop_processes(members, pidfd_open=pidfd_open,
+                               pidfd_send_signal=pidfd_send_signal,
+                               close_pidfd=close_pidfd, sleep=sleep,
                                proc_root=proc_root, out=out, term_grace=term_grace,
                                kill_grace=kill_grace, clock=clock,
                                safety_check=safe)
@@ -622,7 +714,8 @@ def idle_decision(seen_client, idle_since, now, windows, game, seconds):
 
 
 def run_supervised(command, prefix, darling, stop_after=0, clean=True,
-                   proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
+                   proc_root=Path('/proc'), run=subprocess.run,
+                   pidfd_open=None, pidfd_send_signal=None, close_pidfd=None,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
                    own_namespace=None, popen=None, killpg=None,
                    register_signal=None, window_probe=None, clock=None):
@@ -792,7 +885,9 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     else:
         namespace = namespace or prefix_namespace(prefix, proc_root)
         remaining = cleanup(prefix, darling, namespace, proc_root=proc_root, run=run,
-                            kill=kill, sleep=sleep, out=out,
+                            pidfd_open=pidfd_open,
+                            pidfd_send_signal=pidfd_send_signal,
+                            close_pidfd=close_pidfd, sleep=sleep, out=out,
                             own_namespace=own_namespace,
                             window_probe=window_state)
     if stop:

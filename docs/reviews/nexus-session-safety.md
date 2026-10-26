@@ -80,13 +80,19 @@ enabled. When cleanup is enabled, the shared window/game gate still fails
 closed, but `owns_runtime` remains an observation rather than an exclusive
 ownership lease. A windowless client may be downloading or in another state the
 probes cannot distinguish from idle. Procfs/window checks and later signals are
-not atomic, so state may change in the remaining check-to-action gap. These
+not atomic, so game/window state may change after a check. Leftover guest
+processes are signaled through pidfds after start-identity revalidation;
+missing or unsupported pidfd APIs leave them running and are reported. The
+launcher still uses `killpg` for its child process group because pidfds target a
+single process and would not preserve descendant cleanup. These
 changes only reduce accidental interruptions; they are not proof of Riot
 authorization or account safety, and do not establish reduced account-penalty
 risk.
 
-Checks and signals are not atomic. These guards reduce races but do not prove
-that every possible concurrent startup is safe. Recovery stays opt-in and
+Game/window observations and ownership checks are not atomic with later actions.
+Pidfds protect the signal target's identity, but do not establish that cleanup is
+safe for the current session. These guards reduce races but do not prove that
+every possible concurrent startup is safe. Recovery stays opt-in and
 must not be invoked while queued, choosing champions or downloading work that
 must be preserved. Prefer restoring a minimized window over restarting it.
 
@@ -99,13 +105,15 @@ must be preserved. Prefer restoring a minimized window over restarting it.
   missing windows into evidence that a download/champion selection is idle.
 - Keep the shared Niri/X11 inventory and fail closed for unsupported or
   incomplete compositor/process state.
-- Retain start-identity checks before each process signal; use pidfds if the
-  remaining procfs-check-to-signal race must be closed.
+- Retain start-identity checks around pidfd acquisition and use the same pidfd
+  for TERM/KILL of each leftover guest process; never fall back to numeric-PID
+  signaling when pidfd operations fail. Keep group signaling distinct because
+  a single-process pidfd does not replace `killpg` semantics.
 - Test concurrent starts, different prefixes, native Niri errors, disappearing
   windows, and a game appearing before each escalation step.
 - Do not enable live/account testing as part of CI or installation.
 
-The PID-reuse regression tests use fake `/proc` trees and mocked signals. The
+The PID-reuse regression tests use fake `/proc` trees and mocked pidfds/signals. The
 existing supervisor signal-escalation test exercises isolated Python helper
 processes only; none of these checks starts Darling, Riot or a game. Account
 restrictions remain outside the supervisor's control.
