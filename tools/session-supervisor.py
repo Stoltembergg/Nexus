@@ -106,15 +106,26 @@ def socket_prefix(proc):
         return None
 
 
-def owned_by_prefix(proc, prefix):
-    if process_info(proc) is None:
-        return False
+def _owned_prefix_start_ticks(proc, prefix):
+    """Return the observed identity if prefix ownership stayed consistent."""
+    before = process_info(proc)
+    if before is None:
+        return None
     try:
         if proc.stat().st_uid != os.getuid():
-            return False
+            return None
     except OSError:
-        return False
-    return socket_prefix(proc) == prefix
+        return None
+    if socket_prefix(proc) != prefix:
+        return None
+    after = process_info(proc)
+    if after is None or after[2] != before[2]:
+        return None
+    return before[2]
+
+
+def owned_by_prefix(proc, prefix):
+    return _owned_prefix_start_ticks(proc, prefix) is not None
 
 
 def prefix_namespace(prefix, proc_root=Path('/proc')):
@@ -122,11 +133,16 @@ def prefix_namespace(prefix, proc_root=Path('/proc')):
     for proc in proc_root.iterdir() if proc_root.exists() else ():
         if not proc.name.isdigit():
             continue
-        if owned_by_prefix(proc, prefix):
-            try:
-                return os.readlink(proc / 'ns/pid')
-            except OSError:
-                return None
+        start_ticks = _owned_prefix_start_ticks(proc, prefix)
+        if start_ticks is None:
+            continue
+        try:
+            namespace = os.readlink(proc / 'ns/pid')
+        except OSError:
+            continue
+        after = process_info(proc)
+        if after is not None and after[2] == start_ticks:
+            return namespace
     return None
 
 
@@ -142,6 +158,9 @@ def namespace_members(namespace, proc_root=Path('/proc'), own_namespace=None):
     for proc in proc_root.iterdir() if proc_root.exists() else ():
         if not proc.name.isdigit():
             continue
+        before = process_info(proc)
+        if before is None:
+            continue
         try:
             if os.readlink(proc / 'ns/pid') != namespace:
                 continue
@@ -149,7 +168,9 @@ def namespace_members(namespace, proc_root=Path('/proc'), own_namespace=None):
                 continue
         except OSError:
             continue
-        found.append((int(proc.name), proc))
+        after = process_info(proc)
+        if after is not None and after[2] == before[2]:
+            found.append((int(proc.name), proc, before[2]))
     return found
 
 
@@ -157,18 +178,22 @@ def prefix_only(prefix, proc_root=Path('/proc')):
     """Fallback: processes that positively carry this prefix's socket."""
     found = []
     for proc in proc_root.iterdir() if proc_root.exists() else ():
-        if proc.name.isdigit() and owned_by_prefix(proc, prefix):
-            found.append((int(proc.name), proc))
+        if not proc.name.isdigit():
+            continue
+        start_ticks = _owned_prefix_start_ticks(proc, prefix)
+        if start_ticks is not None:
+            found.append((int(proc.name), proc, start_ticks))
     return found
 
 
 def deepest_first(members, proc_root=Path('/proc')):
     """Children before parents, so live parents can reap their own tree."""
     parents = {}
-    for pid, proc in members:
+    for pid, proc, start_ticks in members:
         info = process_info(proc)
-        parents[pid] = info[1] if info else None
-    known = {pid for pid, _proc in members}
+        parents[pid] = (info[1] if info is not None and info[2] == start_ticks
+                        else None)
+    known = {pid for pid, _proc, _start_ticks in members}
 
     def depth(pid, seen):
         parent = parents.get(pid)
@@ -176,8 +201,15 @@ def deepest_first(members, proc_root=Path('/proc')):
             return 0
         return depth(parent, seen | {pid}) + 1
 
-    return sorted((pid for pid, _proc in members),
-                  key=lambda pid: (-depth(pid, set()), pid))
+    return sorted(members, key=lambda candidate: (
+        -depth(candidate[0], set()), candidate[0]))
+
+
+def candidate_info(candidate):
+    """Return current proc info only while the captured PID identity matches."""
+    _pid, proc, start_ticks = candidate
+    info = process_info(proc)
+    return info if info is not None and info[2] == start_ticks else None
 
 
 def wrapper(proc, name):
@@ -195,12 +227,22 @@ def stop_processes(members, kill=os.kill, sleep=time.sleep, proc_root=Path('/pro
                    out=sys.stdout, term_grace=TERM_GRACE, kill_grace=KILL_GRACE,
                    clock=time.monotonic):
     """SIGTERM then SIGKILL a set of processes; return what is still present."""
-    def alive(pid, proc):
-        info = process_info(proc)
+    def alive(candidate):
+        info = candidate_info(candidate)
         return info is not None and info[0] != 'Z'
 
-    remaining = [(pid, proc) for pid, proc in members if alive(pid, proc)]
-    for pid in deepest_first(remaining, proc_root):
+    def present(candidate):
+        return candidate_info(candidate) is not None
+
+    remaining = [candidate for candidate in members if alive(candidate)]
+    for candidate in deepest_first(remaining, proc_root):
+        pid = candidate[0]
+        if not alive(candidate):
+            continue
+        # The final /proc identity check and kill(2) cannot be atomic: a PID
+        # can still be reused in the small interval between this check and the
+        # syscall. The check prevents signaling identities already observed as
+        # replacements, but does not claim to close that kernel-level race.
         try:
             kill(pid, signal.SIGTERM)
         except OSError:
@@ -208,11 +250,16 @@ def stop_processes(members, kill=os.kill, sleep=time.sleep, proc_root=Path('/pro
     deadline = clock() + term_grace
     while remaining and clock() < deadline:
         sleep(POLL_SECONDS)
-        remaining = [(pid, proc) for pid, proc in remaining if alive(pid, proc)]
+        remaining = [candidate for candidate in remaining if alive(candidate)]
     # Re-read once before escalating: a zero grace period must not SIGKILL a
-    # process that already exited on SIGTERM.
-    remaining = [(pid, proc) for pid, proc in remaining if alive(pid, proc)]
-    for pid in deepest_first(remaining, proc_root):
+    # process that already exited on SIGTERM. Identity checks also discard a
+    # PID that was reused during the grace period.
+    remaining = [candidate for candidate in remaining if alive(candidate)]
+    for candidate in deepest_first(remaining, proc_root):
+        pid = candidate[0]
+        if not alive(candidate):
+            continue
+        # The same non-atomic /proc-check-to-kill(2) gap applies to escalation.
         try:
             kill(pid, signal.SIGKILL)
         except OSError:
@@ -220,12 +267,10 @@ def stop_processes(members, kill=os.kill, sleep=time.sleep, proc_root=Path('/pro
     deadline = clock() + kill_grace
     while remaining and clock() < deadline:
         sleep(POLL_SECONDS)
-        remaining = [(pid, proc) for pid, proc in remaining
-                     if process_info(proc) is not None]
+        remaining = [candidate for candidate in remaining if present(candidate)]
     # Re-read once even when a grace period is zero, so the caller never gets a
     # stale "still running" answer for a process that SIGKILL already removed.
-    return [(pid, proc) for pid, proc in remaining
-            if process_info(proc) is not None]
+    return [candidate for candidate in remaining if present(candidate)]
 
 
 def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.run,
@@ -245,8 +290,8 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
         deadline = clock() + term_grace
         while members and clock() < deadline:
             sleep(POLL_SECONDS)
-            members = [(pid, proc) for pid, proc in members
-                       if process_info(proc) is not None]
+            members = [candidate for candidate in members
+                       if candidate_info(candidate) is not None]
     if not members:
         members = prefix_only(prefix, proc_root)
     if not members:
@@ -258,7 +303,7 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
                                kill_grace=kill_grace, clock=clock)
     if remaining:
         details = []
-        for pid, proc in remaining:
+        for pid, proc, _start_ticks in remaining:
             info = wrapper(proc, proc_root)
             details.append('%d (%s, %s)' % (pid, info[1] if info else '?',
                                             info[0] if info else '?'))
