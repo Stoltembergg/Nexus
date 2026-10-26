@@ -3,7 +3,9 @@
 
 True means a client window exists (including minimized or off-workspace), False
 means a valid inventory contained none, and None means the state is unknown.
-A caller must never treat None as permission to stop a session.
+A caller must never treat None as permission to stop a session. Niri is queried
+natively; other Wayland compositors use Xwayland only when DISPLAY is set.
+Native Wayland without Xwayland remains unknown.
 """
 import json
 import os
@@ -23,7 +25,9 @@ def backend(environ=None):
     desktops = re.split(r'[:;]', env.get('XDG_CURRENT_DESKTOP', '').lower())
     if env.get('NIRI_SOCKET') or 'niri' in desktops:
         return 'niri'
-    if env.get('WAYLAND_DISPLAY') or env.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+    wayland = (env.get('WAYLAND_DISPLAY') or
+               env.get('XDG_SESSION_TYPE', '').lower() == 'wayland')
+    if wayland and not env.get('DISPLAY'):
         return 'unsupported-wayland'
     return 'x11'
 

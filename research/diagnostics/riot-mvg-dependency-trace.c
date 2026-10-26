@@ -1,4 +1,17 @@
-/* Optional diagnostics: preserve every API result and log no buffer contents. */
+/*
+ * !!! DIAGNOSTIC ONLY - NEVER USE WITH A REAL OR MAIN ACCOUNT !!!
+ * !!! NEVER RUN WITH THE GAME CONNECTED TO LIVE RIOT SERVERS  !!!
+ *
+ * Optional research diagnostic: it uses __DATA,__interpose to observe (never
+ * alter) API results seen by mvg.framework. Interposing code into a Riot
+ * process is exactly what an anti-cheat treats as a third-party tool, so this
+ * file lives in research/diagnostics/, is not copied by scripts/configure.py,
+ * and no installer, launcher or build script loads it.
+ *
+ * Runtime guard: unless NEXUS_DIAG_ALLOW_INTERPOSE=1 is set, every wrapper is
+ * a pure pass-through that logs nothing, and a refusal is written to stderr.
+ * Preserves every API result and logs no buffer contents.
+ */
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/SecStaticCode.h>
 #include <Security/SecCode.h>
@@ -11,11 +24,25 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 extern int csops(pid_t, unsigned int, void *, size_t);
 extern int proc_pidinfo(int, int, uint64_t, void *, int);
 extern int proc_pidfdinfo(int, int, int, void *, int);
+
+static int diag_allowed = 0;
+
+__attribute__((constructor))
+static void diag_guard(void) {
+    const char *allow = getenv("NEXUS_DIAG_ALLOW_INTERPOSE");
+    diag_allowed = allow && strcmp(allow, "1") == 0;
+    if (!diag_allowed) {
+        static const char msg[] = "riot-mvg-dependency-trace: refused; diagnostic only, never with a real account "
+            "or live servers. Set NEXUS_DIAG_ALLOW_INTERPOSE=1 on a throwaway test setup to enable.\n";
+        write(2, msg, sizeof(msg) - 1);
+    }
+}
 
 static int is_mvg(void *caller) {
     Dl_info image;
@@ -39,7 +66,7 @@ static void report(const char *api, long result, int error, long operation, void
     static type trace_##name parameters { \
         type result = name arguments; int saved = errno; \
         static unsigned trace_count; \
-        if ((observe) && is_mvg(__builtin_return_address(0)) && __sync_fetch_and_add(&trace_count, 1) < 200) \
+        if (diag_allowed && (observe) && is_mvg(__builtin_return_address(0)) && __sync_fetch_and_add(&trace_count, 1) < 200) \
             report(#name, (long)result, saved, operation, __builtin_return_address(0)); \
         errno = saved; return result; \
     } \

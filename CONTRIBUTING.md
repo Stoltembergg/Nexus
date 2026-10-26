@@ -65,3 +65,24 @@ the pull request.
   for at least one release.
 
 This is not legal advice. See [`docs/INTEROPERABILITY.md`](docs/INTEROPERABILITY.md).
+
+## Mudanças no que o Darling informa sobre a máquina ou carrega nos processos da Riot
+
+- Nenhuma mudança no que o Darling informa sobre a máquina (identidade de
+  hardware, CPU, GPU, estado de assinatura/SIP/AMFI etc.) é mergeada sem antes
+  ser comparada com a saída do probe neutro em um Mac real e no Darling no
+  Linux. O PR deve incluir essa comparação.
+- O probe fica em [`tools/compat-probe/`](tools/compat-probe/README.md), que
+  explica como compilar e capturar. Rode o mesmo binário no Mac e no Darling e
+  compare as duas saídas com:
+
+  ```sh
+  python3 tools/compat-probe/compare_probe.py macos.json darling.json
+  ```
+
+  Cole o resultado no PR. Antes de compartilhar uma captura, confira que ela
+  não tem dados pessoais.
+- A mesma regra vale para mudanças no que é carregado nos processos da Riot:
+  bibliotecas e frameworks carregados, de onde vêm e o conteúdo das variáveis
+  `DYLD_*`.
+- O projeto nunca falsifica hardware nem esconde o Darling do anti-cheat.

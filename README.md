@@ -1,5 +1,12 @@
 # darling-lol
 
+> [!CAUTION]
+> **⚠️ Risco de banimento / Ban risk**
+>
+> **PT-BR:** Hoje, usar este projeto pode levar a suspensões de **3 a 14 dias** por `UNSUPPORTED_THIRD_PARTY_TOOLS`. A punição é na conta, chega com cerca de **48 h de atraso** (jogar algumas partidas sem ban não prova nada). **Não use sua conta principal.** Não há nenhuma garantia de segurança. Este aviso permanece até uma conta de teste passar bem além de 48 h sem punição.
+>
+> **EN:** Using this project currently can lead to **3–14 day** suspensions for `UNSUPPORTED_THIRD_PARTY_TOOLS`. The penalty is account-level and arrives about **48 h later** (a few games without a ban prove nothing). **Do not use your main account.** There is no guarantee of safety. This warning stays until a test account passes well beyond 48 h without punishment.
+
 > [!IMPORTANT]
 > ## Announcement
 >
@@ -44,6 +51,11 @@ Game files, Riot installers, account databases, tokens, local prefixes, captures
 - Git + Git LFS, Bash, curl, unzip, CMake, Make, Clang/LLD, LLVM development files, a C/C++ compiler, Python 3.12+ and the Darling build dependencies. The patch includes LLVM 22/23 branch-opcode compatibility; the new PC used LLVM/Clang 23. Node.js is needed only for the offline JavaScript checks.
 - X11/XCB/SHM development files for the current runtime helpers.
 - Enough free disk for Darling sources/build, Git LFS assets and the game: budget at least 50 GB. Building is substantially larger than this source-only repository.
+
+Runtime installation/update safety checks use Niri's native window inventory,
+or `xprop` through X11/Xwayland when `DISPLAY` is set (including Hyprland with
+working Xwayland). Non-Niri native Wayland without Xwayland remains blocked;
+there is no safety-check override.
 
 Use the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff) for your distribution. `tools/env-check.sh` provides a starting check; its legacy package names may need adapting to your distro.
 
