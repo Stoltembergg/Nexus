@@ -216,12 +216,27 @@ int main(void) {
     value=0x100; assert(sys_csrctl(0,&value,4)==-EPERM);
     assert(sys_csrctl(99,&value,4)==-ENOSYS);
     struct { unsigned char hash[20]; uint64_t result; } query={{0},123};
-    assert(sys___mac_syscall("AMFI",95,&query)==-ENOTSUP && query.result==0);
+    struct {
+        unsigned char before[4];
+        struct { unsigned char hash[20]; uint64_t result; } query;
+        unsigned char after[4];
+    } guarded;
+    memset(&guarded,0xa5,sizeof(guarded)); guarded.query.result=123;
+    assert(sys___mac_syscall("AMFI",95,&guarded.query)==-ENOTSUP && guarded.query.result==0);
+    for (int i=0;i<4;i++) {
+        assert(guarded.before[i]==0xa5 && guarded.after[i]==0xa5);
+    }
+    for (int i=0;i<20;i++) {
+        assert(guarded.query.hash[i]==0xa5);
+    }
+    query.result=123;
+    assert(sys___mac_syscall("AMFI",94,&query)==-ENOTSUP && query.result==123);
     assert(sys___mac_syscall("AMFI",95,NULL)==-EFAULT);
     assert(sys___mac_syscall("AMFI",95,(void*)1)==-EFAULT);
     assert(sys___mac_syscall((void*)1,1,NULL)==-EFAULT);
     assert(sys___mac_syscall("AMFI",1,NULL)==-ENOTSUP);
     assert(sys___mac_syscall("unknown",1,NULL)==-ENOSYS);
+    assert(sys___mac_syscall("Seatbelt",95,&query)==0 && query.result==123);
     assert(sys___mac_syscall("Seatbelt",1,NULL)==0); // legacy compatibility, not enforcement
 }
 ''')
