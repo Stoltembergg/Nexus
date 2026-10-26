@@ -17,15 +17,16 @@ next launcher run can reuse the runtime. It never patches files or the game.
 
 import math
 import os
-import re
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from client_window_state import client_windows_present
+
 GAME_NAME = 'LeagueofLegends'
-WINDOW_CLASSES = ('leagueclientux', 'riot client', 'riotclientservices')
 MIN_AGE_SECONDS = 60
 CLIENT_MARKERS = (
     '/Applications/League of Legends.app',
@@ -101,43 +102,37 @@ def server_running(proc_root=Path('/proc')):
 
 
 def game_running(proc_root=Path('/proc')):
-    for proc in proc_root.iterdir() if proc_root.exists() else ():
+    # Inconclusive process state must block recovery, not authorize signals.
+    try:
+        processes = list(proc_root.iterdir())
+    except OSError:
+        return True
+    for proc in processes:
         if not proc.name.isdigit():
             continue
+        try:
+            if proc.stat().st_uid != os.getuid():
+                continue
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if process_state(proc) == 'Z':
+            continue
         names = command_names(proc)
+        if not names and proc.exists():
+            return True
         if GAME_NAME in names:
             return True
     return False
 
 
 def visible_client_window():
-    """Return True when a managed client window is present.
+    """Protect every client window, not only windows on the focused workspace.
 
-    A missing xprop/property or display is treated as 'cannot prove there is no
-    window' so we do not kill a possibly working client. xprop exits zero and
-    prints "not found" for a property the window manager did not set.
+    Unknown compositor state also returns True: recovery must fail closed.
     """
-    try:
-        listing = subprocess.check_output(
-            ['xprop', '-root', '_NET_CLIENT_LIST'], text=True, timeout=5
-        )
-    except (OSError, subprocess.SubprocessError):
-        return True
-    lowered = listing.lower()
-    if '_net_client_list' not in lowered or 'not found' in lowered:
-        return True
-    for raw in re.findall(r'0x[0-9a-fA-F]+', listing):
-        try:
-            classes = subprocess.check_output(
-                ['xprop', '-id', raw, 'WM_CLASS'], text=True, timeout=5
-            ).lower()
-        except (OSError, subprocess.SubprocessError):
-            return True
-        if 'not found' in classes or '=' not in classes:
-            return True
-        if any(name in classes for name in WINDOW_CLASSES):
-            return True
-    return False
+    return client_windows_present(check_output=subprocess.check_output) is not False
 
 
 def client_identity(prefix, pid, proc_root=Path('/proc')):
@@ -219,14 +214,17 @@ def termination_order(identities, proc_root=Path('/proc')):
     return sorted(identities, key=lambda pid: (-depth[pid], pid))
 
 
-def _signal_tree(prefix, identities, order, signum, kill, proc_root):
+def _signal_tree(prefix, identities, order, signum, kill, proc_root, stop_check):
     for pid in order:
+        if stop_check():
+            return False
         if client_identity(prefix, pid, proc_root) != identities[pid]:
             continue
         try:
             kill(pid, signum)
         except OSError:
             pass
+    return True
 
 
 def wait_for_exit(prefix, identities, proc_root=Path('/proc'), sleep=time.sleep,
@@ -258,7 +256,7 @@ def recover(prefix, proc_root=Path('/proc'), window_check=visible_client_window,
     if game_running(proc_root):
         print('recover-stale-client: game running; no action', file=out, flush=True)
         return 0
-    if window_check():
+    if window_check() is not False:
         print('recover-stale-client: client window present; no action', file=out, flush=True)
         return 0
     identities = {}
@@ -269,15 +267,21 @@ def recover(prefix, proc_root=Path('/proc'), window_check=visible_client_window,
     if not identities:
         print('recover-stale-client: no stale client processes; no action', file=out, flush=True)
         return 0
-    if window_check():
+    if window_check() is not False:
         print('recover-stale-client: client window appeared; no action', file=out, flush=True)
         return 0
     print('recover-stale-client: stale client tree without a window; '
           'terminating %d process(es)' % len(identities), file=out, flush=True)
     order = termination_order(identities, proc_root)
-    _signal_tree(prefix, identities, order, signal.SIGTERM, kill, proc_root)
+    def stop_check():
+        return game_running(proc_root) or window_check() is not False
+    if not _signal_tree(prefix, identities, order, signal.SIGTERM, kill, proc_root, stop_check):
+        print('recover-stale-client: game/window present or state unknown; stopping recovery', file=out, flush=True)
+        return 0
     sleep(4)
-    _signal_tree(prefix, identities, order, signal.SIGKILL, kill, proc_root)
+    if not _signal_tree(prefix, identities, order, signal.SIGKILL, kill, proc_root, stop_check):
+        print('recover-stale-client: game/window present or state unknown; stopping recovery', file=out, flush=True)
+        return 0
     leftovers = wait_for_exit(prefix, identities, proc_root, sleep)
     if leftovers:
         details = [

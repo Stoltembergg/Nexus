@@ -1,0 +1,117 @@
+diff --git a/patches/darling.patch b/patches/darling.patch
+--- a/patches/darling.patch
++++ b/patches/darling.patch
+@@ -11729,7 +11729,7 @@ new file mode 100644
+ index 00000000..d075704b
+ --- /dev/null
+ +++ b/src/startup/mldr/dc_codesign.c
+-@@ -0,0 +1,595 @@
++@@ -0,0 +1,600 @@
+ +/*
+ + * dc_codesign.c - bounded Mach-O code signature parser.
+ + *
+@@ -11934,15 +11934,17 @@ index 00000000..d075704b
+ +	if (!in_range(img->size, header_size, sizeofcmds))
+ +		return fail(err, errlen, "sizeofcmds runs past end of file");
+ +
+++	uint64_t commands_end = header_size + (uint64_t)sizeofcmds;
+++
+ +	p = header_size;
+ +	for (uint32_t i = 0; i < ncmds; i++) {
+-+		if (!in_range(img->size, p, 8))
+++		if (!in_range(commands_end, p, 8))
+ +			return fail(err, errlen, "load command header out of range");
+ +
+ +		uint32_t cmd = rd32(img, img->data + p);
+ +		uint32_t cmdsize = rd32(img, img->data + p + 4);
+ +
+-+		if (cmdsize < 8 || !in_range(img->size, p, cmdsize))
+++		if (cmdsize < 8 || !in_range(commands_end, p, cmdsize))
+ +			return fail(err, errlen, "bad load command size %u", cmdsize);
+ +
+ +		if (cmd == DC_LC_CODE_SIGNATURE) {
+@@ -11955,6 +11957,9 @@ index 00000000..d075704b
+ +		p += cmdsize;
+ +	}
+ +
+++	if (p != commands_end)
+++		return fail(err, errlen, "load commands do not fill sizeofcmds");
+++
+ +	if (!found)
+ +		return fail(err, errlen, "no LC_CODE_SIGNATURE (unsigned image)");
+ +	if (found > 1)
+diff --git a/patches/darlingserver.patch b/patches/darlingserver.patch
+--- a/patches/darlingserver.patch
++++ b/patches/darlingserver.patch
+@@ -4106,7 +4106,7 @@ new file mode 100644
+ index 0000000..d075704
+ --- /dev/null
+ +++ b/src/dc_codesign.c
+-@@ -0,0 +1,595 @@
++@@ -0,0 +1,600 @@
+ +/*
+ + * dc_codesign.c - bounded Mach-O code signature parser.
+ + *
+@@ -4311,15 +4311,17 @@ index 0000000..d075704
+ +	if (!in_range(img->size, header_size, sizeofcmds))
+ +		return fail(err, errlen, "sizeofcmds runs past end of file");
+ +
+++	uint64_t commands_end = header_size + (uint64_t)sizeofcmds;
+++
+ +	p = header_size;
+ +	for (uint32_t i = 0; i < ncmds; i++) {
+-+		if (!in_range(img->size, p, 8))
+++		if (!in_range(commands_end, p, 8))
+ +			return fail(err, errlen, "load command header out of range");
+ +
+ +		uint32_t cmd = rd32(img, img->data + p);
+ +		uint32_t cmdsize = rd32(img, img->data + p + 4);
+ +
+-+		if (cmdsize < 8 || !in_range(img->size, p, cmdsize))
+++		if (cmdsize < 8 || !in_range(commands_end, p, cmdsize))
+ +			return fail(err, errlen, "bad load command size %u", cmdsize);
+ +
+ +		if (cmd == DC_LC_CODE_SIGNATURE) {
+@@ -4332,6 +4334,9 @@ index 0000000..d075704
+ +		p += cmdsize;
+ +	}
+ +
+++	if (p != commands_end)
+++		return fail(err, errlen, "load commands do not fill sizeofcmds");
+++
+ +	if (!found)
+ +		return fail(err, errlen, "no LC_CODE_SIGNATURE (unsigned image)");
+ +	if (found > 1)
+diff --git a/tools/dc-codesign/dc_codesign.c b/tools/dc-codesign/dc_codesign.c
+--- a/tools/dc-codesign/dc_codesign.c
++++ b/tools/dc-codesign/dc_codesign.c
+@@ -202,15 +202,17 @@ static int find_signature(struct dc_image *img, uint64_t *off, uint64_t *len,
+ 	if (!in_range(img->size, header_size, sizeofcmds))
+ 		return fail(err, errlen, "sizeofcmds runs past end of file");
+ 
++	uint64_t commands_end = header_size + (uint64_t)sizeofcmds;
++
+ 	p = header_size;
+ 	for (uint32_t i = 0; i < ncmds; i++) {
+-		if (!in_range(img->size, p, 8))
++		if (!in_range(commands_end, p, 8))
+ 			return fail(err, errlen, "load command header out of range");
+ 
+ 		uint32_t cmd = rd32(img, img->data + p);
+ 		uint32_t cmdsize = rd32(img, img->data + p + 4);
+ 
+-		if (cmdsize < 8 || !in_range(img->size, p, cmdsize))
++		if (cmdsize < 8 || !in_range(commands_end, p, cmdsize))
+ 			return fail(err, errlen, "bad load command size %u", cmdsize);
+ 
+ 		if (cmd == DC_LC_CODE_SIGNATURE) {
+@@ -223,6 +225,9 @@ static int find_signature(struct dc_image *img, uint64_t *off, uint64_t *len,
+ 		p += cmdsize;
+ 	}
+ 
++	if (p != commands_end)
++		return fail(err, errlen, "load commands do not fill sizeofcmds");
++
+ 	if (!found)
+ 		return fail(err, errlen, "no LC_CODE_SIGNATURE (unsigned image)");
+ 	if (found > 1)
