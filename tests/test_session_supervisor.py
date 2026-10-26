@@ -1353,7 +1353,7 @@ class MatchProtectionTests(unittest.TestCase):
         self.addCleanup(setattr, supervisor, 'cleanup', previous)
         code = supervisor.run_supervised(
             ['true'], self.prefix, None, proc_root=self.proc, poll=0,
-            run=lambda *_a, **_k: None, kill=lambda *_a: None, sleep=sleep, out=output)
+            run=lambda *_a, **_k: None, sleep=sleep, out=output)
         self.assertEqual(code, 0)
         self.assertEqual(order, ['game ended', 'cleanup'])
         self.assertIn('waiting for the game to end', output.getvalue())
