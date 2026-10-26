@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -79,6 +80,20 @@ class AttributionTests(unittest.TestCase):
                             environ=b'__mldr_sockpath=/elsewhere/.darlingserver.sock\0')
         self.assertFalse(supervisor.owned_by_prefix(proc, self.prefix.resolve()))
 
+    def test_relative_socket_path_is_not_attributed(self):
+        proc = self.process(10, comm='RiotClientServices',
+                            environ=b'__mldr_sockpath=.darlingserver.sock\0')
+        self.assertIsNone(supervisor.socket_prefix(proc))
+        self.assertFalse(supervisor.owned_by_prefix(proc, self.prefix.resolve()))
+
+    def test_duplicate_socket_markers_are_not_attributed(self):
+        proc = self.process(
+            10, comm='RiotClientServices',
+            environ=(b'__mldr_sockpath=%s\0__mldr_sockpath=/elsewhere/.darlingserver.sock\0'
+                     % os.fsencode(self.socket)))
+        self.assertIsNone(supervisor.socket_prefix(proc))
+        self.assertFalse(supervisor.owned_by_prefix(proc, self.prefix.resolve()))
+
     def test_own_namespace_is_refused(self):
         proc = self.process(10)
         self.assertEqual(
@@ -120,6 +135,137 @@ class AttributionTests(unittest.TestCase):
         other.mkdir()
         self.assertFalse(supervisor.game_running(other, self.root))
 
+    def game_process(self, environ=None, state='S'):
+        proc = self.process(10, comm='LeagueofLegends', environ=environ, state=state)
+        (proc / 'cmdline').write_bytes(b'/Applications/LeagueofLegends\0')
+        return proc
+
+    def test_unreadable_game_command_is_unknown(self):
+        self.game_process()
+        with patch.object(supervisor, '_read_command', return_value=None):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_unreadable_game_ownership_is_unknown(self):
+        self.game_process()
+        with patch.object(supervisor, '_read_environ', return_value=None):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_relative_game_socket_path_is_unknown_and_blocks_stop(self):
+        self.game_process(b'__mldr_sockpath=.darlingserver.sock\0')
+        self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+        self.assertFalse(supervisor.safe_to_stop(
+            self.prefix, self.root, window_probe=lambda: False))
+
+    def test_game_command_change_during_inspection_is_unknown(self):
+        proc = self.game_process(
+            b'__mldr_sockpath=%s\0' % os.fsencode(self.socket))
+        original = supervisor._read_command
+        reads = [original(proc), b'/Applications/Other\0']
+        with patch.object(supervisor, '_read_command', side_effect=reads):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_game_ownership_change_during_inspection_is_unknown(self):
+        self.game_process(b'__mldr_sockpath=%s\0' % os.fsencode(self.socket))
+        with patch.object(supervisor, '_read_environ', side_effect=[
+                b'__mldr_sockpath=%s\0' % os.fsencode(self.socket),
+                b'__mldr_sockpath=/elsewhere/.darlingserver.sock\0']):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_game_identity_change_during_inspection_is_unknown(self):
+        proc = self.game_process(
+            b'__mldr_sockpath=%s\0' % os.fsencode(self.socket))
+        original = supervisor._read_environ
+        changed = [False]
+
+        def read_environ(candidate):
+            if candidate == proc and not changed[0]:
+                changed[0] = True
+                set_start_ticks(proc, 200)
+            return original(candidate)
+
+        with patch.object(supervisor, '_read_environ', side_effect=read_environ):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_disappearing_game_process_is_ignored(self):
+        import shutil
+        proc = self.game_process()
+        original = supervisor._read_command
+
+        def read_then_disappear(candidate):
+            result = original(candidate)
+            shutil.rmtree(proc)
+            return result
+
+        with patch.object(supervisor, '_read_command', side_effect=read_then_disappear):
+            self.assertFalse(supervisor.game_running(self.prefix, self.root))
+
+    def test_zombie_game_process_is_ignored(self):
+        self.game_process(state='Z')
+        self.assertFalse(supervisor.game_running(self.prefix, self.root))
+
+    def test_unrelated_unreadable_environment_does_not_poison_probe(self):
+        self.process(10, comm='mldr', environ=None)
+        self.assertFalse(supervisor.game_running(self.prefix, self.root))
+
+    def test_live_mldr_with_empty_command_is_unknown(self):
+        proc = self.process(10, comm='mldr', environ=None)
+        (proc / 'cmdline').write_bytes(b'')
+        self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_live_mldr_with_all_nul_command_is_unknown(self):
+        proc = self.process(10, comm='mldr', environ=None)
+        (proc / 'cmdline').write_bytes(b'\0\0\0')
+        self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def unrelated_process(self):
+        proc = self.process(10, comm='python', environ=None)
+        (proc / 'cmdline').write_bytes(b'python\0')
+        return proc
+
+    def test_unrelated_command_change_during_scan_is_unknown(self):
+        proc = self.unrelated_process()
+        reads = iter((b'python\0', b'/Applications/LeagueofLegends\0'))
+        with patch.object(supervisor, '_read_command', side_effect=lambda _proc: next(reads)), \
+                patch.object(supervisor, '_read_environ',
+                             side_effect=AssertionError('unrelated environ was inspected')):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_unrelated_start_identity_change_during_scan_is_unknown(self):
+        proc = self.unrelated_process()
+        original = supervisor._read_command
+        calls = [0]
+
+        def read_command(candidate):
+            calls[0] += 1
+            if calls[0] == 2:
+                set_start_ticks(proc, 200)
+            return original(candidate)
+
+        with patch.object(supervisor, '_read_command', side_effect=read_command):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_unrelated_comm_change_during_scan_is_unknown(self):
+        proc = self.unrelated_process()
+        original = supervisor._read_command
+        calls = [0]
+
+        def read_command(candidate):
+            calls[0] += 1
+            if calls[0] == 2:
+                stat = (proc / 'stat').read_text().replace('(python)', '(LeagueofLegends)')
+                (proc / 'stat').write_text(stat)
+            return original(candidate)
+
+        with patch.object(supervisor, '_read_command', side_effect=read_command):
+            self.assertIsNone(supervisor.game_running(self.prefix, self.root))
+
+    def test_proc_enumeration_error_is_unknown(self):
+        class BrokenProcRoot:
+            def iterdir(self):
+                raise PermissionError('synthetic procfs failure')
+
+        self.assertIsNone(supervisor.game_running(self.prefix, BrokenProcRoot()))
+
 
 class CleanupTests(unittest.TestCase):
     def setUp(self):
@@ -152,7 +298,8 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.cleanup(
             self.prefix, '/usr/bin/darling', self.ns, proc_root=self.root,
             run=run, kill=kill, sleep=lambda _seconds: None, out=self.output,
-            own_namespace=self.own, term_grace=0, kill_grace=0)
+            own_namespace=self.own, term_grace=0, kill_grace=0,
+            safety_check=lambda: True)
         self.assertEqual(remaining, [])
         self.assertEqual(calls, [['/usr/bin/darling', 'shutdown']])
         # Deepest process first: the child (11) before its parent (10).
@@ -166,7 +313,8 @@ class CleanupTests(unittest.TestCase):
             self.prefix, '/usr/bin/darling', None, proc_root=self.root,
             run=lambda *_a, **_k: self.fail('must not run darling shutdown'),
             kill=lambda *_a: self.fail('must not kill'), sleep=lambda _s: None,
-            out=output, own_namespace=self.own, term_grace=0, kill_grace=0)
+            out=output, own_namespace=self.own, term_grace=0, kill_grace=0,
+            safety_check=lambda: True)
         self.assertEqual(remaining, [])
         self.assertIn('gone', output.getvalue())
 
@@ -176,9 +324,61 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.cleanup(
             self.prefix, None, self.ns, proc_root=self.root,
             run=lambda *_a, **_k: None, kill=lambda *_a: None,
-            sleep=lambda _s: None, out=output, own_namespace=self.own, term_grace=0, kill_grace=0)
+            sleep=lambda _s: None, out=output, own_namespace=self.own, term_grace=0,
+            kill_grace=0, safety_check=lambda: True)
         self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
         self.assertIn('still present: 10', output.getvalue())
+
+    def test_cleanup_vetoes_before_darling_shutdown(self):
+        self.process(10)
+        shutdown = []
+        remaining = supervisor.cleanup(
+            self.prefix, '/usr/bin/darling', self.ns, proc_root=self.root,
+            run=lambda command, **_kwargs: shutdown.append(command),
+            kill=lambda *_args: self.fail('must not signal guest'),
+            sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
+            safety_check=lambda: False)
+        self.assertIsNone(remaining)
+        self.assertEqual(shutdown, [])
+
+    def test_state_change_before_shutdown_vetoes_cleanup(self):
+        self.process(10)
+        checks = iter((True, False))
+        shutdown = []
+        remaining = supervisor.cleanup(
+            self.prefix, '/usr/bin/darling', self.ns, proc_root=self.root,
+            run=lambda command, **_kwargs: shutdown.append(command),
+            kill=lambda *_args: self.fail('must not signal guest'),
+            sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
+            safety_check=lambda: next(checks))
+        self.assertIsNone(remaining)
+        self.assertEqual(shutdown, [])
+
+    def test_state_change_before_guest_term_vetoes_cleanup(self):
+        self.process(10)
+        checks = iter((True, False))
+        signals = []
+        remaining = supervisor.cleanup(
+            self.prefix, None, self.ns, proc_root=self.root,
+            run=lambda *_args, **_kwargs: self.fail('must not shut down'),
+            kill=lambda pid, sig: signals.append((pid, sig)),
+            sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
+            term_grace=0, kill_grace=0, safety_check=lambda: next(checks))
+        self.assertIsNone(remaining)
+        self.assertEqual(signals, [])
+
+    def test_state_change_before_guest_kill_aborts_remaining_cleanup(self):
+        self.process(10)
+        checks = iter((True, True, True, False))
+        signals = []
+        remaining = supervisor.cleanup(
+            self.prefix, None, self.ns, proc_root=self.root,
+            run=lambda *_args, **_kwargs: self.fail('must not shut down'),
+            kill=lambda pid, sig: signals.append((pid, sig)),
+            sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
+            term_grace=0, kill_grace=0, safety_check=lambda: next(checks))
+        self.assertIsNone(remaining)
+        self.assertEqual(signals, [(10, signal.SIGTERM)])
 
     def test_reused_pid_after_snapshot_is_not_signaled(self):
         proc = self.process(10)
@@ -189,7 +389,7 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.stop_processes(
             members, kill=lambda pid, sig: signals.append((pid, sig)),
             sleep=lambda _seconds: None, proc_root=self.root,
-            term_grace=0, kill_grace=0)
+            term_grace=0, kill_grace=0, safety_check=lambda: True)
         self.assertEqual(signals, [])
         self.assertEqual(remaining, [])
 
@@ -205,7 +405,8 @@ class CleanupTests(unittest.TestCase):
 
         remaining = supervisor.stop_processes(
             members, kill=kill, sleep=lambda _seconds: None,
-            proc_root=self.root, term_grace=0, kill_grace=0)
+            proc_root=self.root, term_grace=0, kill_grace=0,
+            safety_check=lambda: True)
         self.assertEqual(signals, [(10, signal.SIGTERM)])
         self.assertEqual(remaining, [])
 
@@ -222,7 +423,7 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.stop_processes(
             members, kill=lambda pid, sig: signals.append((pid, sig)),
             sleep=sleep, proc_root=self.root, term_grace=1, kill_grace=0,
-            clock=lambda: now[0])
+            clock=lambda: now[0], safety_check=lambda: True)
         self.assertEqual(signals, [(10, signal.SIGTERM)])
         self.assertEqual(remaining, [])
 
@@ -239,7 +440,7 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.stop_processes(
             members, kill=lambda pid, sig: signals.append((pid, sig)),
             sleep=sleep, proc_root=self.root, term_grace=0, kill_grace=1,
-            clock=lambda: now[0])
+            clock=lambda: now[0], safety_check=lambda: True)
         self.assertEqual(signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
         self.assertEqual(remaining, [])
 
@@ -251,7 +452,7 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.stop_processes(
             members, kill=lambda pid, sig: signals.append((pid, sig)),
             sleep=lambda _seconds: None, proc_root=self.root,
-            term_grace=0, kill_grace=0)
+            term_grace=0, kill_grace=0, safety_check=lambda: True)
         self.assertEqual(signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
         self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
 
@@ -313,7 +514,7 @@ class SupervisorModeTests(unittest.TestCase):
         code = supervisor.run_supervised(
             ['true'], self.prefix, None, proc_root=self.proc, poll=0,
             run=lambda *_a, **_k: None, kill=lambda *_a: None,
-            sleep=lambda _s: None, out=output)
+            sleep=lambda _s: None, out=output, window_probe=lambda: False)
         self.assertEqual(code, 0)
         return output.getvalue()
 
@@ -357,6 +558,322 @@ class ExitStatusTests(unittest.TestCase):
 
     def test_a_failed_child_stays_failed_with_survivors(self):
         self.assertEqual(self.run_supervisor(['sh', '-c', 'exit 3'], [1234]), 3)
+
+
+class SafetyMatrixTests(unittest.TestCase):
+    def test_stop_requires_both_probes_to_be_explicitly_false(self):
+        for game in (False, True, None):
+            for windows in (False, True, None):
+                with self.subTest(game=game, windows=windows), \
+                        patch.object(supervisor, 'game_running', return_value=game), \
+                        patch.object(supervisor, 'client_windows_present',
+                                     return_value=windows):
+                    self.assertEqual(
+                        supervisor.safe_to_stop(Path('/prefix'), Path('/proc')),
+                        game is False and windows is False)
+
+
+class FakeChild:
+    def __init__(self, pid=12345):
+        self.pid = pid
+        self.live = True
+        self.status = -signal.SIGTERM
+        self.wait_calls = 0
+
+    def poll(self):
+        return None if self.live else self.status
+
+    def wait(self):
+        self.wait_calls += 1
+        return self.status
+
+
+class SupervisedSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prefix = self.root / '.darling'
+        self.prefix.mkdir()
+        self.proc = self.root / 'proc'
+        self.proc.mkdir()
+
+    def run_fake(self, child, **kwargs):
+        handlers = {}
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        defaults = dict(
+            proc_root=self.proc, poll=0, popen=lambda *_a, **_k: child,
+            register_signal=register, window_probe=lambda: False,
+            sleep=lambda _seconds: None, out=io.StringIO())
+        defaults.update(kwargs)
+        code = supervisor.run_supervised(['fixture'], self.prefix, None, **defaults)
+        return code, handlers
+
+    def test_signal_handler_only_records_first_signal(self):
+        child = FakeChild()
+        group_signals = []
+        observed_in_handler = []
+        calls = [0]
+        handlers = {}
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        def killpg(pid, signum):
+            group_signals.append((pid, signum))
+            child.status = -signum
+            child.live = False
+
+        def sleep(_seconds):
+            calls[0] += 1
+            if calls[0] == 1:
+                handler = handlers[signal.SIGTERM]
+                handler(signal.SIGTERM, None)
+                handler(signal.SIGINT, None)
+                observed_in_handler.append(list(group_signals))
+
+        with patch.object(supervisor, 'cleanup', return_value=[]), \
+                patch.object(supervisor, 'safe_to_stop', return_value=True):
+            code = supervisor.run_supervised(
+                ['fixture'], self.prefix, None, proc_root=self.proc, poll=0,
+                popen=lambda *_a, **_k: child, killpg=killpg,
+                register_signal=register, window_probe=lambda: False,
+                sleep=sleep, out=io.StringIO())
+        self.assertEqual(observed_in_handler, [[]])
+        self.assertEqual(group_signals, [(child.pid, signal.SIGTERM)])
+        self.assertEqual(code, 143)
+        self.assertEqual(child.wait_calls, 1)
+
+    def test_protected_signal_detaches_without_signal_wait_or_cleanup(self):
+        for signum, game, windows in (
+                (signal.SIGINT, True, False),
+                (signal.SIGTERM, False, True),
+                (signal.SIGTERM, None, False),
+                (signal.SIGTERM, False, None)):
+            with self.subTest(signum=signum, game=game, windows=windows):
+                child = FakeChild()
+                handlers = {}
+                group_signals = []
+
+                def register(sig, handler):
+                    if handler is not None:
+                        handlers[sig] = handler
+                    return None
+
+                def sleep(_seconds):
+                    handlers[signum](signum, None)
+
+                with patch.object(supervisor, 'game_running', return_value=game), \
+                        patch.object(supervisor, 'client_windows_present',
+                                     return_value=windows), \
+                        patch.object(supervisor, 'cleanup') as cleanup:
+                    code = supervisor.run_supervised(
+                        ['fixture'], self.prefix, None, proc_root=self.proc,
+                        popen=lambda *_a, **_k: child, killpg=lambda *args:
+                        group_signals.append(args), register_signal=register,
+                        sleep=sleep, poll=0, out=io.StringIO())
+                self.assertEqual(code, 128 + signum)
+                self.assertEqual(group_signals, [])
+                self.assertEqual(child.wait_calls, 0)
+                cleanup.assert_not_called()
+
+    def test_unowned_runtime_signal_detaches_without_actions(self):
+        child = FakeChild()
+        handlers = {}
+        group_signals = []
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        def sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with patch.object(supervisor, 'runtime_alive', return_value=True), \
+                patch.object(supervisor, 'cleanup') as cleanup, \
+                patch.object(supervisor, 'safe_to_stop', return_value=True):
+            code = supervisor.run_supervised(
+                ['fixture'], self.prefix, None, proc_root=self.proc,
+                popen=lambda *_a, **_k: child, killpg=lambda *args:
+                group_signals.append(args), register_signal=register,
+                sleep=sleep, poll=0, out=io.StringIO())
+        self.assertEqual(code, 143)
+        self.assertEqual(group_signals, [])
+        self.assertEqual(child.wait_calls, 0)
+        cleanup.assert_not_called()
+
+    def test_safe_signal_terms_then_rechecks_before_group_kill(self):
+        child = FakeChild()
+        group_signals = []
+        handlers = {}
+        ticks = [0]
+        sleeps = [0]
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        def sleep(_seconds):
+            sleeps[0] += 1
+            ticks[0] += 1
+            if sleeps[0] == 1:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        def killpg(pid, signum):
+            group_signals.append((pid, signum))
+            if signum == signal.SIGKILL:
+                child.status = -signal.SIGKILL
+                child.live = False
+
+        with patch.object(supervisor, 'cleanup', return_value=[]), \
+                patch.object(supervisor, 'safe_to_stop', side_effect=(True, True)), \
+                patch.object(supervisor, 'TERM_GRACE', 1.0):
+            code, _handlers = self.run_fake(
+                child, killpg=killpg, register_signal=register, sleep=sleep,
+                clock=lambda: ticks[0])
+        self.assertEqual(group_signals, [(child.pid, signal.SIGTERM),
+                                         (child.pid, signal.SIGKILL)])
+        self.assertEqual(code, 137)
+        self.assertEqual(child.wait_calls, 1)
+
+    def test_safety_veto_after_term_skips_kill_wait_and_cleanup(self):
+        child = FakeChild()
+        group_signals = []
+        handlers = {}
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        def sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with patch.object(supervisor, 'cleanup') as cleanup, \
+                patch.object(supervisor, 'safe_to_stop', side_effect=(True, False)), \
+                patch.object(supervisor, 'TERM_GRACE', 0):
+            code, _handlers = self.run_fake(
+                child, killpg=lambda pid, sig: group_signals.append((pid, sig)),
+                register_signal=register, sleep=sleep)
+        self.assertEqual(code, 143)
+        self.assertEqual(group_signals, [(child.pid, signal.SIGTERM)])
+        self.assertEqual(child.wait_calls, 0)
+        cleanup.assert_not_called()
+
+    def test_dead_group_leader_is_not_signaled(self):
+        child = FakeChild()
+        handlers = {}
+        group_signals = []
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        def sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        def safe_state(*_args):
+            child.live = False
+            child.status = 0
+            return True
+
+        with patch.object(supervisor, 'cleanup', return_value=[]), \
+                patch.object(supervisor, 'safe_to_stop', side_effect=safe_state):
+            code, _handlers = self.run_fake(
+                child, killpg=lambda pid, sig: group_signals.append((pid, sig)),
+                register_signal=register, sleep=sleep)
+        self.assertEqual(code, 0)
+        self.assertEqual(group_signals, [])
+        self.assertEqual(child.wait_calls, 1)
+
+    def test_dead_group_leader_is_not_escalated(self):
+        child = FakeChild()
+        handlers = {}
+        group_signals = []
+        checks = [0]
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        def sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        def safe_state(*_args):
+            checks[0] += 1
+            if checks[0] == 2:
+                child.live = False
+                child.status = 0
+            return True
+
+        with patch.object(supervisor, 'cleanup', return_value=[]), \
+                patch.object(supervisor, 'safe_to_stop', side_effect=safe_state), \
+                patch.object(supervisor, 'TERM_GRACE', 0):
+            code, _handlers = self.run_fake(
+                child, killpg=lambda pid, sig: group_signals.append((pid, sig)),
+                register_signal=register, sleep=sleep)
+        self.assertEqual(code, 0)
+        self.assertEqual(group_signals, [(child.pid, signal.SIGTERM)])
+        self.assertEqual(child.wait_calls, 1)
+
+    def test_idle_safety_veto_resets_timer_and_keeps_supervising(self):
+        child = FakeChild()
+        windows = iter((True, False, False, False))
+        sleeps = [0]
+        group_signals = []
+
+        def sleep(_seconds):
+            sleeps[0] += 1
+            if sleeps[0] == 4:
+                child.live = False
+                child.status = 0
+
+        with patch.object(supervisor, 'game_running', return_value=False), \
+                patch.object(supervisor, 'safe_to_stop', return_value=False) as safety, \
+                patch.object(supervisor, 'cleanup', return_value=[]):
+            code = supervisor.run_supervised(
+                ['fixture'], self.prefix, None, stop_after=1,
+                proc_root=self.proc, popen=lambda *_a, **_k: child,
+                window_probe=lambda: next(windows), killpg=lambda *args:
+                group_signals.append(args), sleep=sleep, poll=0,
+                clock=lambda: sleeps[0] * 10.0, out=io.StringIO())
+        self.assertEqual(code, 0)
+        self.assertEqual(group_signals, [])
+        safety.assert_called_once()
+
+    def test_idle_stop_is_disabled_for_unowned_runtime(self):
+        child = FakeChild()
+        sleeps = [0]
+        group_signals = []
+
+        def sleep(_seconds):
+            sleeps[0] += 1
+            if sleeps[0] == 2:
+                child.live = False
+                child.status = 0
+
+        with patch.object(supervisor, 'runtime_alive', return_value=True), \
+                patch.object(supervisor, 'cleanup') as cleanup:
+            code = supervisor.run_supervised(
+                ['fixture'], self.prefix, None, stop_after=1,
+                proc_root=self.proc, popen=lambda *_a, **_k: child,
+                window_probe=lambda: self.fail('unowned idle stop must be skipped'),
+                killpg=lambda *args: group_signals.append(args), sleep=sleep,
+                poll=0, out=io.StringIO())
+        self.assertEqual(code, 0)
+        self.assertEqual(group_signals, [])
+        cleanup.assert_not_called()
 
 
 class SignalEscalationTests(unittest.TestCase):
@@ -413,7 +930,8 @@ class SignalEscalationTests(unittest.TestCase):
             code = supervisor.run_supervised(
                 [sys.executable, str(self.script), str(self.pids)], self.prefix, None,
                 proc_root=self.proc, poll=0, run=lambda *_a, **_k: None,
-                kill=lambda *_a: None, sleep=lambda _s: time.sleep(0.01), out=output)
+                kill=lambda *_a: None, sleep=lambda _s: time.sleep(0.01), out=output,
+                window_probe=lambda: False)
         finally:
             thread.join(timeout=5)
         parent, worker = (int(part) for part in self.pids.read_text().split())
@@ -484,6 +1002,14 @@ class IdleDecisionTests(unittest.TestCase):
 
 
 class ManagedWindowTests(unittest.TestCase):
+    @staticmethod
+    def x11_environment():
+        return patch.dict(os.environ, {
+            'XDG_CURRENT_DESKTOP': 'GNOME',
+            'XDG_SESSION_TYPE': 'x11',
+            'DISPLAY': ':fixture',
+        }, clear=True)
+
     def test_client_class_is_detected(self):
         def run(command, **_kwargs):
             output = ('_NET_CLIENT_LIST(WINDOW): window id # 0x1' if '_NET_CLIENT_LIST' in command
@@ -493,7 +1019,8 @@ class ManagedWindowTests(unittest.TestCase):
                 stdout = output
             return Result()
 
-        self.assertTrue(supervisor.managed_client_window(run))
+        with self.x11_environment():
+            self.assertTrue(supervisor.managed_client_window(run))
 
     def test_missing_property_is_unknown(self):
         def run(_command, **_kwargs):
@@ -501,7 +1028,8 @@ class ManagedWindowTests(unittest.TestCase):
                 stdout = 'not found'
             return Result()
 
-        self.assertIsNone(supervisor.managed_client_window(run))
+        with self.x11_environment():
+            self.assertIsNone(supervisor.managed_client_window(run))
 
 
 if __name__ == '__main__':

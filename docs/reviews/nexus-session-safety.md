@@ -58,22 +58,41 @@ Unreadable owned process command lines prevent recovery. Existing prefix,
 age and process-start-identity checks remain in place. No default cleanup,
 idle shutdown, client launch or production runtime replacement is introduced.
 
+## PR #4 fail-closed follow-up
+
+The current draft follow-up routes the supervisor through the shared window
+inventory and requires both the game probe and window probe to return an
+explicit `False` before cleanup. Present or unknown state blocks shutdown. The
+same check is repeated before guest TERM/KILL and child-group signals; signal
+handlers only record the request, so active or indeterminate sessions are left
+running instead of being killed on Ctrl+C/SIGTERM. The game probe now treats
+unreadable or changing relevant `/proc` evidence as unknown. These paths have
+synthetic tests; they have not been exercised with Darling, Riot or a live game.
+
+This is a risk reduction, not a safety certificate. `owns_runtime` is still an
+observation rather than an exclusive ownership lease, and automatic cleanup is
+still enabled by default. A windowless client may be downloading or in another
+state the probes cannot distinguish from idle. Procfs/window checks and later
+signals are not atomic, so state may change in the remaining check-to-action
+gap. Do not infer Riot authorization or reduced account-penalty risk.
+
 Checks and signals are not atomic. These guards reduce races but do not prove
 that every possible concurrent startup is safe. Recovery stays opt-in and
 must not be invoked while queued, choosing champions or downloading work that
 must be preserved. Prefer restoring a minimized window over restarting it.
 
-## Supervisor acceptance criteria for a later change
+## Remaining supervisor acceptance criteria
 
-- Start disabled, with explicit ownership and opt-in activation.
-- Preserve a session on an ordinary secondary-loader exit.
-- Preserve games and clients on every workspace, including the iNiR stash.
-- Preserve a session when compositor/process state cannot be established.
-- Never infer permission to stop a download/champion selection from no windows.
-- Carry saved start identities from process discovery and revalidate them before
-  each signal; use pidfds if the final procfs-check-to-signal race must be closed.
-- Test concurrent starts, PID reuse, different prefixes, native Niri errors,
-  disappearing windows and a game starting before escalation.
+- Add an exclusive runtime ownership protocol and make automatic cleanup
+  explicitly opt-in.
+- Preserve sessions on ordinary secondary-loader exits; the gate must not turn
+  missing windows into evidence that a download/champion selection is idle.
+- Keep the shared Niri/X11 inventory and fail closed for unsupported or
+  incomplete compositor/process state.
+- Retain start-identity checks before each process signal; use pidfds if the
+  remaining procfs-check-to-signal race must be closed.
+- Test concurrent starts, different prefixes, native Niri errors, disappearing
+  windows, and a game appearing before each escalation step.
 - Do not enable live/account testing as part of CI or installation.
 
 The PID-reuse regression tests use fake `/proc` trees and mocked signals. The
