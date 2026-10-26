@@ -87,11 +87,13 @@ def prefix_destinations(config, binary, artifact):
     optimized relink from being silently replaced by the plain CMake build.
     """
     prefix, guest_home = runtime_paths(config)
-    destinations = [
-        guest_home / "RuntimeLibraries/libsystem_kernel.dylib",
-        # Keep the per-prefix bootstrap copy consistent; leave the system SDK alone.
-        prefix / "usr/lib/system/libsystem_kernel.dylib",
-    ]
+    # The kernel library lives once, in its system location in the prefix
+    # (tools/install-riot-system-libs.py); leave the system SDK alone. A prefix
+    # set up before that change still has a RuntimeLibraries copy: keep it in step.
+    destinations = [prefix / "usr/lib/system/libsystem_kernel.dylib"]
+    legacy = guest_home / "RuntimeLibraries/libsystem_kernel.dylib"
+    if legacy.is_file() and not legacy.is_symlink():
+        destinations.insert(0, legacy)
     if not artifact.exists():
         return destinations, "the prepared artifact " + str(artifact) + " does not exist yet"
     if Path(binary).resolve() != artifact.resolve():

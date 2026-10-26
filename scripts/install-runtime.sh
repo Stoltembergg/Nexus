@@ -45,6 +45,9 @@ if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
   sh build/runtime/tools/build-riot-libs-runtime.sh
   python3 build/runtime/tools/install-riot-libs-runtime.py
 fi
+# Move the corrected kernel, malloc, pthread, platform, objc and c++abi out of the
+# RuntimeLibraries override and into their real system locations in the prefix (one copy each).
+python3 build/runtime/tools/install-riot-system-libs.py
 python3 build/runtime/tools/install-darling-system-profiler.py
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
 python3 build/runtime/tools/validate-riot-runtime.py

@@ -16,8 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GUEST_VALIDATION_INPUTS = (
     'libDarlingXShm.dylib',
     *(f'RuntimeLibraries/{name}.dylib' for name in (
-        'libsystem_kernel', 'libsystem_c', 'libsystem_platform', 'libsystem_malloc',
-        'libsystem_pthread', 'libobjc.A', 'libc++abi', 'libc++.1',
+        'libsystem_c', 'libc++.1',
         'libGL', 'libindium', 'libiridium')),
     *(f'RuntimeFrameworks/{name}.framework/Versions/{version}/{name}' for name, version in (
         ('AppKit', 'C'), ('QuartzCore', 'A'), ('CoreFoundation', 'A'),
@@ -30,7 +29,9 @@ GUEST_VALIDATION_INPUTS = (
     'Library/Audio/Plug-Ins/Components/DarlingRiotAudio.component/Contents/MacOS/CoreAudio',
 )
 PREFIX_VALIDATION_INPUTS = (
-    'usr/lib/system/libsystem_kernel.dylib',
+    *(f'usr/lib/system/libsystem_{name}.dylib' for name in ('kernel', 'malloc', 'pthread', 'platform')),
+    'usr/lib/libobjc.A.dylib',
+    'usr/lib/libc++abi.dylib',
     'System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib',
     'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices',
     'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore',

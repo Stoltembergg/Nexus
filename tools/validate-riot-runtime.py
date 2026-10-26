@@ -12,9 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GUEST_REQUIRED = (
     'libDarlingXShm.dylib',
     *(f'RuntimeLibraries/{name}' for name in (
-        'libsystem_kernel.dylib', 'libsystem_c.dylib', 'libsystem_platform.dylib',
-        'libsystem_malloc.dylib', 'libsystem_pthread.dylib',
-        'libobjc.A.dylib', 'libc++abi.dylib', 'libc++.1.dylib',
+        'libsystem_c.dylib', 'libc++.1.dylib',
         'libGL.dylib', 'libindium.dylib', 'libiridium.dylib')),
     *(f'RuntimeFrameworks/{name}.framework/Versions/{version}/{name}'
       for name, version in (
@@ -28,7 +26,10 @@ GUEST_REQUIRED = (
     'Library/Audio/Plug-Ins/Components/DarlingRiotAudio.component/Contents/MacOS/CoreAudio',
 )
 PREFIX_REQUIRED = (
-    'usr/lib/system/libsystem_kernel.dylib',
+    # tools/install-riot-system-libs.py: one copy each, in the real system location.
+    *(f'usr/lib/system/libsystem_{name}.dylib' for name in ('kernel', 'malloc', 'pthread', 'platform')),
+    'usr/lib/libobjc.A.dylib',
+    'usr/lib/libc++abi.dylib',
     'System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/'
     'vecLib.framework/Versions/A/libvDSP.dylib',
     'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/'
