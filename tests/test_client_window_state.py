@@ -89,6 +89,17 @@ class NiriWindowTests(unittest.TestCase):
 
 
 class X11WindowTests(unittest.TestCase):
+    def test_partial_or_escaped_classes_are_unknown_not_absent(self):
+        for value in ('WM_CLASS(STRING) = "editor"',
+                      'WM_CLASS(STRING) = "editor", "editor" garbage',
+                      'WM_CLASS(STRING) = "editor", "unterminated',
+                      'WM_CLASS(STRING) = "editor", "editor", "extra"',
+                      'WM_CLASS(STRING) = "ed\\itor", "editor"',
+                      'WM_CLASS(STRING) = " ", " "'):
+            with self.subTest(value=value):
+                query = Mock(side_effect=['_NET_CLIENT_LIST(WINDOW): window id # 0x10', value])
+                self.assertIsNone(state.client_windows_present(X11, query))
+
     def test_empty_valid_inventory_is_absent(self):
         query = Mock(return_value='_NET_CLIENT_LIST(WINDOW): window id #\n')
         self.assertIs(state.client_windows_present(X11, query), False)
@@ -119,6 +130,23 @@ class X11WindowTests(unittest.TestCase):
     def test_failed_query_is_unknown(self):
         query = Mock(side_effect=subprocess.CalledProcessError(1, 'xprop'))
         self.assertIsNone(state.client_windows_present(X11, query))
+
+
+class UnsupportedWaylandTests(unittest.TestCase):
+    def test_wayland_never_uses_x11_absence_as_permission(self):
+        for env in ({'WAYLAND_DISPLAY': 'wayland-fixture', 'DISPLAY': ':fixture'},
+                    {'XDG_SESSION_TYPE': 'wayland'},
+                    {'XDG_SESSION_TYPE': 'WAYLAND', 'DISPLAY': ':fixture'}):
+            with self.subTest(env=env):
+                query = Mock(return_value='_NET_CLIENT_LIST(WINDOW): window id #')
+                self.assertEqual(state.backend(env), 'unsupported-wayland')
+                self.assertIsNone(state.client_windows_present(env, query))
+                query.assert_not_called()
+
+    def test_niri_still_uses_native_inventory_in_wayland_session(self):
+        query = Mock(return_value='[]')
+        self.assertIs(state.client_windows_present({**NIRI, 'WAYLAND_DISPLAY': 'fixture'}, query), False)
+        self.assertEqual(query.call_args.args[0], ['niri', 'msg', '--json', 'windows'])
 
 
 if __name__ == '__main__':

@@ -33,7 +33,10 @@ attached-session guard. It must not be imported wholesale into this branch:
 
 On Niri it queries `niri msg --json windows`, never filters by focus/workspace,
 and never falls back to X11 after a Niri failure. Otherwise it checks EWMH
-managed windows. Existing minimized X11 windows count as present, too. This
+managed windows in X11 sessions. Other detected Wayland sessions return unknown
+without using Xwayland's partial inventory to authorize recovery. Their native
+compositor backends remain unimplemented. Existing minimized X11 windows count
+as present, too. Malformed or unsupported WM_CLASS encodings are unknown. This
 does not inspect Riot APIs or publish window titles.
 
 ```sh
