@@ -65,3 +65,11 @@ the pull request.
   for at least one release.
 
 This is not legal advice. See [`docs/INTEROPERABILITY.md`](docs/INTEROPERABILITY.md).
+
+## Mudanças no que o Darling informa sobre a máquina
+
+- Nenhuma mudança no que o Darling informa sobre a máquina (identidade de
+  hardware, CPU, GPU, estado de assinatura/SIP/AMFI etc.) é mergeada sem antes
+  ser comparada com a saída do probe neutro em um Mac real e no Darling em
+  CachyOS. O PR deve incluir essa comparação.
+- O projeto nunca falsifica hardware nem esconde o Darling do anti-cheat.
