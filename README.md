@@ -1,5 +1,12 @@
 # darling-lol
 
+> [!CAUTION]
+> **⚠️ Risco de banimento / Ban risk**
+>
+> **PT-BR:** Hoje, usar este projeto pode levar a suspensões de **3 a 14 dias** por `UNSUPPORTED_THIRD_PARTY_TOOLS`. A punição é na conta, chega com cerca de **48 h de atraso** (jogar algumas partidas sem ban não prova nada). **Não use sua conta principal.** Não há nenhuma garantia de segurança. Este aviso permanece até uma conta de teste passar bem além de 48 h sem punição.
+>
+> **EN:** Using this project currently can lead to **3–14 day** suspensions for `UNSUPPORTED_THIRD_PARTY_TOOLS`. The penalty is account-level and arrives about **48 h later** (a few games without a ban prove nothing). **Do not use your main account.** There is no guarantee of safety. This warning stays until a test account passes well beyond 48 h without punishment.
+
 > [!IMPORTANT]
 > ## Announcement
 >
