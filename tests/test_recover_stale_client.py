@@ -20,7 +20,8 @@ CLIENT = '/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServ
 
 class RecoverStaleClientTests(unittest.TestCase):
     def setUp(self):
-        environment = patch.dict(os.environ, {'NIRI_SOCKET': '', 'XDG_CURRENT_DESKTOP': 'fixture'})
+        environment = patch.dict(os.environ, {'NIRI_SOCKET': '', 'XDG_CURRENT_DESKTOP': 'fixture',
+                                              'WAYLAND_DISPLAY': '', 'XDG_SESSION_TYPE': 'x11'})
         environment.start()
         self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
@@ -227,6 +228,18 @@ class RecoverStaleClientTests(unittest.TestCase):
                                          kill=lambda *args: killed.append(args),
                                          sleep=lambda _: None, out=io.StringIO())
         self.assertEqual(killed, [])
+
+    def test_unsupported_wayland_preserves_client_without_querying_xwayland(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+        killed = []
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'wayland-fixture'}), \
+                patch.object(recover_stale_client.subprocess, 'check_output') as query:
+            recover_stale_client.recover(self.prefix, proc_root=self.proc,
+                                         kill=lambda *args: killed.append(args),
+                                         sleep=lambda _: None, out=io.StringIO())
+        self.assertEqual(killed, [])
+        query.assert_not_called()
 
     def test_game_appearing_after_sigterm_prevents_sigkill(self):
         self.process(10, 'darlingserver', ['darlingserver'])

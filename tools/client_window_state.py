@@ -14,13 +14,18 @@ CLIENT_NAMES = ('riot', 'league')
 MAX_WINDOWS = 256
 MAX_OUTPUT = 1024 * 1024
 X11_LIST = re.compile(r'^_NET_CLIENT_LIST\(WINDOW\):\s*window id #\s*'
-                      r'((?:0x[0-9a-fA-F]+\s*,?\s*)*)$')
+                       r'((?:0x[0-9a-fA-F]+\s*,?\s*)*)$')
+X11_CLASS = re.compile(r'WM_CLASS\(STRING\) = "([^"\\\r\n]*)", "([^"\\\r\n]*)"')
 
 
 def backend(environ=None):
     env = os.environ if environ is None else environ
     desktops = re.split(r'[:;]', env.get('XDG_CURRENT_DESKTOP', '').lower())
-    return 'niri' if env.get('NIRI_SOCKET') or 'niri' in desktops else 'x11'
+    if env.get('NIRI_SOCKET') or 'niri' in desktops:
+        return 'niri'
+    if env.get('WAYLAND_DISPLAY') or env.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+        return 'unsupported-wayland'
+    return 'x11'
 
 
 def niri_windows_present(text):
@@ -50,7 +55,7 @@ def niri_windows_present(text):
 
 
 def client_windows_present(environ=None, check_output=None):
-    """Query the native compositor when on Niri; do not fall back on its failure.
+    """Query Niri natively or X11 directly; preserve unknown Wayland sessions.
 
     Xwayland's EWMH root list can be missing or incomplete under Niri. Falling
     back could mistake a minimized or off-workspace window for a closed client.
@@ -65,7 +70,11 @@ def client_windows_present(environ=None, check_output=None):
         return result.strip()
 
     try:
-        if backend(environ) == 'niri':
+        selected = backend(environ)
+        if selected == 'unsupported-wayland':
+            # Xwayland cannot inventory native windows on other compositors.
+            return None
+        if selected == 'niri':
             return niri_windows_present(output(['niri', 'msg', '--json', 'windows']))
         listing = X11_LIST.fullmatch(output(['xprop', '-root', '_NET_CLIENT_LIST']))
         if listing is None:
@@ -76,11 +85,12 @@ def client_windows_present(environ=None, check_output=None):
         unknown = False
         for window_id in ids:
             classes = output(['xprop', '-id', window_id, 'WM_CLASS'])
-            if not classes.startswith('WM_CLASS(STRING) ='):
+            parsed = X11_CLASS.fullmatch(classes)
+            if parsed is None:
                 unknown = True
                 continue
-            names = re.findall(r'"([^"\n]*)"', classes)
-            if not names or not any(names):
+            names = parsed.groups()
+            if not any(name.strip() for name in names):
                 unknown = True
             if any(marker in name.lower() for name in names for marker in CLIENT_NAMES):
                 return True
