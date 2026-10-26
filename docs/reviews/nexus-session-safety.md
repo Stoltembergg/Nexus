@@ -63,18 +63,27 @@ idle shutdown, client launch or production runtime replacement is introduced.
 The current draft follow-up routes the supervisor through the shared window
 inventory and requires both the game probe and window probe to return an
 explicit `False` before cleanup. Present or unknown state blocks shutdown. The
-same check is repeated before guest TERM/KILL and child-group signals; signal
-handlers only record the request, so active or indeterminate sessions are left
-running instead of being killed on Ctrl+C/SIGTERM. The game probe now treats
-unreadable or changing relevant `/proc` evidence as unknown. These paths have
-synthetic tests; they have not been exercised with Darling, Riot or a live game.
+same check is repeated before guest TERM/KILL and child-group signals when
+cleanup is opted in; signal handlers only record the request. With cleanup
+disabled (the default), signals detach without terminating the child or guest.
+Active or indeterminate sessions are therefore preserved rather than killed on
+Ctrl+C/SIGTERM. The game probe now treats unreadable or changing relevant
+`/proc` evidence as unknown. These paths have synthetic tests; they have not
+been exercised with Darling, Riot or a live game.
 
-This is a risk reduction, not a safety certificate. `owns_runtime` is still an
-observation rather than an exclusive ownership lease, and automatic cleanup is
-still enabled by default. A windowless client may be downloading or in another
-state the probes cannot distinguish from idle. Procfs/window checks and later
-signals are not atomic, so state may change in the remaining check-to-action
-gap. Do not infer Riot authorization or reduced account-penalty risk.
+Automatic cleanup is now disabled by default and requires the exact
+`RCLOL_CLEAN_ON_EXIT=1` opt-in; `--no-clean` forces it off. Disabling cleanup
+does not bypass supervision: signal handlers still record requests, signals
+detach without terminating the child or cleaning the guest, and natural child
+exit leaves the runtime intact. Idle stopping is disabled unless cleanup is
+enabled. When cleanup is enabled, the shared window/game gate still fails
+closed, but `owns_runtime` remains an observation rather than an exclusive
+ownership lease. A windowless client may be downloading or in another state the
+probes cannot distinguish from idle. Procfs/window checks and later signals are
+not atomic, so state may change in the remaining check-to-action gap. These
+changes only reduce accidental interruptions; they are not proof of Riot
+authorization or account safety, and do not establish reduced account-penalty
+risk.
 
 Checks and signals are not atomic. These guards reduce races but do not prove
 that every possible concurrent startup is safe. Recovery stays opt-in and
@@ -83,8 +92,9 @@ must be preserved. Prefer restoring a minimized window over restarting it.
 
 ## Remaining supervisor acceptance criteria
 
-- Add an exclusive runtime ownership protocol and make automatic cleanup
-  explicitly opt-in.
+- Add an exclusive runtime ownership protocol; automatic cleanup is now
+  explicitly opt-in, but the existing `owns_runtime` observation is not a
+  lease.
 - Preserve sessions on ordinary secondary-loader exits; the gate must not turn
   missing windows into evidence that a download/champion selection is idle.
 - Keep the shared Niri/X11 inventory and fail closed for unsupported or

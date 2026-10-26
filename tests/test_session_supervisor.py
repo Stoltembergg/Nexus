@@ -588,6 +588,38 @@ class FakeChild:
         return self.status
 
 
+class MainCleanupPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.prefix = Path(self.temp.name) / '.darling'
+
+    def invoke(self, cleanup_value=None, extra_args=()):
+        env = {}
+        if cleanup_value is not None:
+            env['RCLOL_CLEAN_ON_EXIT'] = cleanup_value
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(supervisor, 'run_supervised', return_value=0) as run:
+            result = supervisor.main([
+                '--prefix', str(self.prefix), *extra_args, '--', 'fixture'])
+        self.assertEqual(result, 0)
+        return run.call_args.kwargs['clean']
+
+    def test_cleanup_is_disabled_by_default(self):
+        self.assertFalse(self.invoke())
+
+    def test_exact_one_enables_cleanup(self):
+        self.assertTrue(self.invoke('1'))
+
+    def test_no_clean_overrides_opt_in(self):
+        self.assertFalse(self.invoke('1', ('--no-clean',)))
+
+    def test_unrecognized_values_leave_cleanup_disabled(self):
+        for value in ('0', 'true', '01', ' 1 '):
+            with self.subTest(value=value):
+                self.assertFalse(self.invoke(value))
+
+
 class SupervisedSafetyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -650,6 +682,88 @@ class SupervisedSafetyTests(unittest.TestCase):
         self.assertEqual(group_signals, [(child.pid, signal.SIGTERM)])
         self.assertEqual(code, 143)
         self.assertEqual(child.wait_calls, 1)
+
+    def test_cleanup_off_stays_supervised_and_detaches_on_signal(self):
+        child = FakeChild()
+        handlers = {}
+        probes = []
+        group_signals = []
+
+        def register(signum, handler):
+            if handler is not None:
+                handlers[signum] = handler
+            return None
+
+        def window_probe():
+            probes.append('window')
+            return False
+
+        def sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        popen_calls = []
+        with patch.object(supervisor, 'runtime_alive', return_value=False), \
+                patch.object(supervisor, 'game_running', return_value=None) as game_probe, \
+                patch.object(supervisor, 'cleanup') as cleanup:
+            code = supervisor.run_supervised(
+                ['fixture'], self.prefix, None, clean=False, stop_after=30,
+                proc_root=self.proc, poll=0,
+                popen=lambda *args, **kwargs: (popen_calls.append((args, kwargs)) or child),
+                killpg=lambda *args: group_signals.append(args),
+                register_signal=register, window_probe=window_probe,
+                sleep=sleep, out=io.StringIO())
+        self.assertEqual(code, 128 + signal.SIGTERM)
+        self.assertEqual(len(popen_calls), 1)
+        self.assertTrue(popen_calls[0][1]['start_new_session'])
+        self.assertEqual(group_signals, [])
+        self.assertEqual(child.wait_calls, 0)
+        self.assertEqual(probes, ['window'])
+        game_probe.assert_called_once()
+        cleanup.assert_not_called()
+
+    def test_cleanup_off_natural_exit_skips_guest_cleanup(self):
+        child = FakeChild()
+        child.live = False
+        child.status = 0
+        with patch.object(supervisor, 'runtime_alive', return_value=False), \
+                patch.object(supervisor, 'cleanup') as cleanup:
+            code = supervisor.run_supervised(
+                ['fixture'], self.prefix, None, clean=False,
+                proc_root=self.proc, poll=0,
+                popen=lambda *_args, **_kwargs: child,
+                register_signal=lambda *_args: None,
+                window_probe=lambda: self.fail('idle probing is disabled'),
+                sleep=lambda _seconds: None, out=io.StringIO())
+        self.assertEqual(code, 0)
+        self.assertEqual(child.wait_calls, 1)
+        cleanup.assert_not_called()
+
+    def test_cleanup_off_does_not_apply_idle_kill(self):
+        child = FakeChild()
+        sleeps = [0]
+        group_signals = []
+
+        def sleep(_seconds):
+            sleeps[0] += 1
+            if sleeps[0] == 4:
+                child.live = False
+                child.status = 0
+
+        with patch.object(supervisor, 'runtime_alive', return_value=False), \
+                patch.object(supervisor, 'game_running', return_value=False) as game_probe, \
+                patch.object(supervisor, 'cleanup') as cleanup:
+            code = supervisor.run_supervised(
+                ['fixture'], self.prefix, None, clean=False, stop_after=1,
+                proc_root=self.proc, popen=lambda *_args, **_kwargs: child,
+                register_signal=lambda *_args: None,
+                window_probe=lambda: self.fail('idle window probe must be disabled'),
+                killpg=lambda *args: group_signals.append(args), sleep=sleep,
+                poll=0, clock=lambda: sleeps[0] * 2.0, out=io.StringIO())
+        self.assertEqual(code, 0)
+        self.assertEqual(group_signals, [])
+        self.assertEqual(child.wait_calls, 1)
+        game_probe.assert_not_called()
+        cleanup.assert_not_called()
 
     def test_protected_signal_detaches_without_signal_wait_or_cleanup(self):
         for signum, game, windows in (

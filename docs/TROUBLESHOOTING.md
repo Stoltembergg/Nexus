@@ -194,17 +194,31 @@ RCLOL_CLEAN_STALE_HELPERS=1 python3 build/runtime/tools/clean-stale-helpers.py -
 `scripts/run.sh` keeps a supervisor between the terminal and Darling. It exists
 because the Riot Client does not exit when its window closes, and because a
 loader that dies before `darlingserver` can leave launchd/mldr and its client
-tree running. The supervisor:
+tree running. The supervisor remains active even when cleanup is disabled. By
+default it:
 
-- forwards `Ctrl+C`, terminal close and `SIGTERM` to the loader, then shuts the
-  runtime down and stops anything still inside the guest PID namespace. A
-  process is only stopped when it carries this prefix's `__mldr_sockpath` and
-  the same user, and a namespace equal to the host's is refused, so another
-  prefix or a host process is never touched.
-- shuts the runtime down after the loader exits normally. If a second launch
-  attached to a runtime that was already running, that runtime is left alone.
-- leaves everything as it was with `RCLOL_CLEAN_ON_EXIT=0`, which is the old
-  `exec` behaviour.
+- records `Ctrl+C`, terminal-close and `SIGTERM` requests without stopping the
+  child, waiting for it, or cleaning up the guest/runtime. It detaches and leaves
+  the session running, including when the game/window probes report active or
+  unknown state.
+- leaves the guest/runtime running after the loader exits naturally.
+- keeps supervision in place rather than reverting to the old direct-`exec`
+  behavior. The shared X11/Niri-aware window inventory and fail-closed safety
+  checks remain in use whenever automatic cleanup is enabled.
+
+Automatic cleanup is disabled unless explicitly opted in:
+
+```sh
+RCLOL_CLEAN_ON_EXIT=1 ./scripts/run.sh
+```
+
+Only the exact value `1` enables cleanup; an unset or unrecognized value keeps
+it disabled. `--no-clean` on `session-supervisor.py` always overrides the
+environment setting. With cleanup enabled, signals can stop the loader group
+and then clean up the owned guest/runtime only when both the game and shared
+window probes positively report idle. A second launch attached to a runtime
+that was already running leaves it alone. These checks only reduce accidental
+interruptions; they are not proof of Riot authorization or account safety.
 
 Closing the client window is not the same as quitting the client. The window is
 gone but `RiotClientServices`, `LeagueClientUx` and their CEF helpers stay
@@ -212,7 +226,7 @@ resident, and `xwininfo` can still list their windows. If closing the window
 should end the session, opt in to an idle stop:
 
 ```sh
-RCLOL_STOP_AFTER_CLIENT_SECONDS=120 ./scripts/run.sh
+RCLOL_CLEAN_ON_EXIT=1 RCLOL_STOP_AFTER_CLIENT_SECONDS=120 ./scripts/run.sh
 ```
 
 The session stops after no managed League/Riot window and no game process have
@@ -222,9 +236,11 @@ be read (for example a missing display or `xprop`), so a Wayland session without
 Xwayland still has to quit the client normally. The default is off.
 
 Quit the Riot Client itself (tray icon, then Quit) to end the session in every
-setup. If the launcher was killed with `SIGKILL`, or the whole terminal was
-terminated without a signal reaching the supervisor, the runtime still has to
-be stopped with `darling shutdown` as described below.
+setup. Idle stopping is disabled unless cleanup is enabled. If the launcher was
+killed with `SIGKILL`, or the whole terminal was terminated without a signal
+reaching the supervisor, the runtime still has to be stopped with `darling
+shutdown` as described below. Opting into cleanup does not establish Riot
+authorization or account safety.
 
 ### Client window stays black after a match
 

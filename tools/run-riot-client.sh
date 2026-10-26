@@ -171,12 +171,12 @@ fi
 # failed copy as "not found". Use a writable guest directory by default.
 # exec-guest.py closes host file descriptors above stderr before starting the guest. A shell
 # loop cannot: dash only accepts single-digit descriptors in redirections.
-# Keep the launcher as a supervisor: on Ctrl+C/terminal close it stops the
-# guest session instead of orphaning launchd/mldr and the client tree. It also
-# shuts the runtime down after the loader exits, unless another session already
-# owned it. Set RCLOL_CLEAN_ON_EXIT=0 for the previous exec-only behaviour, and
-# RCLOL_STOP_AFTER_CLIENT_SECONDS=N to stop once the client window has been
-# gone for N seconds with no game running.
+# Keep the launcher supervised so it records Ctrl+C/terminal-close signals and
+# can fail closed around active/unknown sessions. Automatic guest/runtime
+# cleanup is disabled by default; opt in with RCLOL_CLEAN_ON_EXIT=1. With
+# cleanup disabled, signals detach without stopping the child and natural loader
+# exit leaves the guest/runtime running. RCLOL_STOP_AFTER_CLIENT_SECONDS=N only
+# enables idle stopping when cleanup is also opted in.
 exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   --darling "${darling_bin:-darling}" -- \
   python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
