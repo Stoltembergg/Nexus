@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 89,
+      "modified_files": 90,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -25,7 +25,10 @@
         "src/frameworks/OpenGL/CGLAsyncPresent.inc",
         "src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h",
         "src/startup/mldr/commpage-cpu-caps.h",
-        "src/shellspawn/shellspawn-fds.h"
+        "src/shellspawn/shellspawn-fds.h",
+        "src/native/xshm/CMakeLists.txt",
+        "src/native/xshm/DarlingXShm.c",
+        "src/native/xshm/darling-xshm.c"
       ]
     },
     {
