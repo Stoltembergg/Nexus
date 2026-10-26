@@ -50,7 +50,7 @@ Numbers in this table refer to [Stoltembergg/Nexus-LoL](https://github.com/Stolt
 | [#11](https://github.com/Stoltembergg/Nexus-LoL/pull/11) | Places graphics libraries at system paths in the guest prefix. | Hold integration pending transactional install/restore and idle-session guards. Same bytes in a new path are not new signatures or trust. Overrides remain; broader Darling processes can now load these libraries. See finding D. |
 | [#12](https://github.com/Stoltembergg/Nexus-LoL/pull/12) | Consolidates six core libraries, reducing divergent duplicate copies. | Useful architecture, but block on interrupted-install recovery and an enforced idle-runtime/locking protocol. Failure reproduction below left mixed versions without a rollback manifest. Also needs neutral loader/probe comparison before merge. |
 | [#4](https://github.com/Stoltembergg/Nexus-LoL/pull/4) | Signal forwarding and orphan cleanup. | Do not enable by default in this form. Cleanup after loader exit lacks a final active-game/window gate; ownership is observed, not exclusively leased; signaling lacks saved start-time revalidation. X11-only inventory bypasses our Niri/Wayland safety work. |
-| [#8](https://github.com/Stoltembergg/Nexus-LoL/pull/8) | Waits for a detected game after an ordinary loader exit. | Split game preservation from priority tuning. It improves #4 but does not fix all cleanup races or unknown-state handling. Automatic priority changes have correctness/permission problems; see findings B/C. Depends on #4. |
+| [#8](https://github.com/Stoltembergg/Nexus-LoL/pull/8) | Waits for a detected game after an ordinary loader exit. | A follow-up removes the priority-tuning feature from #8. Match preservation remains only a partial fix and inherits #4's cleanup, ownership and unknown-state blockers (finding A). Depends on #4. |
 
 Changing where a library is installed can improve maintainability and loading
 consistency. It must not be justified as hiding third-party code: these remain
@@ -76,27 +76,12 @@ a terminal is not made harmless during a match. Require exclusive ownership,
 tri-state probes, shared compositor inventory, identity-safe signaling and
 tests for each transition before enabling automatic cleanup.
 
-### B. #8: nice restoration can silently fail
+### B. #8: priority adjustment removed
 
-`set_priority()` lowers each thread to nice 15. `restore()` later requests nice
-0, an increase in scheduling priority which an ordinary process may not have
-permission to perform (depending on capabilities/resource limits). OSErrors
-are swallowed, so the UI can remain deprioritized while the code reports
-restoration. Previous nice/scheduler values are not saved. Existing tests mock
-the apply function, so they do not establish real permission semantics.
-
-Do not solve this by granting the launcher broad privileges. Keep tuning
-disabled unless a bounded, permission-safe design preserves original values,
-reports failures, and is tested independently of game/client processes.
-
-### C. #8: bare PID set and namespace-wide priority selection
-
-`MatchPriority.lowered` holds numeric PIDs without their process-start identity;
-`restore()` applies to those PIDs without rechecking identity or namespace.
-A reused PID could therefore name another process. Selection includes every
-non-game namespace member, not just UI/CEF; shared services may be slowed too.
-Capture identities, limit eligibility and test PID reuse, missing /proc data,
-exceptions and session exit. Do not couple this feature to game preservation.
+The match-coupled scheduling adjustment was removed from #8. It selected every
+non-game namespace process (not just UI/CEF) and could not safely restore the
+original scheduling values or protect against PID reuse. Keep #8 focused on
+match preservation.
 
 ### D. #11/#12: library migration needs a recoverable idle transaction
 
@@ -158,7 +143,8 @@ Numbers here refer to [lucannez64/darling-lol](https://github.com/lucannez64/dar
 4. Validate #10, then repaired #11/#12 as provenance/loading work. Satisfy the
    CONTRIBUTING neutral-probe requirement; a match is not a safety certificate.
 5. Rework #4 with #8's preservation idea, shared tri-state detection, exclusive
-   ownership and PID-identity checks. Leave priority tuning separate and off.
+   ownership and PID-identity checks. Keep priority tuning separate and off; it
+   was removed from the #8 follow-up.
 6. Continue #144 as isolated research, not as an account-risk mitigation release.
 
 No authenticated match, including custom/bot matches or another account, is

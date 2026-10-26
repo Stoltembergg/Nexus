@@ -553,37 +553,3 @@ class MatchProtectionTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(order, ['game ended', 'cleanup'])
         self.assertIn('waiting for the game to end', output.getvalue())
-
-
-class MatchPriorityTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.ns = 'pid:[4026532000]'
-        fake_process(self.root, 10, comm='RiotClientServices', ns=self.ns)
-        fake_process(self.root, 11, comm='LeagueClientUx Helper', ns=self.ns)
-        fake_process(self.root, 20, comm='LeagueofLegends', ns=self.ns)
-        fake_process(self.root, 30, comm='firefox', ns='pid:[1]')
-        self.calls = []
-        self.priority = supervisor.MatchPriority(
-            apply=lambda pid, nice, batch: self.calls.append((pid, nice, batch)),
-            out=io.StringIO())
-
-    def test_lowers_guest_background_but_not_the_game_or_host(self):
-        self.priority.update(self.ns, True, self.root, own_namespace='pid:[1]')
-        self.assertEqual(self.calls, [(10, 15, True), (11, 15, True)])
-        self.calls.clear()
-        self.priority.update(self.ns, True, self.root, own_namespace='pid:[1]')
-        self.assertEqual(self.calls, [])
-
-    def test_restores_when_the_match_ends(self):
-        self.priority.update(self.ns, True, self.root, own_namespace='pid:[1]')
-        self.calls.clear()
-        self.priority.update(self.ns, False, self.root, own_namespace='pid:[1]')
-        self.assertEqual(self.calls, [(10, 0, False), (11, 0, False)])
-
-    def test_disabled_does_nothing(self):
-        self.priority.enabled = False
-        self.priority.update(self.ns, True, self.root, own_namespace='pid:[1]')
-        self.assertEqual(self.calls, [])

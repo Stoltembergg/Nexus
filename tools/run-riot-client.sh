@@ -177,8 +177,7 @@ fi
 # owned it. Set RCLOL_CLEAN_ON_EXIT=0 for the previous exec-only behaviour, and
 # RCLOL_STOP_AFTER_CLIENT_SECONDS=N to stop once the client window has been
 # gone for N seconds with no game running. Closing the Riot Client in game
-# leaves the match running, and launcher/CEF priority drops during a match
-# (RCLOL_MATCH_PRIORITY=0 turns that off).
+# leaves the match running.
 exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   --darling "${darling_bin:-darling}" -- \
   python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
