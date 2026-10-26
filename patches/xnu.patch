@@ -2265,11 +2265,11 @@ index 4319355..122ad3a 100644
  static sysctl_handler(handle_stepping);
 -static sysctl_handler(handle_brand_string);
 -static sysctl_handler(handle_features);
-+static sysctl_handler(handle_brand_string)
-+{
-+	copyout_string("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", (char*) old, oldlen);
-+	return 0;
-+}
++static sysctl_handler(handle_brand_string);
++// darling-lol: machdep.cpu.brand_string reports the host's real CPU (CPUID),
++// the same value the game reads directly with the cpuid instruction. The old
++// fixed i9-9980HK string contradicted it. Only real host data is reported.
++
 +
 +sysctl_handler(handle_features);
  static sysctl_handler(handle_core_count);
@@ -2293,8 +2293,8 @@ index 4319355..122ad3a 100644
      return 0;
  }
  
-+// Original cpuid-based implementation, replaced by the fixed brand string defined above
-+#if 0
++// cpuid-based implementation: reports the real host CPU brand string
++// (formerly disabled in favour of a fixed i9-9980HK string)
  sysctl_handler(handle_brand_string)
  {
 -    setup(0x80000000);
@@ -2347,7 +2347,7 @@ index 4319355..122ad3a 100644
 -    return 0;
 +	return 0;
  }
-+#endif
++// end of cpuid-based handle_brand_string
  
  sysctl_handler(handle_features)
  {

@@ -166,7 +166,7 @@ override saved by this tool. A field the guest does not provide is left out.
 commands.
 
 `SPDisplaysDataType` reads the host DRM cards. With `DARLING_METAL_MAC_GPU_NAME`
-set (the launcher default), an AMD or NVIDIA host card is reported as the
+set (opt-in; the launcher no longer sets it), an AMD or NVIDIA host card is reported as the
 `MacBookPro16,1` discrete GPU: `AMD Radeon Pro 5500M`, vendor `0x1002`, device
 `0x7340`, bus PCIe and VRAM from `DARLING_METAL_VRAM_MB` (4096 by default; a
 value that is not a positive decimal keeps the default). An Intel card is
