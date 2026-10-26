@@ -2,11 +2,11 @@
 """Supervise one guest session so a launcher exit does not orphan it.
 
 The launcher runs this script instead of exec'ing the guest client directly. It
-handles SIGINT/SIGTERM/SIGHUP in ordinary control flow, and after the child
-exits it may ask darlingserver to shut down and stop any process still inside
-the guest PID namespace. Every destructive action requires a positive idle
-game and shared client-window inventory; active or unknown state preserves the
-session.
+handles SIGINT/SIGTERM/SIGHUP in ordinary control flow. Automatic cleanup after
+the child exits is opt-in; when enabled, it may ask darlingserver to shut down
+and stop any process still inside the guest PID namespace. Every destructive
+action requires a positive idle game and shared client-window inventory; active
+or unknown state preserves the session.
 
 The guest namespace is captured while the session runs, from a process that
 carries this prefix's `__mldr_sockpath`; without that evidence cleanup never
@@ -21,12 +21,16 @@ seconds and no game process is running. It is off by default and never stops
 when either state cannot be read.
 
 Match protection: when the loader exits while this prefix's game is still
-running (the Riot Client was closed mid-match), cleanup waits for the game to
-end instead of tearing the match down. A termination signal still stops the
-session at once.
+running (the Riot Client was closed mid-match), supervision waits for the game
+to end instead of tearing the match down. Signals detach without stopping the
+child or guest when cleanup is disabled; when enabled, a signal stops the group
+only if the game and window probes explicitly report idle.
 
-Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
-alone when the launcher exits.
+Automatic cleanup is disabled by default. Set RCLOL_CLEAN_ON_EXIT=1 to opt in;
+with cleanup disabled, the supervisor still records signals and detaches without
+stopping the child or guest, and a natural child exit leaves the runtime alone.
+--no-clean always disables cleanup. Idle stopping is only available when cleanup
+is enabled.
 
 Usage (from run-riot-client.sh):
 
@@ -626,10 +630,9 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
 
     Cleanup only runs when this launcher started the runtime. A second launch
     while a session is alive attaches to that server, and must not shut it down
-    when its own loader exits.
+    when its own loader exits. If cleanup is disabled, supervision stays active
+    but signals detach and natural child exit leaves the guest/runtime intact.
     """
-    if not clean:
-        os.execvp(command[0], command)
     owns_runtime = not runtime_alive(prefix, proc_root)
     namespace = None
     child = (subprocess.Popen if popen is None else popen)(
@@ -656,7 +659,7 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
             # the processes that still carry the socket may be the only proof.
             if namespace is None:
                 namespace = prefix_namespace(prefix, proc_root)
-            if stop_after > 0:
+            if clean and stop_after > 0:
                 if not owns_runtime:
                     idle_since = None
                     sleep(poll)
@@ -732,6 +735,17 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
 
         if stop:
             signum = stop[0]
+            if not clean:
+                # Keep signal handling supervised, but never turn a signal into
+                # process-group or guest cleanup when cleanup was not opted in.
+                # The read-only gate remains fail-closed for active/unknown state.
+                if owns_runtime and not safe_to_stop(prefix, proc_root, window_state):
+                    log('interrupted by signal %d; active or unknown state, detaching'
+                        % signum, out)
+                else:
+                    log('interrupted by signal %d; cleanup disabled, detaching'
+                        % signum, out)
+                return 128 + signum
             if not owns_runtime or not safe_to_stop(prefix, proc_root, window_state):
                 log('interrupted by signal %d; detaching to preserve the session'
                     % signum, out)
@@ -766,7 +780,10 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     finally:
         for signum, handler in previous.items():
             register(signum, handler)
-    if not owns_runtime:
+    if not clean:
+        log('automatic cleanup disabled; leaving the guest/runtime running', out)
+        remaining = []
+    elif not owns_runtime:
         log('another session owns this runtime; leaving it running', out)
         remaining = []
     elif cleanup_suppressed:
@@ -798,20 +815,25 @@ def env_seconds(name, out=sys.stderr):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        epilog=('Automatic cleanup is disabled by default; set '
+                'RCLOL_CLEAN_ON_EXIT=1 to opt in. --no-clean always disables '
+                'cleanup, but the supervisor still records signals and keeps '
+                'the guest/runtime running.'))
     parser.add_argument('--prefix', type=Path, required=True)
     parser.add_argument('--darling', help='loader used for a graceful shutdown')
     parser.add_argument('--stop-after', type=int,
                         default=env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS'),
-                        help='stop after the client window has been gone this many seconds')
+                        help='with cleanup enabled, stop after the client window has been gone this many seconds')
     parser.add_argument('--no-clean', action='store_true',
-                        help='leave the runtime alone after the child exits')
+                        help='disable cleanup; keep supervision and leave the guest/runtime running')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         parser.error('a command is required after --')
-    clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT', '1') != '0'
+    clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT') == '1'
     prefix = args.prefix.expanduser().resolve()
     return run_supervised(command, prefix, args.darling, stop_after=max(0, args.stop_after),
                           clean=clean)
