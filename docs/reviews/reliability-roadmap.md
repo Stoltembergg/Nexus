@@ -15,6 +15,9 @@ Do not replace security behavior with fabricated approval or signing state.
 
 ## Priorities
 
+See the [dated open-PR review](open-pr-account-risk-2026-10-26.md) for specific
+candidate changes, source findings, blockers and evidence limits.
+
 1. **Preserve sessions on uncertainty.** Audit every launcher/recovery cleanup
    path for active-game guards, prefix ownership, saved process identity and
    concurrent startup races. Window absence alone cannot establish an idle

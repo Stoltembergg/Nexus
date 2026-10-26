@@ -106,6 +106,7 @@
         ffmpeg_8
 
         # X11 & input
+        xorg.xprop
         xorgproto
         libx11
         libxext

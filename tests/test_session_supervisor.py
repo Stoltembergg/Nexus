@@ -32,6 +32,14 @@ def fake_process(root, pid, ppid=1, state='S', comm='mldr', environ=b'', ns=None
     return proc
 
 
+def set_start_ticks(proc, start_ticks):
+    stat = (proc / 'stat').read_text()
+    prefix, fields_text = stat.rsplit(')', 1)
+    fields = fields_text.split()
+    fields[19] = str(start_ticks)
+    (proc / 'stat').write_text('%s) %s\n' % (prefix, ' '.join(fields)))
+
+
 class AttributionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -43,6 +51,22 @@ class AttributionTests(unittest.TestCase):
 
     def process(self, pid, **kwargs):
         return fake_process(self.root, pid, ns=kwargs.pop('ns', self.ns), **kwargs)
+
+    def process_info_with_ticks(self, proc, ticks):
+        original = supervisor.process_info
+        sequence = iter(ticks)
+
+        def read_info(candidate):
+            info = original(candidate)
+            if candidate == proc and info is not None:
+                try:
+                    return info[0], info[1], next(sequence)
+                except StopIteration:
+                    pass
+            return info
+
+        supervisor.process_info = read_info
+        self.addCleanup(setattr, supervisor, 'process_info', original)
 
     def test_socket_names_the_owner_prefix(self):
         proc = self.process(10, comm='RiotClientServices',
@@ -60,12 +84,32 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(
             supervisor.namespace_members(self.ns, self.root, own_namespace=self.ns), [])
         self.assertEqual(
-            [pid for pid, _proc in supervisor.namespace_members(self.ns, self.root,
-                                                                'pid:[1]')], [10])
+            [pid for pid, _proc, _ticks in supervisor.namespace_members(
+                self.ns, self.root, 'pid:[1]')], [10])
 
     def test_unreadable_environ_is_not_owned(self):
         proc = self.process(10, environ=None)
         self.assertFalse(supervisor.owned_by_prefix(proc, self.prefix.resolve()))
+
+    def test_namespace_member_snapshot_rejects_changed_identity(self):
+        proc = self.process(10)
+        self.process_info_with_ticks(proc, [100, 200])
+        self.assertEqual(
+            supervisor.namespace_members(self.ns, self.root, 'pid:[1]'), [])
+
+    def test_prefix_only_snapshot_rejects_changed_identity(self):
+        proc = self.process(
+            10, environ=b'__mldr_sockpath=%s\0' % os.fsencode(self.socket))
+        self.process_info_with_ticks(proc, [100, 200])
+        self.assertEqual(supervisor.prefix_only(self.prefix.resolve(), self.root), [])
+
+    def test_prefix_namespace_snapshot_rejects_changed_identity(self):
+        proc = self.process(
+            10, environ=b'__mldr_sockpath=%s\0' % os.fsencode(self.socket))
+        # Ownership is consistent, but the PID changes identity before the
+        # namespace link has been fully attributed to that owner.
+        self.process_info_with_ticks(proc, [100, 100, 200])
+        self.assertIsNone(supervisor.prefix_namespace(self.prefix, self.root))
 
     def test_game_is_matched_through_the_prefix_socket(self):
         proc = self.process(10, comm='LeagueofLegends',
@@ -133,8 +177,83 @@ class CleanupTests(unittest.TestCase):
             self.prefix, None, self.ns, proc_root=self.root,
             run=lambda *_a, **_k: None, kill=lambda *_a: None,
             sleep=lambda _s: None, out=output, own_namespace=self.own, term_grace=0, kill_grace=0)
-        self.assertEqual([pid for pid, _proc in remaining], [10])
+        self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
         self.assertIn('still present: 10', output.getvalue())
+
+    def test_reused_pid_after_snapshot_is_not_signaled(self):
+        proc = self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        set_start_ticks(proc, 200)
+        signals = []
+
+        remaining = supervisor.stop_processes(
+            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            sleep=lambda _seconds: None, proc_root=self.root,
+            term_grace=0, kill_grace=0)
+        self.assertEqual(signals, [])
+        self.assertEqual(remaining, [])
+
+    def test_reused_pid_between_term_and_kill_is_not_signaled_again(self):
+        proc = self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        signals = []
+
+        def kill(pid, signum):
+            signals.append((pid, signum))
+            if signum == signal.SIGTERM:
+                set_start_ticks(proc, 200)
+
+        remaining = supervisor.stop_processes(
+            members, kill=kill, sleep=lambda _seconds: None,
+            proc_root=self.root, term_grace=0, kill_grace=0)
+        self.assertEqual(signals, [(10, signal.SIGTERM)])
+        self.assertEqual(remaining, [])
+
+    def test_reused_pid_during_term_wait_is_not_escalated(self):
+        proc = self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        signals = []
+        now = [0]
+
+        def sleep(_seconds):
+            set_start_ticks(proc, 200)
+            now[0] += 1
+
+        remaining = supervisor.stop_processes(
+            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            sleep=sleep, proc_root=self.root, term_grace=1, kill_grace=0,
+            clock=lambda: now[0])
+        self.assertEqual(signals, [(10, signal.SIGTERM)])
+        self.assertEqual(remaining, [])
+
+    def test_reused_pid_during_kill_wait_is_not_returned(self):
+        proc = self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        signals = []
+        now = [0]
+
+        def sleep(_seconds):
+            set_start_ticks(proc, 200)
+            now[0] += 1
+
+        remaining = supervisor.stop_processes(
+            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            sleep=sleep, proc_root=self.root, term_grace=0, kill_grace=1,
+            clock=lambda: now[0])
+        self.assertEqual(signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
+        self.assertEqual(remaining, [])
+
+    def test_live_process_gets_term_then_kill_escalation(self):
+        self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        signals = []
+
+        remaining = supervisor.stop_processes(
+            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            sleep=lambda _seconds: None, proc_root=self.root,
+            term_grace=0, kill_grace=0)
+        self.assertEqual(signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
+        self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
 
 
 class RuntimeMarkerTests(unittest.TestCase):
