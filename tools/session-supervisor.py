@@ -20,6 +20,16 @@ stops the session once a managed League/Riot window has been absent for N
 seconds and no game process is running. It is off by default and never stops
 when the window state cannot be read.
 
+Match protection: when the loader exits while this prefix's game is still
+running (the Riot Client was closed mid-match), cleanup waits for the game to
+end instead of tearing the match down. A termination signal still stops the
+session at once.
+
+Match priority: while the game runs, the other processes in the guest
+namespace (Riot Client, LeagueClientUx and their CEF helpers) run at nice 15
+with SCHED_BATCH, and go back to normal when the match ends. Set
+RCLOL_MATCH_PRIORITY=0 to turn this off.
+
 Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
 alone when the launcher exits.
 
@@ -42,6 +52,7 @@ SOCK_NAME = '.darlingserver.sock'
 GAME_NAME = 'LeagueofLegends'
 CLIENT_CLASSES = ('leagueclientux', 'riot client')
 POLL_SECONDS = 2.0
+BACKGROUND_NICE = 15
 TERM_GRACE = 5.0
 KILL_GRACE = 5.0
 
@@ -344,10 +355,61 @@ def idle_decision(seen_client, idle_since, now, windows, game, seconds):
     return True, idle_since, now - idle_since >= seconds
 
 
+def set_priority(pid, nice_value, batch):
+    """Apply nice/scheduler to every thread of pid; ignore vanished threads."""
+    policy = os.SCHED_BATCH if batch else os.SCHED_OTHER
+    tasks = Path('/proc/%d/task' % pid)
+    try:
+        tids = [int(t.name) for t in tasks.iterdir() if t.name.isdigit()]
+    except OSError:
+        tids = [pid]
+    for tid in tids:
+        try:
+            os.setpriority(os.PRIO_PROCESS, tid, nice_value)
+            os.sched_setscheduler(tid, policy, os.sched_param(0))
+        except OSError:
+            pass
+
+
+class MatchPriority:
+    """Lower the launcher and CEF processes of the guest while a match runs."""
+
+    def __init__(self, enabled=True, apply=set_priority, out=sys.stdout):
+        self.enabled = enabled
+        self.apply = apply
+        self.out = out
+        self.lowered = set()
+
+    def update(self, namespace, game, proc_root=Path('/proc'), own_namespace=None):
+        if not self.enabled:
+            return
+        if not game:
+            self.restore()
+            return
+        background = set()
+        for pid, proc in namespace_members(namespace, proc_root, own_namespace):
+            if GAME_NAME not in command_names(proc):
+                background.add(pid)
+        new = background - self.lowered
+        if new and not self.lowered:
+            log('match running; lowering launcher and client priority', self.out)
+        for pid in sorted(new):
+            self.apply(pid, BACKGROUND_NICE, True)
+        self.lowered |= new
+
+    def restore(self):
+        if not self.lowered:
+            return
+        log('match over; restoring launcher and client priority', self.out)
+        for pid in sorted(self.lowered):
+            self.apply(pid, 0, False)
+        self.lowered = set()
+
+
 def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
-                   own_namespace=None):
+                   own_namespace=None, priority=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
@@ -373,12 +435,15 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
         previous[signum] = signal.signal(signum, forward)
     seen_client = False
     idle_since = None
+    priority = priority or MatchPriority(enabled=False)
     try:
         while child.poll() is None and not stop:
             # Learn the guest namespace while the session runs: after a crash
             # the processes that still carry the socket may be the only proof.
             if namespace is None:
                 namespace = prefix_namespace(prefix, proc_root)
+            priority.update(namespace, game_running(prefix, proc_root), proc_root,
+                            own_namespace)
             if stop_after > 0:
                 now = time.monotonic()
                 seen_client, idle_since, stop_now = idle_decision(
@@ -402,6 +467,15 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
             except OSError:
                 pass
         code = child.wait()
+        # The loader can exit while the match keeps running, for example when
+        # the Riot Client is closed in game. Wait for the match, not the loader.
+        if not stop and owns_runtime and game_running(prefix, proc_root):
+            log('loader exited during a match; waiting for the game to end', out)
+            namespace = namespace or prefix_namespace(prefix, proc_root)
+            while not stop and game_running(prefix, proc_root):
+                priority.update(namespace, True, proc_root, own_namespace)
+                sleep(poll)
+        priority.restore()
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
@@ -448,8 +522,9 @@ def main(argv=None):
         parser.error('a command is required after --')
     clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT', '1') != '0'
     prefix = args.prefix.expanduser().resolve()
+    priority = MatchPriority(enabled=os.environ.get('RCLOL_MATCH_PRIORITY', '1') != '0')
     return run_supervised(command, prefix, args.darling, stop_after=max(0, args.stop_after),
-                          clean=clean)
+                          clean=clean, priority=priority)
 
 
 if __name__ == '__main__':
