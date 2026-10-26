@@ -69,9 +69,10 @@ class SetupFixture(unittest.TestCase):
                               text=True, capture_output=True, timeout=20)
 
 
-    def configure(self):
-        result = self.run_script('scripts/configure.py')
+    def configure(self, *args):
+        result = self.run_script('scripts/configure.py', *args)
         self.assertEqual(result.returncode, 0, result.stderr)
+        return result
 
 
     def stub(self, name, body):
@@ -118,6 +119,101 @@ exec REAL_INSTALL "$@"'''.replace('REAL_INSTALL', shutil.which('install')))
         self.configure()
         self.assertFalse(victim.exists(), 'configure followed the dangling generated-file symlink')
         self.assertFalse(target.is_symlink())
+
+
+    def test_configure_repairs_build_symlinks_and_survives_checkout_move(self):
+        self.configure()
+        link = self.root / 'build/runtime/build'
+        old_target = Path(self.tmp.name) / 'old build target'
+        old_target.mkdir()
+        link.unlink()
+        link.symlink_to(old_target, target_is_directory=True)
+        self.configure()
+        self.assertEqual(os.readlink(link), '..')
+
+        link.unlink()
+        link.symlink_to(Path(self.tmp.name) / 'missing build target', target_is_directory=True)
+        self.configure()
+        self.assertEqual(os.readlink(link), '..')
+
+        moved = Path(self.tmp.name) / 'moved checkout'
+        self.root.rename(moved)
+        self.root = moved
+        self.configure()
+        link = self.root / 'build/runtime/build'
+        self.assertEqual(link.resolve(), (self.root / 'build').resolve())
+
+
+    def test_configure_preserves_non_symlink_runtime_build_data(self):
+        runtime_build = self.root / 'build/runtime/build'
+        runtime_build.mkdir(parents=True)
+        marker = runtime_build / 'local-state'
+        marker.write_text('keep')
+        result = self.configure()
+        self.assertTrue(marker.is_file())
+        self.assertFalse(runtime_build.is_symlink())
+        self.assertIn('not a symlink; leaving it untouched', result.stderr)
+
+
+    def test_configure_rehomes_only_legacy_default_prefix_when_home_changes(self):
+        old_home = Path(self.tmp.name) / 'old host home'
+        old_prefix = old_home / '.darling'
+        old_prefix.mkdir(parents=True)
+        marker = old_prefix / 'user-data'
+        marker.write_text('keep')
+        config = dict(self.config, host_home=str(old_home), prefix=str(old_prefix))
+        (self.root / 'build/config.json').write_text(json.dumps(config))
+
+        result = self.configure()
+        updated = json.loads((self.root / 'build/config.json').read_text())
+        self.assertEqual(updated['prefix'], str(self.home / '.darling'))
+        self.assertFalse(updated['prefix_is_explicit'])
+        self.assertTrue(marker.is_file(), 'reconfiguring must not move or delete the old prefix')
+        self.assertIn('existing data', result.stderr)
+
+
+    def test_configure_preserves_explicit_prefix_from_previous_home(self):
+        old_home = Path(self.tmp.name) / 'old host home'
+        explicit_prefix = old_home / 'League data'
+        explicit_prefix.mkdir(parents=True)
+        marker = explicit_prefix / 'user-data'
+        marker.write_text('keep')
+        config = dict(self.config, host_home=str(old_home), prefix=str(explicit_prefix))
+        (self.root / 'build/config.json').write_text(json.dumps(config))
+
+        result = self.configure()
+        updated = json.loads((self.root / 'build/config.json').read_text())
+        self.assertEqual(updated['prefix'], str(explicit_prefix))
+        self.assertTrue(updated['prefix_is_explicit'])
+        self.assertTrue(marker.is_file())
+        self.assertIn('it was kept', result.stderr)
+
+
+    def test_configure_preserves_explicit_default_path_selected_with_cli(self):
+        old_home = Path(self.tmp.name) / 'old host home'
+        explicit_default = old_home / '.darling'
+        self.configure('--prefix', str(explicit_default))
+        config_path = self.root / 'build/config.json'
+        config = json.loads(config_path.read_text())
+        config['host_home'] = str(old_home)
+        config_path.write_text(json.dumps(config))
+
+        self.configure()
+        updated = json.loads(config_path.read_text())
+        self.assertEqual(updated['prefix'], str(explicit_default))
+        self.assertTrue(updated['prefix_is_explicit'])
+
+
+    def test_configure_warns_about_stale_cmake_cache_without_deleting_it(self):
+        cache = self.root / 'build/darling-src/build/CMakeCache.txt'
+        cache.parent.mkdir(parents=True)
+        cache.write_text('CMAKE_HOME_DIRECTORY:INTERNAL=/previous/checkout/build/darling-src\n')
+
+        result = self.configure()
+        self.assertEqual(cache.read_text(),
+                         'CMAKE_HOME_DIRECTORY:INTERNAL=/previous/checkout/build/darling-src\n')
+        self.assertIn('was left untouched', result.stderr)
+        self.assertIn('/previous/checkout/build/darling-src', result.stderr)
 
 
     def test_presentation_creates_prerequisites_and_repeat_install(self):
