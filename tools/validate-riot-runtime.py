@@ -35,6 +35,11 @@ PREFIX_REQUIRED = (
     'LaunchServices.framework/Versions/A/LaunchServices',
     'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/'
     'CarbonCore.framework/Versions/A/CarbonCore',
+    'System/Library/Frameworks/Metal.framework/Versions/A/Metal',
+    'System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore',
+    'System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib',
+    'usr/lib/darling/libindium.dylib',
+    'usr/lib/darling/libiridium.dylib',
 )
 MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe')
 

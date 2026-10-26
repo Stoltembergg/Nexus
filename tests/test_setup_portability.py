@@ -34,6 +34,11 @@ PREFIX_VALIDATION_INPUTS = (
     'System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib',
     'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices',
     'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore',
+    'System/Library/Frameworks/Metal.framework/Versions/A/Metal',
+    'System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore',
+    'System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib',
+    'usr/lib/darling/libindium.dylib',
+    'usr/lib/darling/libiridium.dylib',
 )
 
 
@@ -172,6 +177,45 @@ exec REAL_INSTALL "$@"'''.replace('REAL_INSTALL', shutil.which('install')))
                 path.write_bytes(b'\xcf\xfa\xed\xfe' + b'\0' * 5000)
         self.stub('llvm-objdump', '''printf '%s\\n' "$*" >> "$FIXTURE_LOG"
 exit "${CHECK_FAIL:-0}"''')
+
+
+    def test_graphics_system_install_backup_idempotent_restore(self):
+        self.configure()
+        self.runtime_stubs()
+        self.log.write_text('')
+        sources = {
+            'RuntimeFrameworks/Metal.framework/Versions/A/Metal': 'System/Library/Frameworks/Metal.framework/Versions/A/Metal',
+            'RuntimeFrameworks/QuartzCore.framework/Versions/A/QuartzCore': 'System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore',
+            'RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib': 'System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib',
+            'RuntimeLibraries/libindium.dylib': 'usr/lib/darling/libindium.dylib',
+            'RuntimeLibraries/libiridium.dylib': 'usr/lib/darling/libiridium.dylib',
+        }
+        script = 'build/runtime/tools/install-riot-graphics-system.sh'
+        result = self.run_script(script)
+        self.assertNotEqual(result.returncode, 0)  # missing sources: nothing replaced
+        self.assertFalse((self.prefix / 'usr/lib/darling').exists())
+        for source, destination in sources.items():
+            path = self.guest / source
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'riot ' + source.encode())
+            if 'libiridium' not in source:  # one stock file absent on purpose
+                stock = self.prefix / destination
+                stock.parent.mkdir(parents=True, exist_ok=True)
+                stock.write_bytes(b'stock ' + destination.encode())
+        for _ in range(2):
+            result = self.run_script(script)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        for source, destination in sources.items():
+            self.assertEqual((self.prefix / destination).read_bytes(), (self.guest / source).read_bytes())
+            self.assertEqual((self.guest / source).read_bytes(), b'riot ' + source.encode())
+        result = self.run_script(script, '--restore')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for destination in sources.values():
+            target = self.prefix / destination
+            if 'libiridium' in destination:
+                self.assertFalse(target.exists())
+            else:
+                self.assertEqual(target.read_bytes(), b'stock ' + destination.encode())
 
 
     def test_launcher_selects_paths_before_prefix_helpers(self):

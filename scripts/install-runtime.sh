@@ -40,6 +40,8 @@ if [ -n "$new_prefix" ]; then
 fi
 sh build/runtime/tools/install-riot-presentation-runtime.sh
 sh build/runtime/tools/install-riot-gpu-runtime.sh
+# Same graphics bytes at their normal system paths in the prefix (no env override needed).
+sh build/runtime/tools/install-riot-graphics-system.sh
 # darling-lol perf: build and install optimized libc/libc++/libplatform.
 if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
   sh build/runtime/tools/build-riot-libs-runtime.sh
