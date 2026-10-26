@@ -158,6 +158,26 @@ static char *cf_to_c(CFTypeRef v)
 	return NULL;
 }
 
+static int is_identifier_key(const char *k)
+{
+	return strcmp(k, "IOPlatformSerialNumber") == 0 ||
+	       strcmp(k, "IOPlatformUUID") == 0;
+}
+
+/* Coarse character-class shape only: "uuid", "alnum-upper" or "other". */
+static const char *identifier_format(const char *s)
+{
+	size_t i, n = strlen(s);
+	int upper_alnum = n > 0;
+
+	if (n == 36 && s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-')
+		return "uuid";
+	for (i = 0; i < n; i++)
+		if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9')))
+			upper_alnum = 0;
+	return upper_alnum ? "alnum-upper" : "other";
+}
+
 static void emit_iokit_platform(FILE *out)
 {
 	io_service_t service;
@@ -200,7 +220,12 @@ static void emit_iokit_platform(FILE *out)
 		fputs(",\n    ", out);
 		json_escape(out, keys[i]);
 		fputs(": ", out);
-		if (s) {
+		if (s && is_identifier_key(keys[i])) {
+			/* Never emit serials or UUIDs: record shape only. */
+			fprintf(out, "{\"present\": true, \"length\": %zu, \"format\": \"%s\"}",
+				strlen(s), identifier_format(s));
+			free(s);
+		} else if (s) {
 			json_escape(out, s);
 			free(s);
 		} else {
@@ -332,7 +357,8 @@ int main(void)
 	if (uname(&u) == 0) {
 		fputs("  \"uname\": {\n", stdout);
 		fputs("    \"sysname\": ", stdout); json_escape(stdout, u.sysname); fputs(",\n", stdout);
-		fputs("    \"nodename\": ", stdout); json_escape(stdout, u.nodename); fputs(",\n", stdout);
+		/* Hostname is personal; record only whether it is set. */
+		fprintf(stdout, "    \"nodename\": {\"present\": %s},\n", u.nodename[0] ? "true" : "false");
 		fputs("    \"release\": ", stdout); json_escape(stdout, u.release); fputs(",\n", stdout);
 		fputs("    \"version\": ", stdout); json_escape(stdout, u.version); fputs(",\n", stdout);
 		fputs("    \"machine\": ", stdout); json_escape(stdout, u.machine); fputs("\n", stdout);

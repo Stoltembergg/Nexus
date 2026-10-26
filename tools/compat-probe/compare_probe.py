@@ -15,7 +15,7 @@ from typing import Any
 
 # Values that always differ between machines and are not compatibility gaps.
 IGNORE_EXACT = {
-    ("uname", "nodename"),
+    ("uname", "nodename", "present"),
 }
 
 IGNORE_PREFIX = (

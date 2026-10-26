@@ -1,17 +1,75 @@
 {
   "probe": "compat-probe",
   "version": 1,
-  "uname": {"sysname": "Darwin", "nodename": "MacBookPro", "release": "23.6.0", "version": "Darwin Kernel Version 23.6.0", "machine": "x86_64"},
-  "sysctl": {
-    "hw.model": {"ok": true, "value": "MacBookPro16,1"},
-    "hw.machine": {"ok": true, "value": "x86_64"},
-    "hw.ncpu": {"ok": true, "value": 16},
-    "machdep.cpu.brand_string": {"ok": true, "value": "Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz"},
-    "kern.osproductversion": {"ok": true, "value": "14.6"},
-    "kern.csr_config": {"ok": true, "value": 0}
+  "uname": {
+    "sysname": "Darwin",
+    "nodename": {
+      "present": true
+    },
+    "release": "23.6.0",
+    "version": "Darwin Kernel Version 23.6.0",
+    "machine": "x86_64"
   },
-  "iokit_platform": {"ok": true, "model": "MacBookPro16,1", "IOPlatformSerialNumber": "C02EXAMPLE", "IOPlatformUUID": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "manufacturer": "Apple Inc."},
-  "csops_status": {"ok": true, "flags": 1},
-  "mounts": {"ok": true, "count": 2, "fstypes": ["apfs", "devfs"]},
-  "processes": {"ok": true, "count": 400, "sample_names": ["kernel_task", "launchd", "WindowServer"]}
+  "sysctl": {
+    "hw.model": {
+      "ok": true,
+      "value": "MacBookPro16,1"
+    },
+    "hw.machine": {
+      "ok": true,
+      "value": "x86_64"
+    },
+    "hw.ncpu": {
+      "ok": true,
+      "value": 16
+    },
+    "machdep.cpu.brand_string": {
+      "ok": true,
+      "value": "Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz"
+    },
+    "kern.osproductversion": {
+      "ok": true,
+      "value": "14.6"
+    },
+    "kern.csr_config": {
+      "ok": true,
+      "value": 0
+    }
+  },
+  "iokit_platform": {
+    "ok": true,
+    "model": "MacBookPro16,1",
+    "IOPlatformSerialNumber": {
+      "present": true,
+      "length": 12,
+      "format": "alnum-upper"
+    },
+    "IOPlatformUUID": {
+      "present": true,
+      "length": 36,
+      "format": "uuid"
+    },
+    "manufacturer": "Apple Inc."
+  },
+  "csops_status": {
+    "ok": true,
+    "flags": 1
+  },
+  "mounts": {
+    "ok": true,
+    "count": 2,
+    "fstypes": [
+      "apfs",
+      "devfs"
+    ]
+  },
+  "processes": {
+    "ok": true,
+    "count": 400,
+    "sample_names": [
+      "kernel_task",
+      "launchd",
+      "WindowServer"
+    ]
+  }
 }

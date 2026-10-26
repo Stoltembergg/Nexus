@@ -33,9 +33,12 @@ clang -O2 -Wall -Wextra -DCOMPAT_PROBE_WINDOWS=1 -o compat_probe compat_probe.c 
 python3 compare_probe.py macos.json darling.json
 ```
 
-Exit status: `0` match, `1` differences, `2` IO/parse errors. Hostnames are
-ignored. Serial numbers and UUIDs will differ across machines; treat those as
-shape/presence checks, not byte equality targets for every run.
+Exit status: `0` match, `1` differences, `2` IO/parse errors.
+
+Privacy: the probe never prints the hostname, serial number or platform UUID.
+It records only whether the hostname is set and, for the serial and UUID, their
+presence, length and coarse format (`uuid`, `alnum-upper`, `other`). Review a
+capture before sharing it anyway.
 
 ## Fixtures
 
