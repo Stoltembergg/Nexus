@@ -51,12 +51,12 @@ privacy/safety boundary is deliberate:
 | # | Requirement | Today | Primary seam | Acceptance test |
 |---|---|---|---|---|
 | 1 | Launch gate over the on-disk snapshot | verifier is a standalone tool | `tools/verify-darling-code-signature.py`, `scripts/run.sh`, `tools/run-riot-client.sh` | gate test: tampered image refuses to launch under enforcement |
-| 2 | Task-owned signing state (`CS_VALID`) | always zero | `src/startup/mldr/mldr.c`, `xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c` | probe: status reflects the loader's result, not a filename |
+| 2 | Task-owned signing state (`CS_VALID`) | always zero | `src/startup/mldr/mldr.c`, `src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c` | probe: status reflects the loader's result, not a filename |
 | 3 | Enforce verification at exec / dlopen | not done | `patches/darling.patch` → `src/startup/mldr/mldr.c` | gate test: bad image aborts exec; good image loads |
 | 4 | Protect running pages (page integrity) | not done | xnu VM mapping/seal, `mmap`/write paths | test: writing a sealed page fails; unchanged image runs |
 | 5 | Apple certificate/entitlement/notarization policy | not done | `patches/security.patch` → `libsecurity_codesigning/lib/{StaticCode.cpp,reqparser.cpp}` | test: requirement/OID/EKU/revocation/notarization cases |
-| 6 | Authenticated Apple trust cache | local pin list only | `xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c` AMFI, trust-cache source | test: authenticated entry accepted, forged entry rejected |
-| 7 | Kernel-enforced SIP filesystem paths | disabled flag only | `xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c`, xnu VFS (rename/link/mmap/metadata) | test: protected path operations denied under SIP |
+| 6 | Authenticated Apple trust cache | local pin list only | `src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c` AMFI, trust-cache source | test: authenticated entry accepted, forged entry rejected |
+| 7 | Kernel-enforced SIP filesystem paths | disabled flag only | `src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c`, xnu VFS (rename/link/mmap/metadata) | test: protected path operations denied under SIP |
 | 8 | Debug/injection restrictions, privileged-op mediation | not done | xnu task/port + privilege paths | test: unauthorized debug/inject denied |
 | 9 | Migrate callers that relied on fabricated success | unknown | call sites of `csops`/AMFI/Security | audit + regression run |
 
