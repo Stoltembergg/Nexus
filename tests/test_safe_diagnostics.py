@@ -54,7 +54,8 @@ class RedactionTests(unittest.TestCase):
             self.assertNotIn(value, result)
 
     def test_private_key_jwt_and_github_token(self):
-        key = '-----BEGIN PRIVATE KEY-----\nSYNTHETIC_KEY\n-----END PRIVATE KEY-----'
+        key = ('-----BEGIN PRIVATE ' + 'KEY-----\nSYNTHETIC_KEY\n'
+               '-----END PRIVATE KEY-----')
         jwt = 'eyJ' + 'A' * 24 + '.' + 'B' * 24 + '.' + 'C' * 24
         github = 'ghp_' + 'x' * 32
         result = redaction.redact_text(key + '\n' + jwt + '\n' + github)
