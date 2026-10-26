@@ -47,6 +47,10 @@ Game files, Riot installers, account databases, tokens, local prefixes, captures
 
 Use the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff) for your distribution. `tools/env-check.sh` provides a starting check; its legacy package names may need adapting to your distro.
 
+Build and runtime installation now run a [version-aware host preflight](docs/HOST_PREFLIGHT.md)
+before mutable setup. To inspect prerequisites without starting Darling or Riot,
+run `python3 scripts/preflight.py --mode runtime --json`.
+
 ## Experimental Nix/rootless package
 
 ```sh
@@ -153,6 +157,10 @@ client or match once it has seen one. See
 for the measured effect and caveats.
 
 ## Testing
+
+For private, opt-in diagnostics that do not start the client or query Riot APIs,
+see [safe diagnostics and account restrictions](docs/SAFE_DIAGNOSTICS.md).
+Diagnostic success does not establish account safety or prevent suspensions.
 
 Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. The project includes standalone compatibility probes and the opt-in host-side window-management helpers described above, but no client injection hooks, client API automation or input automation; the normal launcher enables none of them.
 

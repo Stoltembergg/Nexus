@@ -34,11 +34,13 @@ class RuntimeCleanupScopeTests(unittest.TestCase):
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.enterContext(patch.dict(os.environ, {'DPREFIX': str(self.prefix)}))
         self.enterContext(patch.object(self.cleanup, 'Path', side_effect=self.fake_path))
-        # Its default Path('/proc') is bound at definition time, before patching Path.
-        running = self.cleanup.any_server_running
-        self.enterContext(patch.object(self.cleanup, 'any_server_running',
-                                     side_effect=lambda proc_root=None: running(
-                                         self.proc if proc_root is None else proc_root)))
+        # All three /proc defaults are bound before Path is patched. Route every
+        # default through the fixture, including the diagnostic-only scans.
+        for name in ('any_server_running', 'stop_orphaned_launchd', 'stop_riot_crashpad'):
+            original = getattr(self.cleanup, name)
+            self.enterContext(patch.object(self.cleanup, name,
+                                           side_effect=lambda proc_root=None, original=original: original(
+                                               self.proc if proc_root is None else proc_root)))
 
     def fake_path(self, value):
         # Never inspect host /proc or remove host shared-memory files.
@@ -66,6 +68,14 @@ class RuntimeCleanupScopeTests(unittest.TestCase):
     def test_clean_start_is_silent(self):
         self.cleanup.main()
         self.assertEqual(self.stderr.getvalue(), '')
+        self.kill.assert_not_called()
+
+    def test_main_diagnostic_scans_use_only_fixture_proc(self):
+        with patch.object(self.cleanup, '_matching_pids', wraps=self.cleanup._matching_pids) as matching:
+            self.cleanup.main()
+        self.assertEqual(matching.call_count, 2)
+        for call in matching.call_args_list:
+            self.assertEqual(call.args[1], self.proc)
         self.kill.assert_not_called()
 
     def test_unrelated_processes_are_silent(self):

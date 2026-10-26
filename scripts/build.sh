@@ -2,8 +2,9 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
-python3 scripts/configure.py
 if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
+python3 scripts/preflight.py --mode build
+python3 scripts/configure.py
 python3 scripts/prepare.py
 # Empty build type, as upstream Darling uses: objc4 always defines OBJC_IS_DEBUG_BUILD=1,
 # so Release's -DNDEBUG trips its "mismatch in debug-ness macros" #error.

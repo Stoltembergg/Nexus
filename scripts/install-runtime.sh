@@ -3,16 +3,19 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
   python3 scripts/nix-idle.py
   python3 scripts/nix-state.py check-base || { echo 'Base runtime readiness missing; run darling-lol --update.' >&2; exit 1; }
+fi
+python3 scripts/preflight.py --mode runtime
+if [ -n "${DARLING_WORKSPACE:-}" ]; then
   python3 scripts/nix-state.py invalidate
   # Prefix initialization is a setup-only exception to the runner launch gate.
   export DARLING_SETUP=1
 fi
 python3 scripts/configure.py
 . build/runtime/tools/runtime-paths.sh
-if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
 # A server killed by the base install leaves a stale .init.pid that makes darling shell fail.
 python3 build/runtime/tools/ensure-darling-runtime.py
 # Initialize the normal user-owned prefix before installing overrides.

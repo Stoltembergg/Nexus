@@ -1,6 +1,7 @@
 """Test the opt-in partial client-tree recovery with fake /proc entries."""
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -19,6 +20,9 @@ CLIENT = '/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServ
 
 class RecoverStaleClientTests(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ, {'NIRI_SOCKET': '', 'XDG_CURRENT_DESKTOP': 'fixture'})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -209,6 +213,60 @@ class RecoverStaleClientTests(unittest.TestCase):
                               'WM_CLASS(STRING) = "RiotClientServices", "RiotClientServices"\n',
                           ]):
             self.assertTrue(recover_stale_client.visible_client_window())
+
+    def test_niri_stashed_client_blocks_recovery(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+        inventory = json.dumps([{'id': 42, 'app_id': 'RiotClientServices',
+                                 'title': 'Riot Client', 'workspace_id': 99,
+                                 'is_focused': False}])
+        killed = []
+        with patch.dict(os.environ, {'NIRI_SOCKET': '/fixture/niri.sock'}), \
+                patch.object(recover_stale_client.subprocess, 'check_output', return_value=inventory):
+            recover_stale_client.recover(self.prefix, proc_root=self.proc,
+                                         kill=lambda *args: killed.append(args),
+                                         sleep=lambda _: None, out=io.StringIO())
+        self.assertEqual(killed, [])
+
+    def test_game_appearing_after_sigterm_prevents_sigkill(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+
+        def start_game(_pid, signum):
+            if signum == recover_stale_client.signal.SIGTERM:
+                self.process(20, 'mldr', [GAME], self.client_env(), age=0)
+
+        _, killed, output = self.run_recover(on_kill=start_game)
+        self.assertEqual(killed, [(12, recover_stale_client.signal.SIGTERM)])
+        self.assertIn('stopping recovery', output)
+
+    def test_unknown_window_state_before_escalation_preserves_client(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+        killed = []
+        with patch.object(recover_stale_client, 'client_windows_present',
+                          side_effect=[False, False, False, None]):
+            recover_stale_client.recover(self.prefix, proc_root=self.proc,
+                                         kill=lambda *args: killed.append(args),
+                                         sleep=lambda _: None, out=io.StringIO())
+        self.assertEqual(killed, [(12, recover_stale_client.signal.SIGTERM)])
+
+    def test_unreadable_owned_process_blocks_recovery(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+        folder = self.process(20, 'unknown', ['/fixture/process'])
+        (folder / 'cmdline').unlink()
+        _, killed, _ = self.run_recover()
+        self.assertEqual(killed, [])
+
+    def test_missing_proc_inventory_blocks_recovery(self):
+        self.assertTrue(recover_stale_client.game_running(self.root / 'missing'))
+
+    def test_unknown_window_callback_blocks_signals(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+        _, killed, _ = self.run_recover(window=None)
+        self.assertEqual(killed, [])
 
 
 if __name__ == '__main__':
