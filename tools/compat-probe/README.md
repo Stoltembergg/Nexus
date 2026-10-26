@@ -37,7 +37,12 @@ Exit status: `0` match, `1` differences, `2` IO/parse errors.
 
 Privacy: the probe never prints the hostname, serial number or platform UUID.
 It records only whether the hostname is set and, for the serial and UUID, their
-presence, length and coarse format (`uuid`, `alnum-upper`, `other`). Review a
+presence, length and coarse format (`uuid`, `alnum-upper`, `other`). It never
+lists process names either: `processes` holds only the PID count and
+`system_present`, booleans for a fixed list of universal macOS daemons
+(`kernel_task`, `launchd`, `WindowServer`, `loginwindow`, `logd`, `configd`,
+`notifyd`, `mds`). Mounts report filesystem types only, never paths, and the
+optional window section reports a count only. Review a
 capture before sharing it anyway.
 
 ## Fixtures

@@ -66,10 +66,15 @@
   "processes": {
     "ok": true,
     "count": 400,
-    "sample_names": [
-      "kernel_task",
-      "launchd",
-      "WindowServer"
-    ]
+    "system_present": {
+      "kernel_task": true,
+      "launchd": true,
+      "WindowServer": true,
+      "loginwindow": true,
+      "logd": true,
+      "configd": true,
+      "notifyd": true,
+      "mds": true
+    }
   }
 }

@@ -11,7 +11,7 @@ thread #31). Framing is compatibility only; see `docs/COMPLIANCE.md`.
 | `csops` | Code-signing status for the running image | Non-zero validated flags when signed | Often zero flags / no validation path |
 | SIP / CSR | Security policy queries | Config readable | `kern.csr_config` missing or SIP reported disabled |
 | Mounts (`getfsstat`) | Filesystem topology | APFS (+ devfs) | Host Linux fstypes (`ext4`, `proc`, `sysfs`, …) |
-| Processes (`proc_listpids`) | Process enumeration | Real Darwin daemons + apps | Unsupported / empty / error |
+| Processes (`proc_listpids`) | Process enumeration (count + fixed system daemons only) | Count plus `kernel_task`, `launchd`, `WindowServer`… present | Unsupported / empty / error |
 
 Workflow: capture JSON on macOS and Darling with `compat_probe`, diff with
 `compare_probe.py`, then open ordinary compatibility fixes (truthful APIs,

@@ -284,11 +284,28 @@ static void emit_mounts(FILE *out)
 	free(bufs);
 }
 
+/* Fixed list of universal macOS system daemons. Only these names are ever
+ * checked, and only booleans are emitted: no user app names leave the probe. */
+static const char *const system_processes[] = {
+	"kernel_task",
+	"launchd",
+	"WindowServer",
+	"loginwindow",
+	"logd",
+	"configd",
+	"notifyd",
+	"mds",
+	NULL
+};
+#define SYSTEM_PROCESS_COUNT (sizeof(system_processes) / sizeof(system_processes[0]) - 1)
+
 static void emit_processes(FILE *out)
 {
 	int bufsize;
 	pid_t *pids;
-	int n, i, shown = 0;
+	int n, i;
+	size_t j;
+	int found[SYSTEM_PROCESS_COUNT] = {0};
 
 	fputs("  \"processes\": {\n", out);
 	bufsize = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
@@ -308,23 +325,27 @@ static void emit_processes(FILE *out)
 		return;
 	}
 	n = bufsize / (int)sizeof(pid_t);
-	fprintf(out, "    \"ok\": true,\n    \"count\": %d,\n    \"sample_names\": [", n);
-	for (i = 0; i < n && shown < 16; i++) {
+	for (i = 0; i < n; i++) {
 		char name[PROC_PIDPATHINFO_MAXSIZE];
-		int nr;
 
-		if (pids[i] <= 0)
+		/* pid 0 is kernel_task on macOS. */
+		if (pids[i] < 0)
 			continue;
 		memset(name, 0, sizeof(name));
-		nr = proc_name(pids[i], name, (uint32_t)sizeof(name));
-		if (nr <= 0)
+		if (proc_name(pids[i], name, (uint32_t)sizeof(name)) <= 0) {
+			if (pids[i] == 0)
+				found[0] = 1;
 			continue;
-		if (shown)
-			fputc(',', out);
-		json_escape(out, name);
-		shown++;
+		}
+		for (j = 0; j < SYSTEM_PROCESS_COUNT; j++)
+			if (strcmp(name, system_processes[j]) == 0)
+				found[j] = 1;
 	}
-	fputs("]\n  }", out);
+	fprintf(out, "    \"ok\": true,\n    \"count\": %d,\n    \"system_present\": {", n);
+	for (j = 0; j < SYSTEM_PROCESS_COUNT; j++)
+		fprintf(out, "%s\"%s\": %s", j ? ", " : "", system_processes[j],
+			found[j] ? "true" : "false");
+	fputs("}\n  }", out);
 	free(pids);
 }
 
