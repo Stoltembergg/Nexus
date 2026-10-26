@@ -1,0 +1,17 @@
+{
+  "probe": "compat-probe",
+  "version": 1,
+  "uname": {"sysname": "Darwin", "nodename": "DarlingVM", "release": "23.0.0", "version": "Darling", "machine": "x86_64"},
+  "sysctl": {
+    "hw.model": {"ok": true, "value": "MacBookPro16,1"},
+    "hw.machine": {"ok": true, "value": "x86_64"},
+    "hw.ncpu": {"ok": true, "value": 16},
+    "machdep.cpu.brand_string": {"ok": true, "value": "AMD Ryzen 7 7800X3D 8-Core Processor"},
+    "kern.osproductversion": {"ok": true, "value": "11.0"},
+    "kern.csr_config": {"ok": false, "errno": 2}
+  },
+  "iokit_platform": {"ok": true, "model": "MacBookPro16,1", "IOPlatformSerialNumber": "DARLING-EXAMPLE", "IOPlatformUUID": "11111111-2222-3333-4444-555555555555", "manufacturer": "Apple Inc."},
+  "csops_status": {"ok": true, "flags": 0},
+  "mounts": {"ok": true, "count": 5, "fstypes": ["ext4", "proc", "sysfs", "tmpfs", "overlay"]},
+  "processes": {"ok": false, "errno": 78}
+}
