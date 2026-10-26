@@ -57,6 +57,9 @@ def previous_patches(component):
 if not (source/'.git').exists():
     if a.check_only:p.error('check-only requires an existing pinned source checkout')
     if source.exists():p.error('refusing non-checkout destination; choose an empty source path')
+    # Check before downloading anything: without git-lfs the checkout gets pointer text instead of libraries.
+    if subprocess.run(['git','lfs','version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
+        p.error('Git LFS is required to fetch the pinned sources; install git-lfs first')
     source.parent.mkdir(parents=True,exist_ok=True)
     # Fetch the exact pin, not today's master. Publish only a complete checkout;
     # failed downloads are removed without touching an existing user checkout.
@@ -66,8 +69,6 @@ if not (source/'.git').exists():
         run(['git','-C',str(checkout),'remote','add','origin',manifest['upstream']])
         run(['git','-C',str(checkout),'fetch','--depth','1','origin',manifest['revision']])
         run(['git','-C',str(checkout),'checkout','--detach','FETCH_HEAD'])
-        if subprocess.run(['git','lfs','version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
-            p.error('Git LFS is required to fetch the pinned sources; install git-lfs first')
         run(['git','-C',str(checkout),*LFS_FILTERS,'lfs','install','--local'],stdout=subprocess.DEVNULL)
         print('Initializing Darling submodules (large repositories/LFS assets may take a while)...',flush=True)
         for attempt in range(1,4):

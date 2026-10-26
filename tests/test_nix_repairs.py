@@ -63,6 +63,17 @@ class PrepareTests(unittest.TestCase):
         return run(sys.executable, 'scripts/prepare.py', '--source', str(self.source),
                    *(['--check-only'] if check else []), cwd=self.project, env=self.env)
 
+    def git_lfs(self, available):
+        """Pin git-lfs on or off for prepare.py instead of inheriting whatever the host has installed.
+        A stub shadows any host git-lfs: it succeeds when available (enough for fixtures without LFS
+        objects: version, install --local, empty ls-files) and fails like a missing command otherwise."""
+        bin_dir = self.root / 'lfs-bin'
+        bin_dir.mkdir(exist_ok=True)
+        stub = bin_dir / 'git-lfs'
+        stub.write_text('#!/bin/sh\n' + ('exit 0\n' if available else 'echo "git-lfs: not installed" >&2\nexit 127\n'))
+        stub.chmod(0o755)
+        self.env['PATH'] = str(bin_dir) + os.pathsep + os.environ.get('PATH', '')
+
     def manifest(self, revision, components, upstream=None):
         (self.project / 'upstream/manifest.json').write_text(json.dumps({
             'upstream': upstream or self.source.as_uri(), 'revision': revision, 'components': components}))
@@ -155,6 +166,7 @@ class PrepareTests(unittest.TestCase):
         git(self.source, 'commit', '-am', 'advance')
         remote = self.source
         self.source = self.root / 'clone'
+        self.git_lfs(True)
         self.manifest('0' * 40, [], remote.as_uri())
         failed = self.prepare()
         self.assertNotEqual(failed.returncode, 0)
@@ -164,6 +176,21 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(git(self.source, 'rev-parse', 'HEAD'), pin)
         self.assertEqual((self.source / 'file').read_text(), 'pinned')
+
+    def test_fresh_fetch_without_git_lfs_fails_before_downloading(self):
+        (self.source / 'file').write_text('pinned')
+        git(self.source, 'add', '.')
+        git(self.source, 'commit', '-m', 'pin')
+        remote = self.source
+        self.manifest(git(remote, 'rev-parse', 'HEAD'), [], remote.as_uri())
+        self.source = self.root / 'clone'
+        self.git_lfs(False)
+        result = self.prepare()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Git LFS is required to fetch the pinned sources; install git-lfs first', result.stderr)
+        self.assertNotIn('FETCH_HEAD', result.stderr, 'must fail before fetching anything')
+        self.assertFalse(self.source.exists())
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name.startswith('darling-clone-')], [])
 
 
 class CopyTests(unittest.TestCase):
