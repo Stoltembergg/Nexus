@@ -12,10 +12,15 @@ attached-session guard. It must not be imported wholesale into this branch:
 1. `run_supervised()` calls cleanup after an owned loader exits without a final
    game/window safety gate. A loader exit alone does not prove that the game,
    champion selection or a download is finished.
-2. The window probe only uses the X11 EWMH root list. Niri can omit that list;
-   iNiR's stash also deliberately moves a live window to another workspace.
-3. `stop_processes()` rechecks liveness but not a saved process start identity
-   before each signal. PID reuse must not target a different process.
+2. `managed_client_window()` in draft #4 still queries X11 EWMH directly. It
+   does not use the shared tri-state helper, so Niri's native inventory and
+   iNiR's stashed windows are not covered by that supervisor path.
+3. The original `stop_processes()` implementation did not retain a saved
+   process start identity before each signal. A follow-up on draft #4 now
+   carries start ticks from candidate discovery through cleanup and rechecks
+   identity/liveness before TERM and KILL. This rejects observed PID reuse, but
+   procfs validation and `kill(2)` are not atomic; stronger closure needs
+   pidfds. The follow-up does not add a final game/window guard before cleanup.
 4. `owns_runtime = not runtime_alive(...)` is an observation, not an exclusive
    ownership lease. Concurrent launchers need a lock/ownership protocol before
    any automatic shutdown can be considered safe.
@@ -32,12 +37,13 @@ attached-session guard. It must not be imported wholesale into this branch:
 - `unknown`: command failure, timeout, malformed inventory or missing identity.
 
 On Niri it queries `niri msg --json windows`, never filters by focus/workspace,
-and never falls back to X11 after a Niri failure. Otherwise it checks EWMH
-managed windows in X11 sessions. Other detected Wayland sessions return unknown
-without using Xwayland's partial inventory to authorize recovery. Their native
-compositor backends remain unimplemented. Existing minimized X11 windows count
-as present, too. Malformed or unsupported WM_CLASS encodings are unknown. This
-does not inspect Riot APIs or publish window titles.
+and never falls back to X11 after a Niri failure. On non-Niri Wayland, it uses
+X11 EWMH through Xwayland only when `DISPLAY` is set; without Xwayland the result
+is unknown. Failed, missing or malformed inventories remain unknown. This
+supports the project's X11-backed Darling client path, not arbitrary native
+Wayland applications. The Nix FHS environment supplies `xprop`. Existing
+minimized X11 windows count as present, too. Malformed or unsupported WM_CLASS
+encodings are unknown. This does not inspect Riot APIs or publish window titles.
 
 ```sh
 python3 tools/client_window_state.py
@@ -64,10 +70,13 @@ must be preserved. Prefer restoring a minimized window over restarting it.
 - Preserve games and clients on every workspace, including the iNiR stash.
 - Preserve a session when compositor/process state cannot be established.
 - Never infer permission to stop a download/champion selection from no windows.
-- Revalidate saved start identities before signals; evaluate pidfds on Linux.
+- Carry saved start identities from process discovery and revalidate them before
+  each signal; use pidfds if the final procfs-check-to-signal race must be closed.
 - Test concurrent starts, PID reuse, different prefixes, native Niri errors,
   disappearing windows and a game starting before escalation.
 - Do not enable live/account testing as part of CI or installation.
 
-All tests for this step use fake compositor inventories, fake process trees and
-mocked signals. Account restrictions are outside the supervisor's control.
+The PID-reuse regression tests use fake `/proc` trees and mocked signals. The
+existing supervisor signal-escalation test exercises isolated Python helper
+processes only; none of these checks starts Darling, Riot or a game. Account
+restrictions remain outside the supervisor's control.
