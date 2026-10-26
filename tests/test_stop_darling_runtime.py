@@ -28,18 +28,27 @@ class StopRuntimeTests(unittest.TestCase):
         self.signals = []
         self.clock = 0
         self.status_error = None
+        self.window_state = False
+        self.window_states = []
+        self.window_checks = 0
         self.shutdown = lambda: None
         self.on_signal = lambda pid, sig: self.status(pid, 'Z')
 
-    def process(self, pid, *, state='S', parent=1, riot=False, children=()):
+    def process(self, pid, *, state='S', parent=1, riot=False, children=(),
+                comm=None, cmdline=None, environ=None):
         folder = self.proc / str(pid)
         folder.mkdir()
         self.status(pid, state)
         (folder / 'stat').write_text(f'{pid} (test process) ' + ' '.join(
             [state, str(parent)] + ['0'] * 17 + ['12345']))
-        (folder / 'comm').write_text('darlingserver' if pid == 100 else 'helper')
+        (folder / 'comm').write_text(
+            comm if comm is not None else 'darlingserver' if pid == 100 else 'helper')
         (folder / 'maps').write_text(
             str(self.prefix / 'Applications/Riot Client.app/helper') if riot else '')
+        if cmdline is not None:
+            (folder / 'cmdline').write_bytes(cmdline)
+        if environ is not None:
+            (folder / 'environ').write_bytes(environ)
         task = folder / 'task' / str(pid)
         task.mkdir(parents=True)
         (task / 'children').write_text(' '.join(map(str, children)))
@@ -50,6 +59,15 @@ class StopRuntimeTests(unittest.TestCase):
     def server(self, **kwargs):
         (self.prefix / '.init.pid').write_text('100')
         self.process(100, **kwargs)
+
+    def game(self, pid, *, socket_prefix=None, include_socket=True, state='S'):
+        environment = b''
+        if include_socket:
+            owner = self.prefix if socket_prefix is None else socket_prefix
+            environment = (b'__mldr_sockpath=' +
+                           os.fsencode(owner / '.darlingserver.sock') + b'\0')
+        self.process(pid, state=state, comm='LeagueofLegends',
+                     cmdline=b'/LeagueofLegends\0', environ=environment)
 
     def run_script(self):
         proc = self.proc
@@ -86,7 +104,17 @@ class StopRuntimeTests(unittest.TestCase):
             self.clock += 1
             return self.clock
 
+        def window_check(check_output=None):
+            self.window_checks += 1
+            if self.window_states:
+                return self.window_states.pop(0)
+            return self.window_state
+
+        client_window_module = types.SimpleNamespace(
+            client_windows_present=window_check)
+
         with patch.dict(sys.modules, {'pathlib': types.SimpleNamespace(Path=RuntimePath)}), \
+                patch.dict(sys.modules, {'client_window_state': client_window_module}), \
                 patch.dict(os.environ, {'DPREFIX': str(self.prefix)}), \
                 patch('subprocess.run', side_effect=run), \
                 patch('os.kill', side_effect=kill), \
@@ -137,6 +165,70 @@ class StopRuntimeTests(unittest.TestCase):
             self.run_script()
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.signals, [])
+
+    def test_selected_prefix_game_blocks_before_shutdown(self):
+        self.game(101)
+        with self.assertRaisesRegex(SystemExit, 'League game process'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.signals, [])
+
+    def test_game_from_another_prefix_does_not_block(self):
+        other_prefix = self.root / 'other-prefix'
+        other_prefix.mkdir()
+        self.game(101, socket_prefix=other_prefix)
+        self.run_script()
+        self.assert_finished()
+
+    def test_unrelated_host_process_does_not_block(self):
+        self.process(101, comm='python3', cmdline=b'/usr/bin/python3\0worker\0')
+        self.run_script()
+        self.assert_finished()
+
+    def test_unowned_game_candidate_blocks_as_unknown(self):
+        self.game(101, include_socket=False)
+        with self.assertRaisesRegex(SystemExit, 'League game process'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+
+    def test_client_window_blocks_before_shutdown(self):
+        self.window_state = True
+        with self.assertRaisesRegex(SystemExit, 'client window'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.signals, [])
+
+    def test_unknown_window_state_blocks_before_shutdown(self):
+        self.window_state = None
+        with self.assertRaisesRegex(SystemExit, 'window state unknown'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+
+    def test_non_boolean_false_window_state_blocks(self):
+        self.window_state = 0
+        with self.assertRaisesRegex(SystemExit, 'window state unknown'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+
+    def test_unreadable_process_inventory_blocks_before_shutdown(self):
+        self.proc.rmdir()
+        with self.assertRaisesRegex(SystemExit, 'process inventory unknown'):
+            self.run_script()
+        self.assertEqual(self.calls, [])
+
+    def test_game_appearing_during_shutdown_blocks_before_signal(self):
+        self.server(children=(101,))
+        self.process(101, parent=100, riot=True)
+
+        def shutdown():
+            self.status(100, 'Z')
+            self.game(102)
+
+        self.shutdown = shutdown
+        with self.assertRaisesRegex(SystemExit, 'League game process'):
+            self.run_script()
+        self.assertEqual(self.signals, [])
+        self.assertEqual(len(self.calls), 1)
 
     def test_permission_error_is_not_treated_as_exit(self):
         self.server()
