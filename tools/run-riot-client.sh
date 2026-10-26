@@ -166,6 +166,10 @@ export __GL_YIELD="${__GL_YIELD:-NOTHING}"
 if [ -w /proc/self/timerslack_ns ]; then
   echo 1 > /proc/self/timerslack_ns 2>/dev/null || true
 fi
+# The lifecycle supervisor keeps the Darling runtime alive while LeagueClient or
+# the game is running (closing the Riot Client mid-match no longer tears the match
+# down) and shuts the runtime down cleanly once every client window is closed.
+# Set RCLOL_LIFECYCLE_SUPERVISOR=0 to have it exec Darling directly instead.
 # On affected setups Chromium's default temp directory is unusable. Electron
 # can copy app.asar entries to temporary files for async reads and report a
 # failed copy as "not found". Use a writable guest directory by default.
@@ -179,6 +183,7 @@ exec python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INS
   DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}" \
   DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}" \
   DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}" \
-  "$darling_bin" "$A" --region="${RCLOL_REGION:-EUW}" --locale="${RCLOL_LOCALE:-en_GB}" \
+  DARLING_BIN="$darling_bin" \
+  python3 "$runner_dir/riot-lifecycle-supervisor.py" "$darling_bin" "$A" --region="${RCLOL_REGION:-EUW}" --locale="${RCLOL_LOCALE:-en_GB}" \
     "$@" \
     --log-dir="$guest_path/Library/Logs/Riot Games/Riot Client"
