@@ -1,9 +1,11 @@
 """Session supervisor: attribution, idle decisions and scoped cleanup."""
+import errno
 import importlib.util
 import io
 import os
 from pathlib import Path
 import signal
+import shutil
 import sys
 import tempfile
 import threading
@@ -39,6 +41,41 @@ def set_start_ticks(proc, start_ticks):
     fields = fields_text.split()
     fields[19] = str(start_ticks)
     (proc / 'stat').write_text('%s) %s\n' % (prefix, ' '.join(fields)))
+
+
+class FakePidfds:
+    def __init__(self, on_open=None, on_signal=None):
+        self.opened = []
+        self.signals = []
+        self.signals_by_fd = []
+        self.closed = []
+        self.fd_to_pid = {}
+        self.on_open = on_open
+        self.on_signal = on_signal
+        self.next_fd = 10000
+
+    def open(self, pid, flags):
+        fd = self.next_fd
+        self.next_fd += 1
+        self.opened.append((pid, flags, fd))
+        self.fd_to_pid[fd] = pid
+        if self.on_open:
+            self.on_open(pid)
+        return fd
+
+    def send(self, fd, signum, _siginfo=None, _flags=0):
+        pid = self.fd_to_pid[fd]
+        self.signals.append((pid, signum))
+        self.signals_by_fd.append((fd, signum))
+        if self.on_signal:
+            self.on_signal(pid, signum)
+
+    def close(self, fd):
+        self.closed.append(fd)
+
+    def options(self):
+        return dict(pidfd_open=self.open, pidfd_send_signal=self.send,
+                    close_pidfd=self.close)
 
 
 class AttributionTests(unittest.TestCase):
@@ -284,27 +321,28 @@ class CleanupTests(unittest.TestCase):
         self.process(10)
         self.process(11, ppid=10)
         calls = []
-        killed = []
 
         def run(command, **_kwargs):
             calls.append(command)
 
-        def kill(pid, signum):
-            killed.append((pid, signum))
+        def signaled(pid, signum):
             if signum == supervisor.signal.SIGTERM:
                 import shutil
                 shutil.rmtree(self.root / str(pid))
 
+        pidfds = FakePidfds(on_signal=signaled)
         remaining = supervisor.cleanup(
             self.prefix, '/usr/bin/darling', self.ns, proc_root=self.root,
-            run=run, kill=kill, sleep=lambda _seconds: None, out=self.output,
+            run=run, **pidfds.options(), sleep=lambda _seconds: None, out=self.output,
             own_namespace=self.own, term_grace=0, kill_grace=0,
             safety_check=lambda: True)
         self.assertEqual(remaining, [])
         self.assertEqual(calls, [['/usr/bin/darling', 'shutdown']])
         # Deepest process first: the child (11) before its parent (10).
-        self.assertEqual(killed, [(11, supervisor.signal.SIGTERM),
-                                  (10, supervisor.signal.SIGTERM)])
+        self.assertEqual(pidfds.signals, [(11, supervisor.signal.SIGTERM),
+                                          (10, supervisor.signal.SIGTERM)])
+        self.assertEqual([pid for pid, _flags, _fd in pidfds.opened], [11, 10])
+        self.assertCountEqual(pidfds.closed, [fd for _pid, _flags, fd in pidfds.opened])
         self.assertIn('guest session stopped', self.output.getvalue())
 
     def test_cleanup_does_nothing_without_attribution(self):
@@ -312,7 +350,7 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.cleanup(
             self.prefix, '/usr/bin/darling', None, proc_root=self.root,
             run=lambda *_a, **_k: self.fail('must not run darling shutdown'),
-            kill=lambda *_a: self.fail('must not kill'), sleep=lambda _s: None,
+            sleep=lambda _s: None,
             out=output, own_namespace=self.own, term_grace=0, kill_grace=0,
             safety_check=lambda: True)
         self.assertEqual(remaining, [])
@@ -321,9 +359,10 @@ class CleanupTests(unittest.TestCase):
     def test_live_survivor_is_reported(self):
         self.process(10)
         output = io.StringIO()
+        pidfds = FakePidfds()
         remaining = supervisor.cleanup(
             self.prefix, None, self.ns, proc_root=self.root,
-            run=lambda *_a, **_k: None, kill=lambda *_a: None,
+            run=lambda *_a, **_k: None, **pidfds.options(),
             sleep=lambda _s: None, out=output, own_namespace=self.own, term_grace=0,
             kill_grace=0, safety_check=lambda: True)
         self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
@@ -335,7 +374,6 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.cleanup(
             self.prefix, '/usr/bin/darling', self.ns, proc_root=self.root,
             run=lambda command, **_kwargs: shutdown.append(command),
-            kill=lambda *_args: self.fail('must not signal guest'),
             sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
             safety_check=lambda: False)
         self.assertIsNone(remaining)
@@ -348,7 +386,6 @@ class CleanupTests(unittest.TestCase):
         remaining = supervisor.cleanup(
             self.prefix, '/usr/bin/darling', self.ns, proc_root=self.root,
             run=lambda command, **_kwargs: shutdown.append(command),
-            kill=lambda *_args: self.fail('must not signal guest'),
             sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
             safety_check=lambda: next(checks))
         self.assertIsNone(remaining)
@@ -357,63 +394,184 @@ class CleanupTests(unittest.TestCase):
     def test_state_change_before_guest_term_vetoes_cleanup(self):
         self.process(10)
         checks = iter((True, False))
-        signals = []
+        pidfds = FakePidfds()
         remaining = supervisor.cleanup(
             self.prefix, None, self.ns, proc_root=self.root,
             run=lambda *_args, **_kwargs: self.fail('must not shut down'),
-            kill=lambda pid, sig: signals.append((pid, sig)),
+            **pidfds.options(),
             sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
             term_grace=0, kill_grace=0, safety_check=lambda: next(checks))
         self.assertIsNone(remaining)
-        self.assertEqual(signals, [])
+        self.assertEqual(pidfds.signals, [])
+        self.assertEqual(pidfds.opened, [])
 
     def test_state_change_before_guest_kill_aborts_remaining_cleanup(self):
         self.process(10)
         checks = iter((True, True, True, False))
-        signals = []
+        pidfds = FakePidfds()
         remaining = supervisor.cleanup(
             self.prefix, None, self.ns, proc_root=self.root,
             run=lambda *_args, **_kwargs: self.fail('must not shut down'),
-            kill=lambda pid, sig: signals.append((pid, sig)),
+            **pidfds.options(),
             sleep=lambda _seconds: None, out=self.output, own_namespace=self.own,
             term_grace=0, kill_grace=0, safety_check=lambda: next(checks))
         self.assertIsNone(remaining)
-        self.assertEqual(signals, [(10, signal.SIGTERM)])
+        self.assertEqual(pidfds.signals, [(10, signal.SIGTERM)])
+        self.assertEqual(pidfds.closed, [pidfds.opened[0][2]])
 
     def test_reused_pid_after_snapshot_is_not_signaled(self):
         proc = self.process(10)
         members = supervisor.namespace_members(self.ns, self.root, self.own)
         set_start_ticks(proc, 200)
-        signals = []
+        pidfds = FakePidfds()
 
         remaining = supervisor.stop_processes(
-            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            members, **pidfds.options(),
             sleep=lambda _seconds: None, proc_root=self.root,
             term_grace=0, kill_grace=0, safety_check=lambda: True)
-        self.assertEqual(signals, [])
+        self.assertEqual(pidfds.signals, [])
+        self.assertEqual(pidfds.opened, [])
         self.assertEqual(remaining, [])
+
+    def test_reused_pid_during_pidfd_open_is_not_signaled(self):
+        proc = self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        pidfds = FakePidfds(on_open=lambda _pid: set_start_ticks(proc, 200))
+
+        remaining = supervisor.stop_processes(
+            members, **pidfds.options(), sleep=lambda _seconds: None,
+            proc_root=self.root, term_grace=0, kill_grace=0,
+            safety_check=lambda: True)
+        self.assertEqual(pidfds.signals, [])
+        self.assertEqual(len(pidfds.opened), 1)
+        self.assertEqual(pidfds.closed, [pidfds.opened[0][2]])
+        self.assertEqual(remaining, [])
+
+    def test_missing_pidfd_api_fails_closed_and_reports_survivor(self):
+        for module, name in ((supervisor.os, 'pidfd_open'),
+                             (supervisor.signal, 'pidfd_send_signal')):
+            with self.subTest(api=name):
+                proc = self.process(10)
+                members = supervisor.namespace_members(self.ns, self.root, self.own)
+                output = io.StringIO()
+                with patch.object(module, name, None, create=True):
+                    remaining = supervisor.stop_processes(
+                        members, sleep=lambda _seconds: None, proc_root=self.root,
+                        out=output, term_grace=0, kill_grace=0,
+                        safety_check=lambda: True)
+                self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
+                self.assertIn('pidfd signaling is unavailable', output.getvalue())
+                shutil.rmtree(proc)
+
+    def test_pidfd_open_error_closes_acquired_fds_without_signaling(self):
+        self.process(10)
+        self.process(11, ppid=10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        pidfds = FakePidfds()
+
+        def open_pidfd(pid, flags):
+            if pid == 10:
+                raise OSError(errno.ENOSYS, 'pidfd_open unavailable')
+            return pidfds.open(pid, flags)
+
+        remaining = supervisor.stop_processes(
+            members, pidfd_open=open_pidfd, pidfd_send_signal=pidfds.send,
+            close_pidfd=pidfds.close, sleep=lambda _seconds: None,
+            proc_root=self.root, term_grace=0, kill_grace=0,
+            safety_check=lambda: True)
+        self.assertCountEqual([pid for pid, _proc, _ticks in remaining], [10, 11])
+        self.assertEqual(pidfds.signals, [])
+        self.assertEqual(len(pidfds.opened), 1)
+        self.assertEqual(pidfds.closed, [pidfds.opened[0][2]])
+
+    def test_pidfd_send_error_fails_closed_without_numeric_fallback(self):
+        self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        pidfds = FakePidfds()
+        output = io.StringIO()
+
+        def unsupported(*_args):
+            raise OSError(errno.ENOSYS, 'pidfd_send_signal unavailable')
+
+        with patch.object(supervisor.os, 'kill', side_effect=AssertionError('unsafe fallback')):
+            remaining = supervisor.stop_processes(
+                members, pidfd_open=pidfds.open, pidfd_send_signal=unsupported,
+                close_pidfd=pidfds.close, sleep=lambda _seconds: None,
+                proc_root=self.root, out=output, term_grace=0, kill_grace=0,
+                safety_check=lambda: True)
+        self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
+        self.assertIn('refusing further cleanup', output.getvalue())
+        self.assertEqual(pidfds.closed, [pidfds.opened[0][2]])
+
+    def test_esrch_from_pidfd_suppresses_escalation(self):
+        self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        pidfds = FakePidfds()
+        attempted = []
+
+        def gone(fd, signum, _siginfo, _flags):
+            attempted.append((fd, signum))
+            raise OSError(errno.ESRCH, 'target exited')
+
+        remaining = supervisor.stop_processes(
+            members, pidfd_open=pidfds.open, pidfd_send_signal=gone,
+            close_pidfd=pidfds.close, sleep=lambda _seconds: None,
+            proc_root=self.root, term_grace=0, kill_grace=0,
+            safety_check=lambda: True)
+        self.assertEqual(len(attempted), 1)
+        self.assertEqual(attempted[0][1], signal.SIGTERM)
+        self.assertEqual(remaining, [])
+        self.assertEqual(pidfds.closed, [pidfds.opened[0][2]])
+
+    def test_safety_veto_closes_already_opened_pidfds(self):
+        self.process(10)
+        self.process(11, ppid=10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        pidfds = FakePidfds()
+        checks = iter((True, False))
+
+        remaining = supervisor.stop_processes(
+            members, **pidfds.options(), sleep=lambda _seconds: None,
+            proc_root=self.root, term_grace=0, kill_grace=0,
+            safety_check=lambda: next(checks))
+        self.assertIsNone(remaining)
+        self.assertEqual([pid for pid, _flags, _fd in pidfds.opened], [11])
+        self.assertEqual(pidfds.signals, [])
+        self.assertEqual(pidfds.closed, [pidfds.opened[0][2]])
+
+    def test_unexpected_signal_exception_closes_pidfd(self):
+        self.process(10)
+        members = supervisor.namespace_members(self.ns, self.root, self.own)
+        pidfds = FakePidfds()
+
+        def broken_signal(*_args):
+            raise RuntimeError('synthetic failure')
+
+        with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
+            supervisor.stop_processes(
+                members, pidfd_open=pidfds.open, pidfd_send_signal=broken_signal,
+                close_pidfd=pidfds.close, sleep=lambda _seconds: None,
+                proc_root=self.root, term_grace=0, kill_grace=0,
+                safety_check=lambda: True)
+        self.assertEqual(pidfds.closed, [pidfds.opened[0][2]])
 
     def test_reused_pid_between_term_and_kill_is_not_signaled_again(self):
         proc = self.process(10)
         members = supervisor.namespace_members(self.ns, self.root, self.own)
-        signals = []
-
-        def kill(pid, signum):
-            signals.append((pid, signum))
-            if signum == signal.SIGTERM:
-                set_start_ticks(proc, 200)
+        pidfds = FakePidfds(on_signal=lambda pid, signum:
+                            set_start_ticks(proc, 200) if signum == signal.SIGTERM else None)
 
         remaining = supervisor.stop_processes(
-            members, kill=kill, sleep=lambda _seconds: None,
+            members, **pidfds.options(), sleep=lambda _seconds: None,
             proc_root=self.root, term_grace=0, kill_grace=0,
             safety_check=lambda: True)
-        self.assertEqual(signals, [(10, signal.SIGTERM)])
+        self.assertEqual(pidfds.signals, [(10, signal.SIGTERM)])
         self.assertEqual(remaining, [])
 
     def test_reused_pid_during_term_wait_is_not_escalated(self):
         proc = self.process(10)
         members = supervisor.namespace_members(self.ns, self.root, self.own)
-        signals = []
+        pidfds = FakePidfds()
         now = [0]
 
         def sleep(_seconds):
@@ -421,16 +579,16 @@ class CleanupTests(unittest.TestCase):
             now[0] += 1
 
         remaining = supervisor.stop_processes(
-            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            members, **pidfds.options(),
             sleep=sleep, proc_root=self.root, term_grace=1, kill_grace=0,
             clock=lambda: now[0], safety_check=lambda: True)
-        self.assertEqual(signals, [(10, signal.SIGTERM)])
+        self.assertEqual(pidfds.signals, [(10, signal.SIGTERM)])
         self.assertEqual(remaining, [])
 
     def test_reused_pid_during_kill_wait_is_not_returned(self):
         proc = self.process(10)
         members = supervisor.namespace_members(self.ns, self.root, self.own)
-        signals = []
+        pidfds = FakePidfds()
         now = [0]
 
         def sleep(_seconds):
@@ -438,22 +596,24 @@ class CleanupTests(unittest.TestCase):
             now[0] += 1
 
         remaining = supervisor.stop_processes(
-            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            members, **pidfds.options(),
             sleep=sleep, proc_root=self.root, term_grace=0, kill_grace=1,
             clock=lambda: now[0], safety_check=lambda: True)
-        self.assertEqual(signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
+        self.assertEqual(pidfds.signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
         self.assertEqual(remaining, [])
 
     def test_live_process_gets_term_then_kill_escalation(self):
         self.process(10)
         members = supervisor.namespace_members(self.ns, self.root, self.own)
-        signals = []
+        pidfds = FakePidfds()
 
         remaining = supervisor.stop_processes(
-            members, kill=lambda pid, sig: signals.append((pid, sig)),
+            members, **pidfds.options(),
             sleep=lambda _seconds: None, proc_root=self.root,
             term_grace=0, kill_grace=0, safety_check=lambda: True)
-        self.assertEqual(signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
+        self.assertEqual(pidfds.signals, [(10, signal.SIGTERM), (10, signal.SIGKILL)])
+        self.assertEqual(pidfds.signals_by_fd[0][0], pidfds.signals_by_fd[1][0])
+        self.assertEqual(len(pidfds.closed), 1)
         self.assertEqual([pid for pid, _proc, _ticks in remaining], [10])
 
 
@@ -513,7 +673,7 @@ class SupervisorModeTests(unittest.TestCase):
         output = io.StringIO()
         code = supervisor.run_supervised(
             ['true'], self.prefix, None, proc_root=self.proc, poll=0,
-            run=lambda *_a, **_k: None, kill=lambda *_a: None,
+            run=lambda *_a, **_k: None,
             sleep=lambda _s: None, out=output, window_probe=lambda: False)
         self.assertEqual(code, 0)
         return output.getvalue()
@@ -547,7 +707,7 @@ class ExitStatusTests(unittest.TestCase):
         self.addCleanup(setattr, supervisor, 'cleanup', previous)
         return supervisor.run_supervised(
             command, self.prefix, None, proc_root=self.proc, poll=0,
-            run=lambda *_a, **_k: None, kill=lambda *_a: None,
+            run=lambda *_a, **_k: None,
             sleep=lambda _s: None, out=io.StringIO())
 
     def test_child_status_is_kept_when_cleanup_is_clean(self):
@@ -1044,7 +1204,7 @@ class SignalEscalationTests(unittest.TestCase):
             code = supervisor.run_supervised(
                 [sys.executable, str(self.script), str(self.pids)], self.prefix, None,
                 proc_root=self.proc, poll=0, run=lambda *_a, **_k: None,
-                kill=lambda *_a: None, sleep=lambda _s: time.sleep(0.01), out=output,
+                sleep=lambda _s: time.sleep(0.01), out=output,
                 window_probe=lambda: False)
         finally:
             thread.join(timeout=5)
