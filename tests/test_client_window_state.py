@@ -131,12 +131,26 @@ class X11WindowTests(unittest.TestCase):
         query = Mock(side_effect=subprocess.CalledProcessError(1, 'xprop'))
         self.assertIsNone(state.client_windows_present(X11, query))
 
+    def test_missing_xprop_is_unknown(self):
+        query = Mock(side_effect=FileNotFoundError('xprop'))
+        self.assertIsNone(state.client_windows_present(X11, query))
+
 
 class UnsupportedWaylandTests(unittest.TestCase):
-    def test_wayland_never_uses_x11_absence_as_permission(self):
+    def test_non_niri_wayland_with_display_uses_x11_inventory(self):
         for env in ({'WAYLAND_DISPLAY': 'wayland-fixture', 'DISPLAY': ':fixture'},
-                    {'XDG_SESSION_TYPE': 'wayland'},
                     {'XDG_SESSION_TYPE': 'WAYLAND', 'DISPLAY': ':fixture'}):
+            with self.subTest(env=env):
+                query = Mock(return_value='_NET_CLIENT_LIST(WINDOW): window id #')
+                self.assertEqual(state.backend(env), 'x11')
+                self.assertIs(state.client_windows_present(env, query), False)
+                query.assert_called_once_with(
+                    ['xprop', '-root', '_NET_CLIENT_LIST'], text=True,
+                    stderr=subprocess.DEVNULL, timeout=5)
+
+    def test_native_wayland_without_display_stays_unknown(self):
+        for env in ({'WAYLAND_DISPLAY': 'wayland-fixture'},
+                    {'XDG_SESSION_TYPE': 'wayland'}):
             with self.subTest(env=env):
                 query = Mock(return_value='_NET_CLIENT_LIST(WINDOW): window id #')
                 self.assertEqual(state.backend(env), 'unsupported-wayland')

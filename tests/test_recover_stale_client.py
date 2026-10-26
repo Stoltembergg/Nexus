@@ -21,7 +21,8 @@ CLIENT = '/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServ
 class RecoverStaleClientTests(unittest.TestCase):
     def setUp(self):
         environment = patch.dict(os.environ, {'NIRI_SOCKET': '', 'XDG_CURRENT_DESKTOP': 'fixture',
-                                              'WAYLAND_DISPLAY': '', 'XDG_SESSION_TYPE': 'x11'})
+                                              'WAYLAND_DISPLAY': '', 'DISPLAY': '',
+                                              'XDG_SESSION_TYPE': 'x11'})
         environment.start()
         self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
@@ -233,13 +234,38 @@ class RecoverStaleClientTests(unittest.TestCase):
         self.process(10, 'darlingserver', ['darlingserver'])
         self.process(12, 'mldr', [CLIENT], self.client_env())
         killed = []
-        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'wayland-fixture'}), \
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'wayland-fixture', 'DISPLAY': ''}), \
                 patch.object(recover_stale_client.subprocess, 'check_output') as query:
             recover_stale_client.recover(self.prefix, proc_root=self.proc,
                                          kill=lambda *args: killed.append(args),
                                          sleep=lambda _: None, out=io.StringIO())
         self.assertEqual(killed, [])
         query.assert_not_called()
+
+    def test_wayland_xwayland_window_preserves_client(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+        killed = []
+        output = io.StringIO()
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'wayland-fixture',
+                                     'DISPLAY': ':fixture'}), \
+                patch.object(recover_stale_client.subprocess, 'check_output',
+                             side_effect=[
+                                 '_NET_CLIENT_LIST(WINDOW): window id # 0x10\n',
+                                 'WM_CLASS(STRING) = "RiotClientServices", '
+                                 '"RiotClientServices"\n',
+                             ]) as query:
+            result = recover_stale_client.recover(
+                self.prefix, proc_root=self.proc,
+                kill=lambda *args: killed.append(args),
+                sleep=lambda _: None, out=output)
+        self.assertEqual(result, 0)
+        self.assertEqual(killed, [])
+        self.assertIn('client window present', output.getvalue())
+        self.assertEqual(query.call_args_list[0].args[0],
+                         ['xprop', '-root', '_NET_CLIENT_LIST'])
+        self.assertEqual(query.call_args_list[1].args[0],
+                         ['xprop', '-id', '0x10', 'WM_CLASS'])
 
     def test_game_appearing_after_sigterm_prevents_sigkill(self):
         self.process(10, 'darlingserver', ['darlingserver'])
