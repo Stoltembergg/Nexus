@@ -1,6 +1,10 @@
 """Offline contracts for the frameworks required by the 2026 Riot Client build."""
 import json
 from pathlib import Path
+import shutil
+import struct
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,15 +93,167 @@ class RiotClientFrameworkTests(unittest.TestCase):
         for name in ('NSConstantArray', 'NSConstantDictionary'):
             self.assertIn(name, corefoundation_source)
 
-        runtime = patch_section('patches/corefoundation.patch', 'CFRuntime.c')
-        self.assertIsNotNone(runtime)
-        self.assertIn('__NSArray0__struct', added_lines(runtime))
+        # Code built with constant literals uses the address of these symbols as
+        # the empty array and dictionary, so each must be an object whose isa is
+        # the constant class, not a variable holding a pointer to one.
+        self.assertIn('struct NSConstantArrayLayout __NSArray0__struct = { (Class)&NSConstantArrayClass',
+                      corefoundation_source)
+        self.assertIn('struct NSConstantDictionaryLayout __NSDictionary0__struct = { (Class)&NSConstantDictionaryClass',
+                      corefoundation_source)
+        self.assertIsNone(patch_section('patches/corefoundation.patch', 'CFRuntime.c'))
+
+    def test_constant_objects_read_the_layout_clang_emits(self):
+        corefoundation_source = added_lines(patch_section('patches/corefoundation.patch', COREFOUNDATION_NEW))
+        for method in ('- (NSUInteger)count', '- (id)objectAtIndex:(NSUInteger)index',
+                       '- (id)objectForKey:(id)key', '- (NSEnumerator *)keyEnumerator'):
+            self.assertIn(method, corefoundation_source)
+        foundation_source = added_lines(patch_section('patches/foundation.patch', FOUNDATION_NEW))
+        for method in ('- (const char *)objCType', '- (void)getValue:(void *)value',
+                       '- (long long)longLongValue', '- (double)doubleValue'):
+            self.assertIn(method, foundation_source)
 
     def test_manifest_lists_constant_object_sources(self):
         manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
         by_patch = {c['patch']: c for c in manifest['components']}
         self.assertIn(FOUNDATION_NEW, by_patch['patches/foundation.patch']['new_files'])
         self.assertIn(COREFOUNDATION_NEW, by_patch['patches/corefoundation.patch']['new_files'])
+
+
+KERNEL = 'darling/src/libsystem_kernel/emulation/'
+SELFUSAGE_NEW = [KERNEL + 'include/xnu_syscall/bsd/impl/misc/thread_selfusage.h',
+                 KERNEL + 'src/xnu_syscall/bsd/impl/misc/thread_selfusage.c']
+
+
+def icc_profile():
+    """Build the sRGB profile with the C from the CoreGraphics patch."""
+    compiler = shutil.which('cc')
+    if compiler is None:
+        raise unittest.SkipTest('needs a C compiler')
+    source = added_lines(patch_section('patches/cocotron.patch', 'CoreGraphics/CGColorSpace.m'))
+    builder = source.split('static void iccPut32', 1)[1].split('CFDataRef CGColorSpaceCopyICCData', 1)[0]
+    program = (
+        '#include <stdint.h>\n#include <stdio.h>\n'
+        'typedef struct { int unused; } *CFDataRef;\n'
+        'static CFDataRef CFDataCreate(void *allocator, const uint8_t *bytes, long length) {\n'
+        '    fwrite(bytes, 1, length, stdout);\n    return (CFDataRef)1;\n}\n'
+        'static void iccPut32' + builder +
+        'int main(void) { return createSRGBProfileData() ? 0 : 1; }\n')
+    with tempfile.TemporaryDirectory() as folder:
+        (Path(folder) / 'icc.c').write_text(program)
+        subprocess.run([compiler, '-o', 'icc', 'icc.c'], cwd=folder, check=True)
+        return subprocess.run([str(Path(folder) / 'icc')], check=True, capture_output=True).stdout
+
+
+class RiotClientRuntimeTests(unittest.TestCase):
+    def test_bsd_syscalls_return_zero_in_rdx_except_pipe(self):
+        # Chromium's sendto wrapper reads %rdx (XNU's second return value) and
+        # reports ERR_NETWORK_CHANGED when it is not zero.
+        source = added_lines(patch_section('patches/xnu.patch', KERNEL + 'src/xnu_syscall/bsd/bsd_syscall.S'))
+        self.assertIn('cmpq\t$42, %rax', source)
+        self.assertIn('xorl\t%edx, %edx', source)
+        pipe = (ROOT / 'build/darling-src/src/external/xnu' / KERNEL / 'src/xnu_syscall/bsd/impl/unistd/pipe.c')
+        if pipe.exists():
+            self.assertIn('%%edx', pipe.read_text())
+
+    def test_thread_selfusage_is_implemented(self):
+        table = added_lines(patch_section('patches/xnu.patch', KERNEL + 'src/xnu_syscall/bsd/bsd_syscall_table.c'))
+        self.assertIn('[482] = sys_thread_selfusage,', table)
+        self.assertIn('thread_selfusage.c', added_lines(patch_section('patches/xnu.patch', KERNEL + 'CMakeLists.txt')))
+        manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
+        component = next(c for c in manifest['components'] if c['patch'] == 'patches/xnu.patch')
+        for path in SELFUSAGE_NEW:
+            self.assertIn(path, component['new_files'])
+            self.assertIn('new file mode', patch_section('patches/xnu.patch', path))
+
+    def test_renderer_sysctls_exist(self):
+        source = added_lines(patch_section('patches/xnu.patch',
+                                           KERNEL + 'src/xnu_syscall/bsd/helper/misc/sysctl_kern.c'))
+        self.assertIn('.name = "hv_vmm_present", .handler = handle_hv_vmm_present', source)
+
+    def test_unlimited_rlimits_use_the_darwin_value(self):
+        source = added_lines(patch_section('patches/xnu.patch', KERNEL + 'src/xnu_syscall/bsd/impl/misc/getrlimit.c'))
+        self.assertIn('rlimit_linux_to_bsd_value(rlp->rlim_cur)', source)
+        header = added_lines(patch_section('patches/xnu.patch', KERNEL + 'include/conversion/misc/getrlimit.h'))
+        self.assertIn('BSD_RLIM_INFINITY 0x7fffffffffffffffULL', header)
+
+    def test_srgb_has_a_valid_icc_profile(self):
+        profile = icc_profile()
+        number = lambda offset: struct.unpack_from('>I', profile, offset)[0]
+        fixed = lambda offset: struct.unpack_from('>i', profile, offset)[0] / 65536
+        self.assertEqual(number(0), len(profile))
+        self.assertEqual(profile[12:24], b'mntrRGB XYZ ')
+        self.assertEqual(profile[36:40], b'acsp')
+        tags = {}
+        for index in range(number(128)):
+            entry = 132 + index * 12
+            offset, size = number(entry + 4), number(entry + 8)
+            self.assertLessEqual(offset + size, len(profile))
+            tags[profile[entry:entry + 4]] = offset
+        for sig in (b'rTRC', b'gTRC', b'bTRC'):
+            self.assertEqual(profile[tags[sig]:tags[sig] + 4], b'para')
+            self.assertAlmostEqual(fixed(tags[sig] + 12), 2.4, places=3)
+        # The D50-adapted primaries add up to the D50 white point.
+        for axis in range(3):
+            total = sum(fixed(tags[sig] + 8 + axis * 4) for sig in (b'rXYZ', b'gXYZ', b'bXYZ'))
+            self.assertAlmostEqual(total, fixed(tags[b'wtpt'] + 8 + axis * 4), places=3)
+
+    def test_named_rgb_spaces_are_not_null(self):
+        source = added_lines(patch_section('patches/cocotron.patch', 'Onyx2D/O2ColorSpace.m'))
+        for name in ('kCGColorSpaceExtendedSRGB', 'kCGColorSpaceLinearSRGB', 'kCGColorSpaceGenericGray'):
+            self.assertIn(f'CFSTR("{name}")', source)
+
+    def test_loaded_bundles_load_again(self):
+        source = added_lines(patch_section('patches/foundation.patch', 'src/NSBundle.m'))
+        self.assertIn('if ([self isLoaded])', source)
+        self.assertIn('loaded = true;', source)
+
+    def test_forwarding_clears_return_storage(self):
+        source = added_lines(patch_section('patches/corefoundation.patch', 'CFForwardingPrep.S'))
+        self.assertIn('subq   $0xf0, %rsp', source)
+        for offset in ('0xc0', '0xd0', '0xe0'):
+            self.assertIn(f'movapd %xmm0, {offset}(%rsp)', source)
+
+    def test_struct_returning_window_methods_exist(self):
+        # Darling's forwarding has no stret path, so a missing NSRect method
+        # crashes instead of raising.
+        window = added_lines(patch_section('patches/cocotron.patch', 'AppKit/NSWindow.m'))
+        for method in ('- (NSRect) contentLayoutRect {',
+                       '- (NSRect) backingAlignedRect: (NSRect) rect options: (NSAlignmentOptions) options {',
+                       '- (NSRect) accessibilityFrame {'):
+            self.assertIn(method, window)
+        view = added_lines(patch_section('patches/cocotron.patch', 'AppKit/NSView.m'))
+        self.assertIn('- (NSRect) backingAlignedRect: (NSRect) rect options: (NSAlignmentOptions) options {', view)
+        self.assertIn('- (NSRect) accessibilityFrame {', view)
+
+    def test_frameless_windows_can_be_dragged(self):
+        # Electron drags the window when this private method answers -1.
+        source = added_lines(patch_section('patches/cocotron.patch', 'AppKit/NSWindow.m'))
+        method = source.split('- (NSInteger) _resizeDirectionForMouseLocation: (NSPoint) location {', 1)[1]
+        self.assertIn('return -1;', method.split('}', 1)[0])
+
+    def test_contents_of_url_loaders_accept_a_null_error(self):
+        for path in ('NSDictionary.m', 'NSArray.m'):
+            source = added_lines(patch_section('patches/corefoundation.patch', path))
+            self.assertIn('if (tmp == nil && error != NULL) {', source)
+            self.assertNotIn('if (tmp == nil) {', source)
+
+    def test_log2_is_exact_for_powers_of_two(self):
+        # Chromium's WebAudio FFT truncates log2 of its size and CHECKs that
+        # the power of two matches.
+        source = added_lines(patch_section('patches/darling.patch', 'src/libm/Source/Intel/xmm_log.c'))
+        self.assertIn('double mantissa = frexp( x, &exponent );', source)
+        self.assertIn('return (double) exponent + log( mantissa ) * conversion;', source)
+
+    def test_metal_device_lists_no_counter_sets(self):
+        # Dawn queries this while probing WebGPU; an exception kills the GPU process.
+        source = added_lines(patch_section('patches/metal.patch', 'src/Metal/MTLDevice.mm'))
+        self.assertIn('- (NSArray *)counterSets { return @[]; }', source)
+
+    def test_sandbox_profiles_use_the_seatbelt_layout(self):
+        source = added_lines(patch_section('patches/darling.patch', 'src/libsandbox/src/sandbox.c'))
+        self.assertIn('struct darling_sandbox_profile', source)
+        for field in ('char *builtin;', 'unsigned char *data;', 'size_t size;'):
+            self.assertIn(field, source)
 
 
 if __name__ == '__main__':

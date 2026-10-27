@@ -42,7 +42,9 @@
         "src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h",
         "src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h",
         "src/frameworks/QuickLookUI/src/QLPreviewPanel.m",
-        "src/frameworks/QuickLookUI/src/QLPreviewView.m"
+        "src/frameworks/QuickLookUI/src/QLPreviewView.m",
+        "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm",
+        "src/frameworks/Accessibility/src/AXCustomContent.m"
       ]
     },
     {
@@ -306,7 +308,9 @@
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
         "libsyscall/wrappers/__sysctlbyname.S",
-        "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h"
+        "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h",
+        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c"
       ]
     },
     {

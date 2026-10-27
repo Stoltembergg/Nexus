@@ -1134,7 +1134,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..2c45608 100644
+index f58184a..788dc97 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,32 @@
@@ -1285,7 +1285,7 @@ index f58184a..2c45608 100644
  
  	[super dealloc];
  }
-@@ -153,12 +251,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +251,83 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1326,6 +1326,29 @@ index f58184a..2c45608 100644
 +- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
++/* darling-lol: further feature queries of the current Riot Client's ANGLE.
++ * Desktop Vulkan devices filter 32-bit floats and sample BC formats; pull-model
++ * interpolation, programmable sample positions and raster order groups are not
++ * exposed by Indium. */
++- (BOOL)supports32BitFloatFiltering { return YES; }
++- (BOOL)supportsBCTextureCompression { return YES; }
++// No GPU counters; Dawn enumerates them when it probes the device for WebGPU.
++- (NSArray *)counterSets { return @[]; }
++- (BOOL)supportsPullModelInterpolation { return NO; }
++- (BOOL)areProgrammableSamplePositionsSupported { return NO; }
++- (BOOL)areRasterOrderGroupsSupported { return NO; }
++- (NSInteger)location { return 1; /* MTLDeviceLocationSlot */ }
++/* Indium loads compiled libraries only; there is no Metal Shading Language
++ * compiler, so source fails with MTLLibraryErrorCompileFailure. */
++- (id<MTLLibrary>)newLibraryWithSource: (NSString*)source
++                               options: (id)options
++                                 error: (NSError**)error
++{
++	if (error)
++		*error = [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 3
++		                         userInfo: @{ NSLocalizedDescriptionKey: @"Metal Shading Language source is not supported" }];
++	return nil;
++}
 +- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount: (NSUInteger)maxCommandBufferCount
 +{
 +	return [self newCommandQueue];
@@ -1347,7 +1370,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +312,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +335,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1355,7 +1378,7 @@ index f58184a..2c45608 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +330,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +353,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1370,7 +1393,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +344,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +367,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1416,7 +1439,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +389,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +412,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1536,7 +1559,7 @@ index f58184a..2c45608 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +570,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +593,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -1561,7 +1584,7 @@ index f58184a..2c45608 100644
  		return nil;
  	}
 diff --git a/src/Metal/MTLLibrary.mm b/src/Metal/MTLLibrary.mm
-index 0feb46e..e0c0e93 100644
+index 0feb46e..a88794f 100644
 --- a/src/Metal/MTLLibrary.mm
 +++ b/src/Metal/MTLLibrary.mm
 @@ -1,6 +1,7 @@
@@ -1586,7 +1609,7 @@ index 0feb46e..e0c0e93 100644
  	}
  	return self;
  }
-@@ -121,7 +124,12 @@ MTL_UNSUPPORTED_CLASS
+@@ -121,13 +124,31 @@ MTL_UNSUPPORTED_CLASS
  
  - (id<MTLFunction>)newFunctionWithName: (NSString*)functionName
  {
@@ -1600,6 +1623,25 @@ index 0feb46e..e0c0e93 100644
  	if (!func) {
  		return nil;
  	}
+ 	return [[MTLFunctionInternal alloc] initWithFunction: func device: _device];
+ }
+ 
++// darling-lol: linked by the current Riot Client's ANGLE. Indium cannot
++// specialize function constants, and ignoring them would build a different
++// shader, so specialization fails with MTLLibraryErrorFunctionNotFound.
++- (id<MTLFunction>)newFunctionWithName: (NSString*)functionName
++                        constantValues: (id)constantValues
++                                 error: (NSError**)error
++{
++	if (error)
++		*error = [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 5
++		                         userInfo: @{ NSLocalizedDescriptionKey: @"Function constants are not supported" }];
++	return nil;
++}
++
+ #else
+ 
+ @dynamic installName;
 diff --git a/src/Metal/MTLRenderCommandEncoder.mm b/src/Metal/MTLRenderCommandEncoder.mm
 index e931b90..b2fe0a5 100644
 --- a/src/Metal/MTLRenderCommandEncoder.mm
@@ -3880,3 +3922,49 @@ new file mode 100644
 +MTL_UNSUPPORTED_CLASS
 +#endif
 +@end
+diff --git a/src/Metal/Metal.mm b/src/Metal/Metal.mm
+index dfe5174..e0bb5af 100644
+--- a/src/Metal/Metal.mm
++++ b/src/Metal/Metal.mm
+@@ -40,3 +40,41 @@ static void finitMetal(void) {
+ };
+ 
+ #endif
++
++// darling-lol: counter constants and descriptor classes linked by the current
++// Riot Client's Electron (ANGLE). Darling's Metal has no counters, argument
++// buffers, indirect command buffers or capture descriptors; a message the
++// classes do not implement returns nil or 0 instead of raising.
++#import <Foundation/NSInvocation.h>
++#import <Foundation/NSMethodSignature.h>
++
++extern "C" NSString* const MTLCommonCounterSetTimestamp = @"timestamp";
++extern "C" NSString* const MTLCommonCounterTimestamp = @"GPUTimestamp";
++
++static void rclolReturnZero(NSInvocation* invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature*)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++	} \
++	+ (void)forwardInvocation:(NSInvocation*)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature*)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++	} \
++	- (void)forwardInvocation:(NSInvocation*)invocation { rclolReturnZero(invocation); } \
++	@end
++
++RCLOL_NIL_STUB_CLASS(MTLArgumentDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLBlitPassDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLCaptureDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLCounterSampleBufferDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLFunctionConstantValues)
++RCLOL_NIL_STUB_CLASS(MTLIndirectCommandBufferDescriptor)
