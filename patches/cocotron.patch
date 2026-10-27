@@ -20,7 +20,7 @@ index 393a1eb3..6a47ac89 100644
  		xkbfile
  )
 diff --git a/AppKit/MacWorkspace.m b/AppKit/MacWorkspace.m
-index ba52cd3b..d566b946 100644
+index ba52cd3..abd7971 100644
 --- a/AppKit/MacWorkspace.m
 +++ b/AppKit/MacWorkspace.m
 @@ -13,6 +13,32 @@
@@ -56,7 +56,7 @@ index ba52cd3b..d566b946 100644
  - (NSImage *) iconForFile: (NSString *) path {
      // TODO: call GetIconRefFromFileInfo()
      NSUnimplementedMethod();
-@@ -95,9 +121,9 @@
+@@ -95,9 +121,22 @@
  }
  
  - (BOOL) openURL: (NSURL *) url {
@@ -66,6 +66,19 @@ index ba52cd3b..d566b946 100644
 +    if (url == nil)
 +        return NO;
 +    return LSOpenCFURLRef((CFURLRef) url, NULL) == noErr;
++}
++
++// darling-lol: Electron asks which application opens a URL (the Riot Client
++// does after sign-in); Launch Services knows the default handler.
++- (NSURL *) URLForApplicationToOpenURL: (NSURL *) url {
++    if (url == nil)
++        return nil;
++    return [(NSURL *) LSCopyDefaultApplicationURLForURL((CFURLRef) url, kLSRolesAll, NULL) autorelease];
++}
++
++- (NSArray<NSURL *> *) URLsForApplicationsToOpenURL: (NSURL *) url {
++    NSURL *application = [self URLForApplicationToOpenURL: url];
++    return application ? [NSArray arrayWithObject: application] : [NSArray array];
  }
  
  - (BOOL) selectFile: (NSString *) path
@@ -166,7 +179,7 @@ index d543e329..e320a3af 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSApplication.m b/AppKit/NSApplication.m
-index 8e7508e..dbc72de 100644
+index 8e7508e..d62f380 100644
 --- a/AppKit/NSApplication.m
 +++ b/AppKit/NSApplication.m
 @@ -17,6 +17,9 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -358,7 +371,7 @@ index 8e7508e..dbc72de 100644
          NS_DURING [NSClassFromString(@"Win32RunningCopyPipe")
                  performSelector: @selector(createRunningCopyPipe)];
  
-@@ -926,7 +1019,10 @@ NSApplication *NSApp = nil;
+@@ -926,13 +1019,26 @@ NSApplication *NSApp = nil;
  }
  
  - (void) activateIgnoringOtherApps: (BOOL) flag {
@@ -370,6 +383,22 @@ index 8e7508e..dbc72de 100644
  }
  
  - (void) deactivate {
+     NSUnimplementedMethod();
+ }
+ 
++// darling-lol: cooperative activation (macOS 14). The window server cannot
++// hand activation to another application, so there is nothing to yield.
++- (void) yieldActivationToApplicationWithBundleIdentifier: (NSString *) bundleIdentifier {
++    (void) bundleIdentifier;
++}
++
++- (void) yieldActivationToApplication: (NSRunningApplication *) application {
++    (void) application;
++}
++
+ - (NSWindow *) modalWindow {
+     return [[_modalStack lastObject] modalWindow];
+ }
 diff --git a/AppKit/NSBitmapImageRep.m b/AppKit/NSBitmapImageRep.m
 index 9a3f6a5d..dafb0cbe 100644
 --- a/AppKit/NSBitmapImageRep.m
@@ -1295,7 +1324,7 @@ index f102391..425cb49 100644
      [_nextResponder performSelector: _cmd withObject: event];
  }
 diff --git a/AppKit/NSRunningApplication.m b/AppKit/NSRunningApplication.m
-index 6c3d2688..2a7d078a 100644
+index 6c3d268..de49da9 100644
 --- a/AppKit/NSRunningApplication.m
 +++ b/AppKit/NSRunningApplication.m
 @@ -1,4 +1,10 @@
@@ -1309,7 +1338,7 @@ index 6c3d2688..2a7d078a 100644
  
  // DUMMY
  
-@@ -19,6 +25,38 @@
+@@ -19,6 +25,42 @@
  
  @implementation NSRunningApplication
  
@@ -1323,6 +1352,10 @@ index 6c3d2688..2a7d078a 100644
 +    if (processIdentifier <= 0 || (kill(processIdentifier, 0) != 0 && errno == ESRCH))
 +        return nil;
 +    return [[[self alloc] initWithProcessIdentifier: processIdentifier] autorelease];
++}
++
+++ (NSRunningApplication *) currentApplication {
++    return [self runningApplicationWithProcessIdentifier: getpid()];
 +}
 +
 +- (pid_t) processIdentifier {
@@ -1709,10 +1742,18 @@ index c3f5d056..dbd93174 100644
          @"NSTouchBarItemIdentifierCharacterPicker";
  
 diff --git a/AppKit/NSView.m b/AppKit/NSView.m
-index 8ac2bbd..012b81e 100644
+index 8ac2bbd..977b8ad 100644
 --- a/AppKit/NSView.m
 +++ b/AppKit/NSView.m
-@@ -46,6 +46,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -37,6 +37,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSScrollView.h>
+ #import <AppKit/NSTrackingArea.h>
++#import <AppKit/NSToolTipWindow.h>
+ #import <AppKit/NSView.h>
+ #import <AppKit/NSViewBackingLayer.h>
+ #import <AppKit/NSWindow-Private.h>
+@@ -46,6 +47,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <QuartzCore/CALayerContext.h>
  #import <QuartzCore/CATransaction.h>
  #import <AppKit/NSLayoutConstraint.h>
@@ -1725,15 +1766,95 @@ index 8ac2bbd..012b81e 100644
  
  @class IBMetricsTable;
  
-@@ -66,6 +72,7 @@ const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPresentationOptio
+@@ -66,8 +73,87 @@ const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPresentationOptio
  - (CGAffineTransform) transformToWindow;
  - (CGAffineTransform) transformToLayer;
  - (void) _trackingAreasChanged;
 +- (void) _darlingSetFrame: (NSRect) frame;
  @end
  
++/* darling-lol: AppKit registers each tool tip rect through
++ * -addTrackingRect:owner:userData:assumeInside: with its tool tip manager as
++ * the owner. Chromium overrides that method to capture the owner, then shows
++ * and hides its tool tip itself by sending the owner mouseEntered: and
++ * mouseExited: whenever the text changes. Without an owner its tool tips only
++ * went away when the pointer left the whole web view. */
++@interface NSToolTipRectOwner : NSObject
+++ (NSToolTipRectOwner *) sharedOwner;
++@end
++
++@implementation NSToolTipRectOwner
++
+++ (NSToolTipRectOwner *) sharedOwner {
++    static NSToolTipRectOwner *owner;
++    if (owner == nil)
++        owner = [[NSToolTipRectOwner alloc] init];
++    return owner;
++}
++
++- (void) _hideToolTip {
++    NSToolTipWindow *toolTipWindow = [NSToolTipWindow sharedToolTipWindow];
++
++    [NSObject cancelPreviousPerformRequestsWithTarget: toolTipWindow
++                                             selector: @selector(orderFront:)
++                                               object: nil];
++    [toolTipWindow orderOut: nil];
++    [toolTipWindow _setTrackingArea: nil];
++}
++
++- (void) mouseEntered: (NSEvent *) event {
++    NSTrackingArea *area = (NSTrackingArea *) [event userData];
++    NSView *view = [area _view];
++    id owner = [area owner];
++    NSString *toolTip = nil;
++
++    [self _hideToolTip];
++    if (area == nil || view == nil)
++        return;
++
++    if ([owner respondsToSelector: @selector(view:stringForToolTip:point:userData:)]) {
++        NSPoint point = [view convertPoint: [[view window] mouseLocationOutsideOfEventStream]
++                                  fromView: nil];
++        toolTip = [owner view: view
++             stringForToolTip: area
++                        point: point
++                     userData: [area userInfo]];
++    } else {
++        toolTip = [owner description];
++    }
++    if ([toolTip length] == 0)
++        return;
++
++    NSToolTipWindow *toolTipWindow = [NSToolTipWindow sharedToolTipWindow];
++    NSTimeInterval delay = (NSTimeInterval) [[NSUserDefaults standardUserDefaults]
++                                   integerForKey: @"NSInitialToolTipDelay"] / 1000.;
++
++    [toolTipWindow setToolTip: toolTip];
++    [toolTipWindow _setTrackingArea: area];
++    [toolTipWindow performSelector: @selector(orderFront:)
++                        withObject: nil
++                        afterDelay: delay > 0. ? delay : 2.];
++}
++
++- (void) mouseExited: (NSEvent *) event {
++    (void) event;
++    [self _hideToolTip];
++}
++
++@end
++
++/* A removed tool tip rect cannot report the pointer leaving it any more. */
++static void hideToolTipOfArea(NSTrackingArea *area) {
++    NSToolTipWindow *toolTipWindow = [NSToolTipWindow sharedToolTipWindow];
++
++    if ([toolTipWindow _trackingArea] == area)
++        [[NSToolTipRectOwner sharedOwner] _hideToolTip];
++}
++
  @implementation NSView
-@@ -955,6 +962,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+ 
+ @synthesize identifier = _identifier;
+@@ -955,6 +1041,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              CGPointApplyAffineTransform(point, toWindow), fromWindow);
  }
  
@@ -1788,7 +1909,7 @@ index 8ac2bbd..012b81e 100644
  - (NSSize) convertSize: (NSSize) size fromView: (NSView *) viewOrNil {
      NSView *fromView =
              (viewOrNil != nil) ? viewOrNil : [[self window] _backgroundView];
-@@ -1019,6 +1074,19 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1019,6 +1153,19 @@ static inline void buildTransformsIfNeeded(NSView *self) {
                        point2.y - point1.y);
  }
  
@@ -1808,7 +1929,7 @@ index 8ac2bbd..012b81e 100644
  - (NSRect) centerScanRect: (NSRect) rect {
      CGFloat minx = floor(NSMinX(rect) + 0.5);
      CGFloat miny = floor(NSMinY(rect) + 0.5);
-@@ -1029,6 +1097,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1029,6 +1176,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (void) setFrame: (NSRect) frame {
@@ -1825,7 +1946,7 @@ index 8ac2bbd..012b81e 100644
      // Cocoa does not post the notification if the frames are equal
      // Possible that resizeSubviewsWithOldSize is not called if the sizes are
      // equal
-@@ -1052,6 +1130,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1052,6 +1209,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      }
      _frame = frame;
  
@@ -1838,7 +1959,7 @@ index 8ac2bbd..012b81e 100644
      [_window invalidateCursorRectsForView: self]; // this also invalidates
                                                    // tracking areas
  
-@@ -1068,6 +1152,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1068,6 +1231,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
      invalidateTransform(self);
  
@@ -1853,7 +1974,7 @@ index 8ac2bbd..012b81e 100644
      if (_postsNotificationOnFrameChange)
          [[NSNotificationCenter defaultCenter]
                  postNotificationName: NSViewFrameDidChangeNotification
-@@ -1078,14 +1170,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1078,14 +1249,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      NSRect frame = _frame;
  
      frame.size = size;
@@ -1870,7 +1991,7 @@ index 8ac2bbd..012b81e 100644
  }
  
  - (void) setFrameRotation: (CGFloat) angle {
-@@ -1100,6 +1192,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1100,6 +1271,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      if (!NSEqualRects(bounds, _bounds)) {
          _bounds = bounds;
          invalidateTransform(self);
@@ -1878,7 +1999,7 @@ index 8ac2bbd..012b81e 100644
  
          [_window invalidateCursorRectsForView: self]; // this also invalidates
                                                        // tracking areas
-@@ -1254,7 +1347,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1254,7 +1426,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
                   (NSComparisonResult (*)(id, id, void *)) compareFunction
                             context: (void *) context
  {
@@ -1891,7 +2012,40 @@ index 8ac2bbd..012b81e 100644
  }
  
  - (void) didAddSubview: (NSView *) subview {
-@@ -1511,8 +1608,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1342,10 +1518,19 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+ 
+     [self _trackingAreasChanged];
+ 
++    SEL trackingRect = @selector(addTrackingRect:owner:userData:assumeInside:);
++    if ([[self class] instanceMethodForSelector: trackingRect] !=
++        [NSView instanceMethodForSelector: trackingRect])
++        [self addTrackingRect: rect
++                        owner: [NSToolTipRectOwner sharedOwner]
++                     userData: area
++                 assumeInside: NO];
++
+     return area;
+ }
+ 
+ - (void) removeToolTip: (NSToolTipTag) tag {
++    hideToolTipOfArea(tag);
+     [self removeTrackingArea: tag];
+ }
+ 
+@@ -1353,8 +1538,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+     NSInteger count = [_trackingAreas count];
+ 
+     while (--count >= 0) {
+-        if ([[_trackingAreas objectAtIndex: count] _isToolTip] == YES)
++        NSTrackingArea *area = [_trackingAreas objectAtIndex: count];
++        if ([area _isToolTip] == YES) {
++            hideToolTipOfArea(area);
+             [_trackingAreas removeObjectAtIndex: count];
++        }
+     }
+ 
+     [self _trackingAreasChanged];
+@@ -1511,8 +1699,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (NSTextInputContext *) inputContext {
@@ -1910,7 +2064,7 @@ index 8ac2bbd..012b81e 100644
  }
  
  - (void) registerForDraggedTypes: (NSArray *) types {
-@@ -1819,15 +1924,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1819,15 +2015,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
  - (void) _createLayerContextIfNeeded {
      if ([_superview layer] == nil) {
@@ -1934,7 +2088,7 @@ index 8ac2bbd..012b81e 100644
      [[_superview layer] addSublayer: _layer];
      [self _createLayerContextIfNeeded];
  }
-@@ -1905,6 +2016,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1905,6 +2107,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              [[_superview layer] replaceSublayer: _layer with: value];
              [_layer release];
              _layer = value;
@@ -1942,7 +2096,7 @@ index 8ac2bbd..012b81e 100644
          }
  
          [_subviews
-@@ -2687,6 +2799,17 @@ static NSView *viewBeingPrinted = nil;
+@@ -2687,6 +2890,17 @@ static NSView *viewBeingPrinted = nil;
           slideBack: (BOOL) slideBack
  {
      location = [self convertPoint: location toView: nil];
@@ -1960,7 +2114,7 @@ index 8ac2bbd..012b81e 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2783,7 +2906,8 @@ static NSView *viewBeingPrinted = nil;
+@@ -2783,7 +2997,8 @@ static NSView *viewBeingPrinted = nil;
  }
  
  - (BOOL) prepareForDragOperation: (id<NSDraggingInfo>) sender {
@@ -6749,7 +6903,7 @@ index 282312de..03c75b2b 100644
  APPKIT_EXPORT NSString *const NSAccessibilityMaxValueAttribute;
  APPKIT_EXPORT NSString *const NSAccessibilityMinValueAttribute;
 diff --git a/AppKit/include/AppKit/NSApplication.h b/AppKit/include/AppKit/NSApplication.h
-index a13138ae..32b97211 100644
+index a13138a..c455d73 100644
 --- a/AppKit/include/AppKit/NSApplication.h
 +++ b/AppKit/include/AppKit/NSApplication.h
 @@ -140,6 +140,7 @@ typedef NS_OPTIONS(NSUInteger, NSApplicationPresentationOptions) {
@@ -6768,6 +6922,14 @@ index a13138ae..32b97211 100644
  
  - (NSWindow *) makeWindowsPerform: (SEL) selector inOrder: (BOOL) inOrder;
  - (void) miniaturizeAll: sender;
+@@ -216,6 +218,7 @@ typedef NS_OPTIONS(NSUInteger, NSApplicationPresentationOptions) {
+ - (void) updateWindows;
+ 
+ - (void) activateIgnoringOtherApps: (BOOL) flag;
++- (void) yieldActivationToApplicationWithBundleIdentifier: (NSString *) bundleIdentifier;
+ - (void) deactivate;
+ 
+ - (NSWindow *) modalWindow;
 diff --git a/AppKit/include/AppKit/NSColor.h b/AppKit/include/AppKit/NSColor.h
 index b5ae3a65..6d555f60 100644
 --- a/AppKit/include/AppKit/NSColor.h
@@ -7005,7 +7167,7 @@ index 11dfac8..34878c3 100644
  - (void) rightMouseDown: (NSEvent *) event;
  - (void) rightMouseDragged: (NSEvent *) event;
 diff --git a/AppKit/include/AppKit/NSRunningApplication.h b/AppKit/include/AppKit/NSRunningApplication.h
-index c577764b..d8bb21cc 100644
+index c577764..9a1586e 100644
 --- a/AppKit/include/AppKit/NSRunningApplication.h
 +++ b/AppKit/include/AppKit/NSRunningApplication.h
 @@ -18,6 +18,7 @@
@@ -7016,7 +7178,7 @@ index c577764b..d8bb21cc 100644
  
  typedef enum {
      NSApplicationActivationPolicyRegular,
-@@ -26,7 +27,14 @@ typedef enum {
+@@ -26,7 +27,15 @@ typedef enum {
  } NSApplicationActivationPolicy;
  
  @interface NSRunningApplication : NSObject
@@ -7026,6 +7188,7 @@ index c577764b..d8bb21cc 100644
  
  + (NSArray<NSRunningApplication *> *) runningApplicationsWithBundleIdentifier: (NSString *) bundleIdentifier;
 ++ (NSRunningApplication *) runningApplicationWithProcessIdentifier: (pid_t) processIdentifier;
+++ (NSRunningApplication *) currentApplication;
 +- (pid_t) processIdentifier;
 +- (BOOL) isTerminated;
 +- (BOOL) activateWithOptions: (NSUInteger) options;
@@ -12816,3 +12979,16 @@ index d1b260c..e93576b 100644
      printf("unknown color space name\n");
      CFShow(name);
      return NULL;
+diff --git a/AppKit/include/AppKit/NSWorkspace.h b/AppKit/include/AppKit/NSWorkspace.h
+index bf84986..9f0b463 100644
+--- a/AppKit/include/AppKit/NSWorkspace.h
++++ b/AppKit/include/AppKit/NSWorkspace.h
+@@ -137,6 +137,8 @@ typedef NSUInteger NSWorkspaceIconCreationOptions;
+ - (NSURL *) URLForApplicationWithBundleIdentifier:
+         (NSString *) bundleIdentifier;
+ - (NSString *) fullPathForApplication: (NSString *) appName;
++- (NSURL *) URLForApplicationToOpenURL: (NSURL *) url;
++- (NSArray<NSURL *> *) URLsForApplicationsToOpenURL: (NSURL *) url;
+ 
+ @end
+ 

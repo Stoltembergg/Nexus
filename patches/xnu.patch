@@ -2227,7 +2227,7 @@ index f273989..058b985 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..ad612e5 100644
+index bd9cdc2..14c9653 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 @@ -23,6 +23,7 @@
@@ -2284,16 +2284,25 @@ index bd9cdc2..ad612e5 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +350,12 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +350,21 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
 +
-+// Not running under a hypervisor; Chromium's renderer CHECKs that this exists.
++// Whether the host runs under a hypervisor, from the CPUID hypervisor bit
++// (leaf 1, ECX bit 31), as XNU reports it. Chromium's renderer CHECKs that this
++// sysctl exists.
 +static sysctl_handler(handle_hv_vmm_present) {
 +	int* ovalue = (int*)old;
-+	if (ovalue)
++	if (ovalue) {
++#if defined(__i386__) || defined(__x86_64__)
++		unsigned int eax = 1, ebx, ecx = 0, edx;
++		__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
++		*ovalue = (ecx >> 31) & 1;
++#else
 +		*ovalue = 0;
++#endif
++	}
 +	*oldlen = sizeof(*ovalue);
 +	return 0;
 +}

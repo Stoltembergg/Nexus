@@ -169,6 +169,8 @@ class RiotClientRuntimeTests(unittest.TestCase):
         source = added_lines(patch_section('patches/xnu.patch',
                                            KERNEL + 'src/xnu_syscall/bsd/helper/misc/sysctl_kern.c'))
         self.assertIn('.name = "hv_vmm_present", .handler = handle_hv_vmm_present', source)
+        # It mirrors the host's CPUID hypervisor bit rather than a fixed value.
+        self.assertIn('*ovalue = (ecx >> 31) & 1;', source)
 
     def test_unlimited_rlimits_use_the_darwin_value(self):
         source = added_lines(patch_section('patches/xnu.patch', KERNEL + 'src/xnu_syscall/bsd/impl/misc/getrlimit.c'))
@@ -230,6 +232,27 @@ class RiotClientRuntimeTests(unittest.TestCase):
         source = added_lines(patch_section('patches/cocotron.patch', 'AppKit/NSWindow.m'))
         method = source.split('- (NSInteger) _resizeDirectionForMouseLocation: (NSPoint) location {', 1)[1]
         self.assertIn('return -1;', method.split('}', 1)[0])
+
+    def test_url_handlers_and_activation_are_answered(self):
+        # The Riot Client asks for its URL handler right after sign-in.
+        workspace = added_lines(patch_section('patches/cocotron.patch', 'AppKit/MacWorkspace.m'))
+        self.assertIn('- (NSURL *) URLForApplicationToOpenURL: (NSURL *) url {', workspace)
+        self.assertIn('LSCopyDefaultApplicationURLForURL', workspace)
+        self.assertIn('- (NSArray<NSURL *> *) URLsForApplicationsToOpenURL: (NSURL *) url {', workspace)
+        running = added_lines(patch_section('patches/cocotron.patch', 'AppKit/NSRunningApplication.m'))
+        self.assertIn('+ (NSRunningApplication *) currentApplication {', running)
+        application = added_lines(patch_section('patches/cocotron.patch', 'AppKit/NSApplication.m'))
+        self.assertIn('- (void) yieldActivationToApplicationWithBundleIdentifier: (NSString *) bundleIdentifier {',
+                      application)
+
+    def test_tool_tip_rects_hand_chromium_an_owner(self):
+        # Chromium captures the owner from -addTrackingRect: and hides its tool
+        # tip by sending it mouseExited:.
+        source = added_lines(patch_section('patches/cocotron.patch', 'AppKit/NSView.m'))
+        self.assertIn('@implementation NSToolTipRectOwner', source)
+        self.assertIn('- (void) mouseExited: (NSEvent *) event {', source)
+        self.assertIn('owner: [NSToolTipRectOwner sharedOwner]', source)
+        self.assertIn('hideToolTipOfArea(area);', source)
 
     def test_contents_of_url_loaders_accept_a_null_error(self):
         for path in ('NSDictionary.m', 'NSArray.m'):
