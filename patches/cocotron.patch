@@ -83,10 +83,16 @@ index ba52cd3..abd7971 100644
  
  - (BOOL) selectFile: (NSString *) path
 diff --git a/AppKit/NSAccessibility.m b/AppKit/NSAccessibility.m
-index 39d1b10..9103e2f 100644
+index 39d1b10..6db74f5 100644
 --- a/AppKit/NSAccessibility.m
 +++ b/AppKit/NSAccessibility.m
-@@ -13,6 +13,8 @@ NSString *const NSAccessibilityEnabledAttribute =
+@@ -1,4 +1,5 @@
+ #import <AppKit/AppKitExport.h>
++#import <objc/runtime.h>
+ #import <Foundation/NSString.h>
+ #import <AppKit/NSAccessibilityConstants.h>
+ #import <AppKit/NSView.h>
+@@ -13,6 +14,8 @@ NSString *const NSAccessibilityEnabledAttribute =
          @"NSAccessibilityEnabledAttribute";
  NSString *const NSAccessibilityFocusedAttribute =
          @"NSAccessibilityFocusedAttribute";
@@ -95,7 +101,7 @@ index 39d1b10..9103e2f 100644
  NSString *const NSAccessibilityHelpAttribute = @"NSAccessibilityHelpAttribute";
  NSString *const NSAccessibilityMaxValueAttribute =
          @"NSAccessibilityMaxValueAttribute";
-@@ -618,3 +620,39 @@ void NSAccessibilityPostNotificationWithUserInfo(id element,
+@@ -618,3 +621,54 @@ void NSAccessibilityPostNotificationWithUserInfo(id element,
  {
      printf("STUB %s\n", __PRETTY_FUNCTION__);
  }
@@ -111,15 +117,30 @@ index 39d1b10..9103e2f 100644
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_STUB_CLASS(name) \
 +	@interface name : NSObject @end \
 +	@implementation name \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	@end
@@ -9937,11 +9958,12 @@ index 039d8c94..b518c961 100644
  #import <fontconfig/fontconfig.h>
  
 diff --git a/QuartzCore/CALayer.m b/QuartzCore/CALayer.m
-index 5dcac11..df5e07b 100644
+index 5dcac11..b9e9e7b 100644
 --- a/QuartzCore/CALayer.m
 +++ b/QuartzCore/CALayer.m
-@@ -1,8 +1,243 @@
+@@ -1,8 +1,244 @@
  #import <Foundation/NSDictionary.h>
++#import <objc/runtime.h>
 +#import <Foundation/NSInvocation.h>
 +#import <Foundation/NSMethodSignature.h>
  #import <QuartzCore/CAAnimation.h>
@@ -10184,7 +10206,7 @@ index 5dcac11..df5e07b 100644
  
  NSString *const kCAFilterLinear = @"linear";
  NSString *const kCAFilterNearest = @"nearest";
-@@ -61,13 +296,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -61,13 +297,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) setSublayers: (NSArray *) sublayers {
@@ -10208,7 +10230,7 @@ index 5dcac11..df5e07b 100644
  }
  
  - (id<CALayerDelegate>) delegate {
-@@ -117,6 +361,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -117,6 +362,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
              [self addAnimation: action forKey: @"bounds"];
      }
  
@@ -10220,7 +10242,7 @@ index 5dcac11..df5e07b 100644
      _bounds = value;
  }
  
-@@ -171,14 +420,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -171,14 +421,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _opaque = value;
  }
  
@@ -10294,7 +10316,7 @@ index 5dcac11..df5e07b 100644
  }
  
  - (CATransform3D) transform {
-@@ -186,6 +494,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -186,6 +495,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) setTransform: (CATransform3D) value {
@@ -10306,7 +10328,7 @@ index 5dcac11..df5e07b 100644
      _transform = value;
  }
  
-@@ -236,6 +549,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -236,6 +550,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) dealloc {
@@ -10317,7 +10339,7 @@ index 5dcac11..df5e07b 100644
      [_sublayers release];
      [_animations release];
      [_minificationFilter release];
-@@ -258,6 +575,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -258,6 +576,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [self setSublayers: [_sublayers arrayByAddingObject: layer]];
  }
  
@@ -10351,7 +10373,7 @@ index 5dcac11..df5e07b 100644
  - (void) replaceSublayer: (CALayer *) layer with: (CALayer *) other {
      NSMutableArray *layers = [_sublayers mutableCopy];
      NSUInteger index = [_sublayers indexOfObjectIdenticalTo: layer];
-@@ -298,9 +642,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -298,9 +643,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) removeFromSuperlayer {
@@ -10367,7 +10389,7 @@ index 5dcac11..df5e07b 100644
  }
  
  - (void) setNeedsDisplay {
-@@ -319,6 +668,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -319,6 +669,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [_context startTimerIfNeeded];
  }
  
@@ -10387,7 +10409,7 @@ index 5dcac11..df5e07b 100644
  - (CAAnimation *) animationForKey: (NSString *) key {
      return [_animations objectForKey: key];
  }
-@@ -364,4 +726,146 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -364,4 +727,161 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _textureId = value;
  }
  
@@ -10519,15 +10541,30 @@ index 5dcac11..df5e07b 100644
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_STUB_CLASS(name) \
 +	@interface name : NSObject @end \
 +	@implementation name \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	@end

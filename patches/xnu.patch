@@ -2227,7 +2227,7 @@ index f273989..058b985 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..14c9653 100644
+index bd9cdc2..61fe056 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 @@ -23,6 +23,7 @@
@@ -2284,7 +2284,7 @@ index bd9cdc2..14c9653 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +350,21 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +350,19 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -2293,17 +2293,15 @@ index bd9cdc2..14c9653 100644
 +// (leaf 1, ECX bit 31), as XNU reports it. Chromium's renderer CHECKs that this
 +// sysctl exists.
 +static sysctl_handler(handle_hv_vmm_present) {
-+	int* ovalue = (int*)old;
-+	if (ovalue) {
++	int value = 0;
++
++	sysctl_handle_size(sizeof(int));
 +#if defined(__i386__) || defined(__x86_64__)
-+		unsigned int eax = 1, ebx, ecx = 0, edx;
-+		__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
-+		*ovalue = (ecx >> 31) & 1;
-+#else
-+		*ovalue = 0;
++	unsigned int eax = 1, ebx, ecx = 0, edx;
++	__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
++	value = (ecx >> 31) & 1;
 +#endif
-+	}
-+	*oldlen = sizeof(*ovalue);
++	*((int*) old) = value;
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
@@ -3479,10 +3477,10 @@ index 10f39a5..29747d4 100644
  		current = next;
  		token = strtok_r(NULL, ".", &saveptr);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-index 10c412b..49daf7c 100644
+index 10c412b..c9d8b8d 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-@@ -3,27 +3,110 @@
+@@ -3,27 +3,125 @@
  #include <sys/errno.h>
  
  #include <darling/emulation/conversion/errno.h>
@@ -3542,6 +3540,16 @@ index 10c412b..49daf7c 100644
 +	__atomic_store_n(&thp_mode, mode, __ATOMIC_RELEASE);
 +	return mode;
 +}
++
++// Linux before 5.14 does not know MADV_POPULATE_WRITE and rejects it even for
++// an empty range, which a kernel that knows it accepts.
++static int populate_write_supported(void)
++{
++	static int supported = -1;
++	if (supported < 0)
++		supported = LINUX_SYSCALL(__NR_madvise, NULL, 0, LINUX_MADV_POPULATE_WRITE) == 0;
++	return supported;
++}
  
  long sys_madvise(void* addr, unsigned long len, int advice)
  {
@@ -3579,6 +3587,8 @@ index 10c412b..49daf7c 100644
 +		// range is no longer lazily reclaimable when REUSE returns, and a
 +		// caller may reuse a page range that an earlier free hint marked.
 +		// Only a write-prefault of that particular page cancels its laziness.
++		if (((unsigned long) addr & 4095) != 0)
++			return -EINVAL;
 +		advice = LINUX_MADV_POPULATE_WRITE;
 +	} else if (advice >= 5) {
 +		// Other OS X/BSD-specific hints do not share Linux's numeric values.
@@ -3592,7 +3602,10 @@ index 10c412b..49daf7c 100644
 +	// memory). Linux refuses to write-prefault a range that is not writable
 +	// (PROT_NONE or read-only reservations). Such a range has no dirty page
 +	// left to reclaim lazily, so there is nothing to cancel: report success.
-+	if (advice == LINUX_MADV_POPULATE_WRITE && (ret == -LINUX_EINVAL || ret == -LINUX_EFAULT || ret == -LINUX_EPERM))
++	// The address was checked above, so EINVAL here means such a range, unless
++	// the kernel does not support the prefault at all; then the error stands.
++	if (advice == LINUX_MADV_POPULATE_WRITE && (ret == -LINUX_EFAULT || ret == -LINUX_EPERM ||
++	    (ret == -LINUX_EINVAL && populate_write_supported())))
 +		ret = 0;
 +
  	if (ret < 0)

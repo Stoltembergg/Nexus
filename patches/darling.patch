@@ -11734,10 +11734,10 @@ index 00000000..a943c269
 +)
 diff --git a/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
 new file mode 100644
-index 00000000..652b3820
+index 00000000..1b13bcf1
 --- /dev/null
 +++ b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +#ifndef _MEDIAPLAYER_H_
 +#define _MEDIAPLAYER_H_
 +
@@ -11758,6 +11758,7 @@ index 00000000..652b3820
 +@interface MPNowPlayingInfoCenter : NSObject
 ++ (instancetype)defaultCenter;
 +@property (nonatomic, copy) NSDictionary *nowPlayingInfo;
++@property (nonatomic) NSUInteger playbackState;
 +@end
 +
 +@interface MPRemoteCommandCenter : NSObject
@@ -11767,16 +11768,17 @@ index 00000000..652b3820
 +#endif /* _MEDIAPLAYER_H_ */
 diff --git a/src/frameworks/MediaPlayer/src/MediaPlayer.m b/src/frameworks/MediaPlayer/src/MediaPlayer.m
 new file mode 100644
-index 00000000..416ee242
+index 00000000..0d6b8269
 --- /dev/null
 +++ b/src/frameworks/MediaPlayer/src/MediaPlayer.m
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,100 @@
 +/*
 + * Minimal MediaPlayer.framework compatibility surface used by Electron.
 + * The client only needs the now-playing metadata constants and classes.
 + */
 +
 +#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
 +
 +/* darling-lol: a message these classes do not implement returns nil or 0
 + * instead of raising, so callers that probe the frameworks keep running. */
@@ -11788,13 +11790,28 @@ index 00000000..416ee242
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_FORWARDING \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); }
 +
@@ -11811,6 +11828,8 @@ index 00000000..416ee242
 +@end
 +@interface MPNowPlayingInfoCenter : NSObject
 ++ (instancetype)defaultCenter;
++@property (nonatomic, copy) NSDictionary *nowPlayingInfo;
++@property (nonatomic) NSUInteger playbackState;
 +@end
 +@interface MPRemoteCommandCenter : NSObject
 ++ (instancetype)sharedCommandCenter;
@@ -11824,6 +11843,11 @@ index 00000000..416ee242
 +@implementation MPNowPlayingInfoCenter
 +
 +RCLOL_NIL_FORWARDING
++
++/* Electron publishes media metadata here; nothing displays it, so the
++ * properties only keep what was set. */
++@synthesize nowPlayingInfo = _nowPlayingInfo;
++@synthesize playbackState = _playbackState;
 +
 ++ (instancetype)defaultCenter {
 +	static MPNowPlayingInfoCenter *center;
@@ -11908,16 +11932,17 @@ index 00000000..8d6d3e29
 +#endif /* _COREHAPTICS_H_ */
 diff --git a/src/frameworks/CoreHaptics/src/CoreHaptics.m b/src/frameworks/CoreHaptics/src/CoreHaptics.m
 new file mode 100644
-index 00000000..1ef4ba14
+index 00000000..f1b0a625
 --- /dev/null
 +++ b/src/frameworks/CoreHaptics/src/CoreHaptics.m
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,77 @@
 +/*
 + * Minimal CoreHaptics.framework compatibility surface used by Electron.
 + * Haptic playback is intentionally a no-op under Darling.
 + */
 +
 +#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
 +
 +/* darling-lol: a message these classes do not implement returns nil or 0
 + * instead of raising, so callers that probe the frameworks keep running. */
@@ -11929,13 +11954,28 @@ index 00000000..1ef4ba14
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_FORWARDING \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); }
 +
@@ -12042,10 +12082,10 @@ index 00000000..b11a4bfa
 +#endif /* _COREML_H_ */
 diff --git a/src/frameworks/CoreML/src/CoreML.m b/src/frameworks/CoreML/src/CoreML.m
 new file mode 100644
-index 00000000..b92247ee
+index 00000000..d6ffd197
 --- /dev/null
 +++ b/src/frameworks/CoreML/src/CoreML.m
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,107 @@
 +/*
 + * Minimal CoreML.framework compatibility surface used by Electron.
 + * Model execution is unavailable under Darling; these objects exist so the
@@ -12053,6 +12093,7 @@ index 00000000..b92247ee
 + */
 +
 +#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
 +
 +/* darling-lol: a message these classes do not implement returns nil or 0
 + * instead of raising, so callers that probe the frameworks keep running. */
@@ -12064,13 +12105,28 @@ index 00000000..b92247ee
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_FORWARDING \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); }
 +
@@ -12304,10 +12360,18 @@ index 00000000..f247d608
 +@implementation QLPreviewView
 +@end
 diff --git a/src/frameworks/AVFAudio/src/AVFAudio.m b/src/frameworks/AVFAudio/src/AVFAudio.m
-index e9910360..e47c607b 100644
+index e9910360..9bbab444 100644
 --- a/src/frameworks/AVFAudio/src/AVFAudio.m
 +++ b/src/frameworks/AVFAudio/src/AVFAudio.m
-@@ -28,3 +28,35 @@ __attribute__((constructor))
+@@ -21,6 +21,7 @@
+ #include <AVFAudio/AVFAudio.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -28,3 +29,50 @@ __attribute__((constructor))
  static void initme(void) {
      verbose = getenv("STUB_VERBOSE") != NULL;
  }
@@ -12323,15 +12387,30 @@ index e9910360..e47c607b 100644
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_STUB_CLASS(name) \
 +	@interface name : NSObject @end \
 +	@implementation name \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	@end
@@ -12344,10 +12423,18 @@ index e9910360..e47c607b 100644
 +RCLOL_NIL_STUB_CLASS(AVSpeechSynthesizer)
 +RCLOL_NIL_STUB_CLASS(AVSpeechUtterance)
 diff --git a/src/frameworks/AVFoundation/src/AVFoundation.m b/src/frameworks/AVFoundation/src/AVFoundation.m
-index 0c962881..a248a56d 100644
+index 0c962881..e10101bd 100644
 --- a/src/frameworks/AVFoundation/src/AVFoundation.m
 +++ b/src/frameworks/AVFoundation/src/AVFoundation.m
-@@ -93,3 +93,36 @@ void* NSArrayGetRGBAComponents(void) {
+@@ -21,6 +21,7 @@
+ #include <AVFoundation/AVFoundation.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -93,3 +94,51 @@ void* NSArrayGetRGBAComponents(void) {
      if (verbose) puts("STUB: NSArrayGetRGBAComponents called");
      return NULL;
  }
@@ -12363,15 +12450,30 @@ index 0c962881..a248a56d 100644
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_STUB_CLASS(name) \
 +	@interface name : NSObject @end \
 +	@implementation name \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	@end
@@ -12650,10 +12752,18 @@ index f82aadb0..a9e61c2f 100644
 +{
 +}
 diff --git a/src/frameworks/GameController/src/GameController.m b/src/frameworks/GameController/src/GameController.m
-index 7920f73c..5d284ce0 100644
+index 7920f73c..2b7f4682 100644
 --- a/src/frameworks/GameController/src/GameController.m
 +++ b/src/frameworks/GameController/src/GameController.m
-@@ -130,3 +130,41 @@ void* threadRunLoopSourceCallback(void)
+@@ -21,6 +21,7 @@
+ #include <GameController/GameController.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -130,3 +131,56 @@ void* threadRunLoopSourceCallback(void)
      if (verbose) puts("STUB: threadRunLoopSourceCallback called");
      return NULL;
  }
@@ -12669,15 +12779,30 @@ index 7920f73c..5d284ce0 100644
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +#define RCLOL_NIL_STUB_CLASS(name) \
 +	@interface name : NSObject @end \
 +	@implementation name \
 +	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
-+		return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
 +	} \
 +	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
 +	@end
@@ -12895,10 +13020,10 @@ index 00000000..02fb335d
 +@end
 diff --git a/src/frameworks/Accessibility/src/AXCustomContent.m b/src/frameworks/Accessibility/src/AXCustomContent.m
 new file mode 100644
-index 00000000..27c7668f
+index 00000000..1cb1ee21
 --- /dev/null
 +++ b/src/frameworks/Accessibility/src/AXCustomContent.m
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,60 @@
 +/*
 + * Accessibility.framework compatibility class.
 + *
@@ -12908,6 +13033,7 @@ index 00000000..27c7668f
 + */
 +
 +#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
 +
 +static void rclolReturnZero(NSInvocation *invocation)
 +{
@@ -12917,6 +13043,21 @@ index 00000000..27c7668f
 +		[invocation setReturnValue:zero];
 +}
 +
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
 +@interface AXCustomContent : NSObject
 +@end
 +
@@ -12924,7 +13065,7 @@ index 00000000..27c7668f
 +
 ++ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel
 +{
-+	return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"];
++	return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel);
 +}
 +
 ++ (void)forwardInvocation:(NSInvocation *)invocation
@@ -12934,7 +13075,7 @@ index 00000000..27c7668f
 +
 +- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel
 +{
-+	return [super methodSignatureForSelector:sel] ?: [NSMethodSignature signatureWithObjCTypes:"@@:"];
++	return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel);
 +}
 +
 +- (void)forwardInvocation:(NSInvocation *)invocation

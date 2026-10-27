@@ -169,8 +169,11 @@ class RiotClientRuntimeTests(unittest.TestCase):
         source = added_lines(patch_section('patches/xnu.patch',
                                            KERNEL + 'src/xnu_syscall/bsd/helper/misc/sysctl_kern.c'))
         self.assertIn('.name = "hv_vmm_present", .handler = handle_hv_vmm_present', source)
-        # It mirrors the host's CPUID hypervisor bit rather than a fixed value.
-        self.assertIn('*ovalue = (ecx >> 31) & 1;', source)
+        # It mirrors the host's CPUID hypervisor bit rather than a fixed value,
+        # and checks the caller's buffer before writing it.
+        handler = source.split('static sysctl_handler(handle_hv_vmm_present) {', 1)[1].split('\n}', 1)[0]
+        self.assertIn('value = (ecx >> 31) & 1;', handler)
+        self.assertLess(handler.index('sysctl_handle_size(sizeof(int));'), handler.index('*((int*) old) = value;'))
 
     def test_unlimited_rlimits_use_the_darwin_value(self):
         source = added_lines(patch_section('patches/xnu.patch', KERNEL + 'src/xnu_syscall/bsd/impl/misc/getrlimit.c'))
@@ -271,6 +274,48 @@ class RiotClientRuntimeTests(unittest.TestCase):
         # Dawn queries this while probing WebGPU; an exception kills the GPU process.
         source = added_lines(patch_section('patches/metal.patch', 'src/Metal/MTLDevice.mm'))
         self.assertIn('- (NSArray *)counterSets { return @[]; }', source)
+
+    def test_stub_signatures_follow_the_selector(self):
+        # A fixed "@@:" made NSInvocation reject stub setters with arguments.
+        stubs = {'patches/darling.patch': ['src/frameworks/MediaPlayer/src/MediaPlayer.m',
+                                          'src/frameworks/AVFoundation/src/AVFoundation.m',
+                                          'src/frameworks/AVFAudio/src/AVFAudio.m',
+                                          'src/frameworks/GameController/src/GameController.m',
+                                          'src/frameworks/CoreML/src/CoreML.m',
+                                          'src/frameworks/CoreHaptics/src/CoreHaptics.m',
+                                          'src/frameworks/Accessibility/src/AXCustomContent.m'],
+                 'patches/cocotron.patch': ['AppKit/NSAccessibility.m', 'QuartzCore/CALayer.m'],
+                 'patches/metal.patch': ['src/Metal/Metal.mm']}
+        for patch, paths in stubs.items():
+            for path in paths:
+                source = added_lines(patch_section(patch, path))
+                self.assertIn('rclolStubSignature(SEL sel)', source, path)
+                self.assertIn('rclolStubSignature(sel)', source, path)
+                self.assertNotIn('signatureWithObjCTypes:"@@:"]', source, path)
+        player = added_lines(patch_section('patches/darling.patch', 'src/frameworks/MediaPlayer/src/MediaPlayer.m'))
+        self.assertIn('@synthesize nowPlayingInfo = _nowPlayingInfo;', player)
+        self.assertIn('@synthesize playbackState = _playbackState;', player)
+
+    def test_metal_reports_the_device_formats(self):
+        device = added_lines(patch_section('patches/metal.patch', 'src/Metal/MTLDevice.mm'))
+        self.assertIn('vkGetPhysicalDeviceFormatProperties', device)
+        self.assertIn('haveFeatures: VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT', device)
+        header = added_lines(patch_section('patches/metal.patch', 'include/Metal/MTLDevice.h'))
+        for query in ('BOOL supports32BitFloatFiltering;', 'BOOL supportsBCTextureCompression;',
+                      'MTLDeviceLocation location;', 'NSArray* counterSets;'):
+            self.assertIn(query, header)
+
+    def test_certificate_chain_is_null_without_evaluation(self):
+        source = added_lines(patch_section('patches/security.patch', 'OSX/sec/Security/SecTrust.c'))
+        function = source.split('CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust) {', 1)[1].split('\n}', 1)[0]
+        self.assertNotIn('_certificates', function)
+
+    def test_reuse_errors_survive_bad_input_and_old_kernels(self):
+        source = added_lines(patch_section('patches/xnu.patch',
+                                           KERNEL + 'src/xnu_syscall/bsd/impl/mman/madvise.c'))
+        self.assertIn('static int populate_write_supported(void)', source)
+        self.assertIn('(ret == -LINUX_EINVAL && populate_write_supported())', source)
+        self.assertIn("if (((unsigned long) addr & 4095) != 0)", source)
 
     def test_sandbox_profiles_use_the_seatbelt_layout(self):
         source = added_lines(patch_section('patches/darling.patch', 'src/libsandbox/src/sandbox.c'))
