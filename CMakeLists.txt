@@ -142,6 +142,18 @@ option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
 # #2027: defined here, before the GPU section reads it to register the native-expert tests (it was defined at the
 # native-experts section far below, so a first configure registered four tests fewer than the second)
 option(STRATA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
+# Vulkan (Nexus fork): ggml-vulkan inside the static ggml build, behind the strata_gb library (include/strata/backend/
+# ggml_backend.hpp).  Off by default, so every existing build is unchanged.  Needs the Vulkan SDK headers and glslc.
+option(STRATA_ENABLE_VULKAN "Build ggml-vulkan into the static ggml and the strata_gb Vulkan path" OFF)
+if(STRATA_ENABLE_VULKAN)
+  if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP OR STRATA_HIP_GFX906)
+    message(FATAL_ERROR "STRATA_ENABLE_VULKAN is a separate backend; leave STRATA_ENABLE_CUDA, STRATA_ENABLE_HIP and STRATA_HIP_GFX906 off")
+  endif()
+  if(NOT STRATA_NATIVE_EXPERTS)
+    message(FATAL_ERROR "STRATA_ENABLE_VULKAN requires STRATA_NATIVE_EXPERTS=ON (it is what builds ggml)")
+  endif()
+  find_package(Vulkan REQUIRED COMPONENTS glslc)
+endif()
 
 if(STRATA_BUILD_CONVERSATION_TESTS)
   enable_testing()
@@ -1852,6 +1864,7 @@ if(STRATA_NATIVE_EXPERTS)
   set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(GGML_VULKAN ${STRATA_ENABLE_VULKAN} CACHE BOOL "" FORCE)
   if(STRATA_PORTABLE AND NOT STRATA_CPU_X86)
     # arm64 (DGX Spark: Cortex-X925 + A725): ggml-cpu for any Armv8.2 CPU with dot product, FP16 and int8 matmul instead of the build
     # host's, so the engine built here does not depend on which core the compiler ran on.  Without it GGML_NATIVE OFF would leave
@@ -1961,6 +1974,26 @@ if(STRATA_NATIVE_EXPERTS)
     target_compile_definitions(strata_kernels_cpu PRIVATE STRATA_ISA_FLOOR_NONE=1)
   endif()
   target_link_libraries(strata_kernels_cpu PUBLIC ggml-cpu ggml-base)
+  # strata::gb: the one library that owns ggml backends (CPU, and Vulkan with STRATA_ENABLE_VULKAN).  Standalone, so
+  # an engine binary (strata-lfm2) links it alone; only src/backend/ggml_backend.cpp may include ggml-vulkan.h.
+  add_library(strata_gb STATIC src/backend/ggml_backend.cpp)
+  target_include_directories(strata_gb PUBLIC include)
+  target_compile_features(strata_gb PUBLIC cxx_std_17)
+  target_link_libraries(strata_gb PUBLIC ggml ggml-cpu ggml-base)
+  if(STRATA_ENABLE_VULKAN)
+    target_link_libraries(strata_gb PRIVATE ggml-vulkan)
+    target_compile_definitions(strata_gb PRIVATE STRATA_GB_VULKAN=1)
+  endif()
+  if(STRATA_BUILD_TESTS)
+    add_executable(gb_smoke_test tests/backend/gb_smoke_test.cpp)
+    target_link_libraries(gb_smoke_test PRIVATE strata_gb)
+    add_test(NAME gb_smoke_test_cpu COMMAND gb_smoke_test cpu)
+    if(STRATA_ENABLE_VULKAN)
+      # device 0 explicitly: ggml-vulkan skips CPU-type devices (lavapipe) unless they are listed
+      add_test(NAME gb_smoke_test_vulkan COMMAND gb_smoke_test vulkan)
+      set_tests_properties(gb_smoke_test_vulkan PROPERTIES ENVIRONMENT "GGML_VK_VISIBLE_DEVICES=0")
+    endif()
+  endif()
   target_compile_definitions(strata_kernels_cpu PUBLIC STRATA_NATIVE_EXPERTS=1)
   if(STRATA_BUILD_TESTS)
     # the Q5_1 block dequantizer (a Q5_1 PLE table) against ggml's, synthetic blocks: no model, no GPU
