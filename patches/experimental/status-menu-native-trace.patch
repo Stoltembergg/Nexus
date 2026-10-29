@@ -1,0 +1,77 @@
+--- a/tools/darling-dbus-menu.c
++++ b/tools/darling-dbus-menu.c
+@@ -4,6 +4,8 @@
+  */
+ #include "darling-dbus-menu.h"
+ #include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #define MENU_IFACE "com.canonical.dbusmenu"
+ #define MENU_PATH "/Menu"
+@@ -106,6 +108,12 @@
+     g_async_queue_unlock(menu->events);
+ }
+ 
++static void trace_click(gint id, const char *result, const char *reason) {
++    const char *gate = getenv("DARLING_STATUS_MENU_TRACE");
++    if (gate && !strcmp(gate, "1"))
++        fprintf(stderr, "SMTRACE event id=%d kind=clicked result=%s reason=%s\n", id, result, reason);
++}
++
+ static gboolean event_received(DarlingDBusMenu *menu, gint id, const char *name) {
+     DarlingStatusMenuEntry *entry = find(menu, id);
+     if (!strcmp(name, "opened") || !strcmp(name, "closed")) {
+@@ -114,14 +122,25 @@
+         enqueue(menu, !strcmp(name, "opened") ? DARLING_STATUS_MENU_OPEN : DARLING_STATUS_MENU_CLOSE, id);
+         return TRUE;
+     }
+-    if (!entry) return FALSE;
+-    if (!strcmp(name, "clicked") && !(entry->flags & DARLING_MENU_SEPARATOR) && !children(menu, id)) {
+-        gboolean allowed = TRUE;
+-        for (DarlingStatusMenuEntry *ancestor = entry; ancestor;
++    gboolean click = !strcmp(name, "clicked");
++    if (!entry) { if (click) trace_click(id, "rejected", "missing-item"); return FALSE; }
++    if (click) {
++        const char *reason = NULL;
++        if (entry->flags & DARLING_MENU_SEPARATOR) reason = "separator";
++        else if (children(menu, id)) reason = "submenu";
++        for (DarlingStatusMenuEntry *ancestor = entry; !reason && ancestor;
+              ancestor = find(menu, ancestor->parent)) {
+-            if ((ancestor->flags & 3) != 3) allowed = FALSE;
++            if (!(ancestor->flags & DARLING_MENU_ENABLED))
++                reason = ancestor == entry ? "item-disabled" : "parent-disabled";
++            else if (!(ancestor->flags & DARLING_MENU_VISIBLE))
++                reason = ancestor == entry ? "item-hidden" : "parent-hidden";
++        }
++        if (reason) trace_click(id, "rejected", reason);
++        else {
++            trace_click(id, "accepted", "ok");
++            enqueue(menu, DARLING_STATUS_MENU_CLICK, id);
++            trace_click(id, "enqueued", "ok");
+         }
+-        if (allowed) enqueue(menu, DARLING_STATUS_MENU_CLICK, id);
+     }
+     return TRUE;
+ }
+--- a/tools/darling-status-notifier.c
++++ b/tools/darling-status-notifier.c
+@@ -6,6 +6,8 @@
+ #include "darling-dbus-menu.h"
+ #include <gio/gio.h>
+ #include <string.h>
++#include <stdlib.h>
++#include <stdio.h>
+ 
+ #define ITEM_PATH "/StatusNotifierItem"
+ #define ITEM_INTERFACE "org.kde.StatusNotifierItem"
+@@ -336,6 +338,9 @@
+     DarlingStatusEvent *next = g_async_queue_try_pop(item->events);
+     if (!next) return 0;
+     *event = *next;
++    const char *trace = getenv("DARLING_STATUS_MENU_TRACE");
++    if (trace && !strcmp(trace, "1") && next->kind >= DARLING_STATUS_MENU_CLICK && next->kind <= DARLING_STATUS_MENU_CLOSE)
++        fprintf(stderr, "SMTRACE poll id=%d kind=%d\n", next->x, next->kind);
+     g_free(next);
+     return 1;
+ }

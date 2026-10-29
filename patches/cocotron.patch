@@ -259,7 +259,7 @@ index 8e7508e..d62f380 100644
      NSAutoreleasePool *pool = [NSAutoreleasePool new];
      BOOL needsUntitled = YES;
  
-@@ -558,7 +584,6 @@ NSApplication *NSApp = nil;
+@@ -558,12 +584,12 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
      NS_ENDHANDLER
@@ -267,6 +267,13 @@ index 8e7508e..d62f380 100644
      // Load the application icon if we have one
      NSString *iconName = [[[NSBundle mainBundle] infoDictionary]
              objectForKey: @"CFBundleIconFile"];
+     if (iconName) {
+-        iconName = [iconName stringByAppendingPathExtension: @"icns"];
++        if ([[iconName pathExtension] length] == 0)
++            iconName = [iconName stringByAppendingPathExtension: @"icns"];
+         NSImage *image = [NSImage imageNamed: iconName];
+         [self setApplicationIconImage: image];
+     }
 @@ -614,7 +639,6 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
@@ -13029,3 +13036,204 @@ index bf84986..9f0b463 100644
  
  @end
  
+--- a/Onyx2D/O2ImageSource_ICNS.m
++++ b/Onyx2D/O2ImageSource_ICNS.m
+@@ -21,6 +21,8 @@
+ #import <Onyx2D/O2DataProvider.h>
+ #import <Onyx2D/O2Image.h>
+ #import <Onyx2D/O2ImageSource_ICNS.h>
++#import <Onyx2D/O2ImageSource_PNG.h>
++#include <limits.h>
+ 
+ typedef struct O2ICNSNode {
+     struct O2ICNSNode *next;
+@@ -234,7 +236,12 @@
+ 
+ - (void) parseIcon {
+     uint32_t type = nextUnsigned32(self);
+-    uint32_t length = nextUnsigned32(self) - 8;
++    uint32_t chunkLength = nextUnsigned32(self);
++    if (chunkLength < 8 || chunkLength - 8 > _length - _position) {
++        _position = _length;
++        return;
++    }
++    uint32_t length = chunkLength - 8;
+     uint32_t width = 0;
+     uint32_t height = 0;
+     uint32_t bitsPerPixel = 0;
+@@ -397,7 +404,34 @@
+         break;
+     }
+ 
+-    if (isMask) {
++    if ((type == BigEndianOSType('i', 'c', '0', '8') ||
++         type == BigEndianOSType('i', 'c', '0', '9')) && length >= 24 && length <= INT_MAX) {
++        static const uint8_t pngSignature[] = {137, 80, 78, 71, 13, 10, 26, 10};
++        const uint8_t *png = _bytes + _position;
++        uint32_t pngWidth = ((uint32_t)png[16] << 24) | ((uint32_t)png[17] << 16) |
++                            ((uint32_t)png[18] << 8) | png[19];
++        uint32_t pngHeight = ((uint32_t)png[20] << 24) | ((uint32_t)png[21] << 16) |
++                             ((uint32_t)png[22] << 8) | png[23];
++        if (memcmp(png, pngSignature, sizeof(pngSignature)) == 0 &&
++            memcmp(png + 12, "IHDR", 4) == 0 && pngWidth == width && pngHeight == height) {
++            NSData *data = [[NSData alloc] initWithBytes: png length: length];
++            O2DataProvider *provider = O2DataProviderCreateWithCFData((CFDataRef)data);
++            O2ImageSource_PNG *source = [[O2ImageSource_PNG alloc] initWithDataProvider: provider options: nil];
++            O2Image *image = nil;
++            @try {
++                image = [source createImageAtIndex: 0 options: nil];
++                if (image != nil)
++                    [_images addObject: image];
++            } @catch (NSException *exception) {
++                // A malformed embedded PNG must not invalidate other icons.
++            } @finally {
++                [image release];
++                [source release];
++                O2DataProviderRelease(provider);
++                [data release];
++            }
++        }
++    } else if (isMask) {
+         O2ICNSNode *node = [self createNodeForWidth: width
+                                              height: height
+                                        bitsPerPixel: bitsPerPixel
+@@ -492,6 +526,25 @@
+    }
+ #endif
+     else if (bitsPerPixel == 24) {
++        if (length != width * height * 3) {
++            const uint8_t *rle = _bytes + _position;
++            size_t offset = length >= 4 && rle[0] == 0 && rle[1] == 0 && rle[2] == 0 && rle[3] == 0 ? 4 : 0;
++            for (int component = 0; component < 3; component++) {
++                size_t pixels = 0;
++                while (pixels < width * height) {
++                    if (offset >= length) { _position += length; return; }
++                    unsigned packet = rle[offset++];
++                    size_t count = (packet & 0x80) ? (packet & 0x7f) + 3 : packet + 1;
++                    size_t input = (packet & 0x80) ? 1 : count;
++                    if (count > width * height - pixels || input > length - offset) {
++                        _position += length; return;
++                    }
++                    offset += input;
++                    pixels += count;
++                }
++            }
++            if (offset != length) { _position += length; return; }
++        }
+         O2ICNSNode *node = [self createNodeForWidth: width
+                                              height: height
+                                        bitsPerPixel: bitsPerPixel
+@@ -586,10 +639,14 @@
+ }
+ 
+ - (void) parseImages {
++    if (_length < 8)
++        return;
+     uint32_t magic = nextUnsigned32(self);
+     uint32_t length = nextUnsigned32(self);
+-
+-    while (_position < _length)
++    if (magic != BigEndianOSType('i', 'c', 'n', 's') || length < 8 || length > _length)
++        return;
++    _length = length;
++    while (_length - _position >= 8)
+         [self parseIcon];
+ 
+     O2ICNSNode *iconNode;
+--- a/AppKit/X11.backend/X11Window.m
++++ b/AppKit/X11.backend/X11Window.m
+@@ -206,6 +206,8 @@
+     for (NSUInteger i = 0; i < [imageSource count]; i++) {
+ 
+         O2Image *image = [imageSource createImageAtIndex: i options: nil];
++        if (image == nil)
++            continue;
+         NSUInteger width = O2ImageGetWidth(image);
+         NSUInteger height = O2ImageGetHeight(image);
+ 
+@@ -214,6 +216,10 @@
+                 NULL, width, height, 8, width * 4, colorSpace,
+                 kO2ImageAlphaPremultipliedFirst | kO2BitmapByteOrder32Host);
+ 
++        if (context == nil) {
++            [image release];
++            continue;
++        }
+         [context drawImage: image inRect: O2RectMake(0, 0, width, height)];
+         int *imageData = O2BitmapContextGetData(context);
+ 
+@@ -246,13 +252,14 @@
+ 
+     NSData *data = makeWindowIcon();
+ 
+-    if (data == nil)
++    if (data == nil || [data length] == 0) {
+         return;
++    }
+ 
+     XChangeProperty(
+             _display, _window, XInternAtom(_display, "_NET_WM_ICON", False),
+             XInternAtom(_display, "CARDINAL", False), 32, PropModeReplace,
+             [data bytes], [data length] / sizeof(long));
+ }
+ 
+ - (instancetype) initWithDelegate: (NSWindow *) delegate {
+--- a/Onyx2D/O2ImageSource_PNG.m
++++ b/Onyx2D/O2ImageSource_PNG.m
+@@ -65,7 +65,8 @@
+ } png_data_t;
+ 
+ static void O2ImageSource_PNGError(png_structp png_ptr, png_const_charp error_message) {
+-    [NSException raise: @"PNG exception" format: @"%s", error_message];
++    (void)error_message;
++    png_longjmp(png_ptr, 1);
+ }
+ 
+ static void png_read_data(png_structp pngPtr, png_bytep data, png_size_t length) {
+@@ -73,9 +74,11 @@
+     //This is the parameter we passed to the png_set_read_fn() function.
+     //Our std::istream pointer.
+     png_data_t *a = (png_data_t *)png_get_io_ptr(pngPtr);
+-    //Cast the pointer to std::istream* and read 'length' bytes into 'data'
++    if (a == NULL || a->len < 0 || length > (size_t)a->len)
++        png_error(pngPtr, "truncated PNG");
+     memcpy(data, a->data, length);
+-	a->data += length;
++    a->data += length;
++    a->len -= length;
+ }
+ 
+ // Load an unpacked image into outData - RGBA 8 bits/pixels
+@@ -110,7 +113,11 @@
+         return false;
+     }
+ 
+-    @try {
++    if (setjmp(png_jmpbuf(png_ptr))) {
++        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
++        return false;
++    }
++    {
+         /* Set up the output control if
+          * you are using standard C streams */
+ 	png_data_t data = {
+@@ -162,10 +169,6 @@
+ 
+         *outWidth = width;
+         *outHeight = height;
+-    } @catch (NSException *ex) {
+-        NSLog(@"Error reading PNG: %@", ex);
+-        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+-        return false;
+     }
+ 
+     /* Clean up after the read,
+@@ -695,7 +698,7 @@
+ - (O2Image *) createImageAtIndex: (NSUInteger) index
+                          options: (NSDictionary *) options
+ {
+-    int width, height;
++    int width = 0, height = 0;
+     int comp;
+     unsigned char *pixels =
+             stbi_png_load_from_memory([_png bytes], [_png length], &width,

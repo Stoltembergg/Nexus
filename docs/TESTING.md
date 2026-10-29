@@ -4,6 +4,21 @@ Run standalone probes and offline mocks; launch and play matches manually. Do no
 
 ## Patch and offline checks
 
+### Experimental AppKit close trace
+
+In a disposable Cocotron source/build tree, apply `patches/cocotron.patch`
+first, then apply `patches/experimental/cocotron-close-trace.patch` with
+`patch -p1`; rebuild the affected AppKit and X11 backend sources into a
+separate test framework. Do not install it over the production runtime. For an
+owned test application, set `RCLOL_CLOSE_TRACE=1` and inspect `RCLOSE` output
+while exercising a left click and close, including any delegate veto or document
+path. Unset the variable (or use a value other than `1`) to check that no
+`RCLOSE` records appear. Do not set `RCLOL_INPUT_TRACE`: it is a separate,
+broader trace. No window IDs or identifiers are logged; use ordered per-process
+records and view classes for a single-window reproduction. See
+DESKTOP_INTEGRATION.md for the recorded fields and visibility
+limitations. This is opt-in diagnostics, not a requirement to launch Riot.
+
 After preparing the pinned source tree:
 
 ```sh
@@ -79,6 +94,8 @@ python3 tools/riot-cdn-dns-offline-check.py
 python3 -m unittest discover -s tests -p 'test_hidden_riot_recovery.py'
 python3 -m unittest discover -s tests -p 'test_desktop_run.py'
 python3 -m unittest discover -s tests -p 'test_desktop_entry.py'
+python3 -m unittest discover -s tests -p 'test_status_notifier.py' -v
+python3 -m unittest discover -s tests -p 'test_status_notifier_desktop_check.py' -v
 python3 -m unittest discover -s tests -p 'test_urlsession_runner.py'
 ```
 
@@ -93,6 +110,22 @@ the neutral fields, Exec quoting, icon paths, that only launcher artifacts
 this project created are removed, and that the checkout and packaged entries
 share their identity fields. The runner test uses a fake `darling` executable to verify loopback fixtures and
 private-prefix-only shutdown/cleanup.
+
+The status-notifier test builds the native Linux transport against `gio-2.0`
+and uses `dbus-run-session` with a disposable fake panel. It checks item
+properties, icon updates, activation/context/scroll events, bounded event
+queues, independent item lifetimes, panel restart and an unavailable bus. The
+same protocol is tested through the native wrapper, including DBusMenu layouts,
+group methods, checked/disabled/hidden items, malformed snapshots and menu events.
+It never registers an icon on the real desktop or starts Darling. See
+[desktop integration](DESKTOP_INTEGRATION.md) for the guest-adapter boundary
+and the remaining AppKit/menu/session work.
+
+The independent default-NSMenuItem regression is built with
+`python3 tools/build-menu-item-init-check.py`. Run the owned guest binary with
+the experimental initializer fix staged as a per-process AppKit override; it
+requires no Riot process or native tray transport. Expected marker:
+`MENU_ITEM_INIT init=1 new=1 objc_alloc_init=1 explicit_disable=1 separator=1 designated=1`.
 
 With the pinned Darling sources available, run the host resolver regression:
 
@@ -169,6 +202,20 @@ not move the window), minimize and restore it, and check Riot Client header
 dragging separately. No match is required.
 
 ### X11 window decorations
+
+`python3 tools/build-window-close-semantics-check.py` builds an independent
+unmapped AppKit window probe. Run `build/window-close-semantics-check` inside
+Darling with the desired AppKit override. It verifies delegate veto and allowed
+`performClose:`, the close notification and main-thread callbacks; it does not
+exercise window-manager input or the Riot application-drawn close button. It
+also directly sends mouse down/up to its own custom control, with background
+dragging disabled/enabled, and verifies delivery and close. It also tests an
+independent model of a draggable parent and non-draggable passthrough overlay.
+Events are delivered directly to the owned window; this does not exercise X11,
+KDE, the Electron view tree or the actual client control. Expected:
+`WINDOW_CLOSE_SEMANTICS veto=1 allowed=1 notification=1 main_thread=1`.
+`WINDOW_CLOSE_CONTROL down=1 up=1 close=1 background_drag_off_on=1`.
+`WINDOW_CLOSE_PASSTHROUGH overlay=1 draggable_parent=1 action=1`.
 
 `python3 tools/build-riot-x11-runtime.py` also builds
 `build/riot-window-decorations-check`. Install and activate both the patched

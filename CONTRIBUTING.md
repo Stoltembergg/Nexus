@@ -49,8 +49,9 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 
 The audit checks tracked source, rendered Python/shell, pinned revision format,
 patch existence and patch parsing. It does not check patch applicability to the
-pinned revisions. Do not bypass it; fix the source or document the exception in
-the pull request.
+pinned revisions. A separate CI job fetches the pinned upstream and component
+revisions and checks patch applicability. Do not bypass the audit; fix the source
+or document the exception in the pull request.
 
 ## Pull requests
 

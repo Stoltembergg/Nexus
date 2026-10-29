@@ -69,9 +69,11 @@ and saving stdout/stderr in `build/desktop-launch.log` with mode 0600. Logs can
 contain private session details; do not attach raw launcher logs to a public
 issue. The helper also removes the `league-of-legends.*` entry and icons written
 by older versions, but only when it can prove this project created them. The
-entry keeps `StartupWMClass=RiotClientServices`: Darling derives `WM_CLASS` from
-the basename of `argv[0]`, so that is the window class of the client the entry
-starts, while `Riot Client` is only its bundle display name.
+entry keeps `StartupWMClass=RiotClientServices` for the initial process that the
+launcher starts. Child windows can expose different `WM_CLASS` values (the
+observed classes include `Riot Client` and `LeagueClientUx`), so this single
+desktop-entry hint does not match every window or assign its icon. Do not add
+separate launch targets or change the class speculatively to force grouping.
 Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
 
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`

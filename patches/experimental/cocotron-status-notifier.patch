@@ -1,0 +1,1036 @@
+diff --git a/AppKit/NSMenu.subproj/NSMenu.m b/AppKit/NSMenu.subproj/NSMenu.m
+index b72c4c0..af3c83d 100644
+--- a/AppKit/NSMenu.subproj/NSMenu.m
++++ b/AppKit/NSMenu.subproj/NSMenu.m
+@@ -67,6 +67,46 @@ NSString *const _NSWindowsMenuName = @"Window";
+     }
+ }
+ 
++- (BOOL) popUpMenuPositioningItem: (NSMenuItem *) item
++                       atLocation: (NSPoint) location
++                           inView: (NSView *) view
++{
++    [self update];
++    if ([[self itemArray] count] == 0)
++        return NO;
++
++    if (view != nil) {
++        location = [view convertPoint: location toView: nil];
++        if ([view window] != nil)
++            location = [[view window] convertBaseToScreen: location];
++    }
++
++    NSMenuWindow *menuWindow = [[NSMenuWindow alloc] initWithMenu: self];
++    [menuWindow setReleasedWhenClosed: YES];
++    [menuWindow setFrameTopLeftPoint: location];
++    [menuWindow orderFront: nil];
++
++    NSPoint inside = NSMakePoint(1, [menuWindow frame].size.height - 1);
++    NSEvent *event = [NSEvent mouseEventWithType: NSLeftMouseDown
++                                        location: inside
++                                   modifierFlags: 0
++                                          window: menuWindow
++                                      clickCount: 1
++                                          deltaX: 0
++                                          deltaY: 0];
++    NSMenuItem *selected = [[menuWindow menuView] trackForEvent: event];
++    [menuWindow close];
++
++    if (selected != nil)
++        [NSApp sendAction: [selected action] to: [selected target] from: selected];
++    return selected != nil;
++}
++
++- (void) cancelTracking {
++    // Cocotron tracks menus in a synchronous loop. There is no separate
++    // cancellation channel yet; accepting the call keeps clients safe.
++}
++
+ + (NSZone *) menuZone {
+     return NSDefaultMallocZone();
+ }
+diff --git a/AppKit/NSStatusBar.m b/AppKit/NSStatusBar.m
+index a9989e1..b8b9614 100644
+--- a/AppKit/NSStatusBar.m
++++ b/AppKit/NSStatusBar.m
+@@ -26,6 +26,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #endif
+ #import <AppKit/NSStatusItem+Private.h>
+ 
++#if defined(DARLING)
++static NSTimer *_darlingPollTimer = nil;
++#endif
++
+ @implementation NSStatusBar
+ 
+ static NSStatusBar *_statusBar = nil;
+@@ -75,11 +79,26 @@ static NSStatusBar *_statusBar = nil;
+     return NO;
+ }
+ - (void) removeStatusItem: (NSStatusItem *) item {
++    if (item == nil)
++        return;
++#ifdef WIN32
++    [item _removeTrayIcon];
++#elif defined(DARLING)
++    [item _destroyNative];
++#endif
++    [_statusItems removeObjectIdenticalTo: item];
++#if defined(DARLING)
++    if ([_statusItems count] == 0)
++        [self _stopDarlingPolling];
++#endif
+ }
+ - (NSStatusItem *) statusItemWithLength: (CGFloat) length {
+     NSStatusItem *item = [[NSStatusItem alloc] init];
+     [item setLength: length];
+     [_statusItems addObject: item];
++#if defined(DARLING)
++    [self _startDarlingPolling];
++#endif
+     return [item autorelease];
+ }
+ - (CGFloat) thickness {
+@@ -127,12 +146,48 @@ static NSStatusBar *_statusBar = nil;
+ #endif
+ 
+ - (void) handleApplicationClose {
++#if defined(WIN32) || defined(DARLING)
++    NSArray *items = [[_statusItems copy] autorelease];
++    for (NSStatusItem *item in items) {
+ #ifdef WIN32
+-    for (int i = 0; i < _statusItems.count; i++) {
+-        NSStatusItem *item = [_statusItems objectAtIndex: i];
+         [item _removeTrayIcon];
++#else
++        [item _destroyNative];
++#endif
+     }
+ #endif
++#if defined(DARLING)
++    [self _stopDarlingPolling];
++#endif
++}
++
++#if defined(DARLING)
++- (void) _startDarlingPolling {
++    const char *library = getenv("DARLING_STATUS_NOTIFIER_LIBRARY");
++    if (library == NULL || library[0] == '\0')
++        return;
++    if (_darlingPollTimer != nil)
++        return;
++    _darlingPollTimer = [[NSTimer timerWithTimeInterval: 0.1
++                                                target: self
++                                              selector: @selector(_pollDarlingStatusItems:)
++                                              userInfo: nil
++                                               repeats: YES] retain];
++    [[NSRunLoop mainRunLoop] addTimer: _darlingPollTimer
++                              forMode: NSRunLoopCommonModes];
++}
++
++- (void) _stopDarlingPolling {
++    [_darlingPollTimer invalidate];
++    [_darlingPollTimer release];
++    _darlingPollTimer = nil;
++}
++
++- (void) _pollDarlingStatusItems: (NSTimer *) timer {
++    NSArray *items = [[_statusItems copy] autorelease];
++    for (NSStatusItem *item in items)
++        [item _pollNativeEvents];
+ }
++#endif
+ 
+ @end
+diff --git a/AppKit/NSStatusItem+Private.h b/AppKit/NSStatusItem+Private.h
+index e954fd7..adaef45 100644
+--- a/AppKit/NSStatusItem+Private.h
++++ b/AppKit/NSStatusItem+Private.h
+@@ -10,7 +10,11 @@
+ #ifdef WIN32
+ #import <windows.h>
+ #endif
+-@class NSImage, NSStatusItem, NSMenuItem;
++@class NSImage, NSStatusBarButton, NSStatusItem, NSMenuItem, NSAttributedString;
++@interface NSStatusBarButton (Private)
++- (void) _setStatusItem: (NSStatusItem *) item;
++@end
++
+ @interface NSStatusItem (Private)
+ #ifdef WIN32
+ - (void) _createTrayIcon;
+@@ -25,4 +29,13 @@ HWND _eventhWnd;
+ NOTIFYICONDATA niData;
+ #endif
+ - (void) _showContextMenu;
++#if defined(DARLING)
++- (void) _pollNativeEvents;
++- (void) _destroyNative;
++- (void) _buttonImageChanged: (NSImage *) image;
++- (void) _buttonTitleChanged: (NSString *) title;
++- (void) _buttonAttributedTitleChanged: (NSAttributedString *) title;
++- (void) _buttonToolTipChanged: (NSString *) toolTip;
++- (void) _showMenuOrActivate;
++#endif
+ @end
+\ No newline at end of file
+diff --git a/AppKit/NSStatusItem.m b/AppKit/NSStatusItem.m
+index eb5c7a4..153ac30 100644
+--- a/AppKit/NSStatusItem.m
++++ b/AppKit/NSStatusItem.m
+@@ -17,21 +17,177 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSEvent.h>
+ #import <AppKit/NSGraphicsContext.h>
+ #import <AppKit/NSImage.h>
+ #import <AppKit/NSMenu.h>
++#import <AppKit/NSMenuItem.h>
+ #import <AppKit/NSPopUpWindow.h>
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSStatusBar.h>
++#import <AppKit/NSStatusBarButton.h>
+ #import <AppKit/NSStatusItem+Private.h>
+ #import <AppKit/NSStatusItem.h>
+ #import <AppKit/NSWindow.h>
++#import <CoreGraphics/CGBitmapContext.h>
++#import <CoreGraphics/CGColorSpace.h>
++#import <Foundation/NSProcessInfo.h>
++#include <dlfcn.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <objc/runtime.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
+ #ifdef WIN32
+ #import <AppKit/NSStatusBar_(Private).h>
+ #import <AppKit/Win32Window.h>
+ #import <Foundation/NSPlatform_win32.h>
+ #endif
+ 
++#if defined(DARLING)
++typedef struct {
++    int32_t kind;
++    int32_t x;
++    int32_t y;
++    int32_t delta;
++    int32_t horizontal;
++} DarlingStatusEvent;
++
++enum {
++    DarlingStatusActivate = 1,
++    DarlingStatusSecondaryActivate,
++    DarlingStatusContextMenu,
++    DarlingStatusScroll,
++    DarlingStatusMenuClick,
++    DarlingStatusMenuOpen,
++    DarlingStatusMenuClose
++};
++
++typedef struct {
++    int32_t id, parent;
++    const char *label;
++    uint32_t flags;
++    int32_t toggle_state;
++} DarlingStatusMenuEntry;
++
++typedef struct {
++    void *handle;
++    void *(*create)(const char *, const char *, const char *);
++    void (*set_title)(void *, const char *);
++    void (*set_tool_tip)(void *, const char *);
++    void (*set_icon_name)(void *, const char *);
++    int (*set_icon)(void *, uint32_t, uint32_t, const uint8_t *);
++    int (*poll)(void *, DarlingStatusEvent *);
++    int (*set_menu)(void *, const DarlingStatusMenuEntry *, uint32_t);
++    const char *(*bus_name)(void *);
++    void (*destroy)(void *);
++} DarlingStatusFunctions;
++
++static DarlingStatusFunctions _darlingStatus;
++static int _darlingStatusLoadState;
++static unsigned _darlingStatusIdentifier;
++
++static BOOL _loadDarlingStatus(void) {
++    if (_darlingStatusLoadState != 0)
++        return _darlingStatusLoadState > 0;
++    _darlingStatusLoadState = -1;
++    const char *path = getenv("DARLING_STATUS_NOTIFIER_LIBRARY");
++    if (path == NULL || path[0] == '\0')
++        return NO; // Experimental backend is strictly opt-in until guest tests pass.
++    void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++    if (handle == NULL)
++        return NO;
++    _darlingStatus.create = (void *(*)(const char *, const char *, const char *))
++            dlsym(handle, "DarlingStatusNotifierCreate");
++    _darlingStatus.set_title = (void (*)(void *, const char *))
++            dlsym(handle, "DarlingStatusNotifierSetTitle");
++    _darlingStatus.set_tool_tip = (void (*)(void *, const char *))
++            dlsym(handle, "DarlingStatusNotifierSetToolTip");
++    _darlingStatus.set_icon_name = (void (*)(void *, const char *))
++            dlsym(handle, "DarlingStatusNotifierSetIconName");
++    _darlingStatus.set_icon = (int (*)(void *, uint32_t, uint32_t, const uint8_t *))
++            dlsym(handle, "DarlingStatusNotifierSetIcon");
++    _darlingStatus.poll = (int (*)(void *, DarlingStatusEvent *))
++            dlsym(handle, "DarlingStatusNotifierPoll");
++    _darlingStatus.set_menu = (int (*)(void *, const DarlingStatusMenuEntry *, uint32_t))
++            dlsym(handle, "DarlingStatusNotifierSetMenu");
++    _darlingStatus.bus_name = (const char *(*)(void *))
++            dlsym(handle, "DarlingStatusNotifierBusName");
++    _darlingStatus.destroy = (void (*)(void *))
++            dlsym(handle, "DarlingStatusNotifierDestroy");
++    if (_darlingStatus.create == NULL || _darlingStatus.set_title == NULL ||
++        _darlingStatus.set_icon_name == NULL || _darlingStatus.set_icon == NULL ||
++        _darlingStatus.poll == NULL || _darlingStatus.set_menu == NULL || _darlingStatus.destroy == NULL) {
++        dlclose(handle);
++        memset(&_darlingStatus, 0, sizeof(_darlingStatus));
++        return NO;
++    }
++    _darlingStatus.handle = handle;
++    _darlingStatusLoadState = 1;
++    return YES;
++}
++
++static uint8_t *_copyARGBFromImage(NSImage *image, uint32_t *width, uint32_t *height) {
++    if (image == nil || width == NULL || height == NULL)
++        return NULL;
++    NSSize size = [image size];
++    if (size.width <= 0 || size.height <= 0)
++        return NULL;
++    const uint32_t iconWidth = 22;
++    const uint32_t iconHeight = 22;
++    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
++    CGContextRef context = CGBitmapContextCreate(NULL, iconWidth, iconHeight, 8,
++            iconWidth * 4, colorSpace,
++            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
++    CGColorSpaceRelease(colorSpace);
++    if (context == NULL)
++        return NULL;
++
++    NSAutoreleasePool *pool = [NSAutoreleasePool new];
++    NSGraphicsContext *graphics = [NSGraphicsContext graphicsContextWithGraphicsPort:context
++                                                                            flipped:NO];
++    [NSGraphicsContext saveGraphicsState];
++    [NSGraphicsContext setCurrentContext:graphics];
++    [image drawInRect:NSMakeRect(0, 0, iconWidth, iconHeight)
++             fromRect:NSZeroRect
++            operation:NSCompositeSourceOver
++             fraction:1.0];
++    [NSGraphicsContext restoreGraphicsState];
++    [pool release];
++
++    uint8_t *source = CGBitmapContextGetData(context);
++    size_t stride = CGBitmapContextGetBytesPerRow(context);
++    uint8_t *argb = malloc((size_t)iconWidth * iconHeight * 4);
++    if (argb != NULL) {
++        for (uint32_t y = 0; y < iconHeight; y++) {
++            uint8_t *row = source + y * stride;
++            for (uint32_t x = 0; x < iconWidth; x++) {
++                uint8_t b = row[x * 4 + 0];
++                uint8_t g = row[x * 4 + 1];
++                uint8_t r = row[x * 4 + 2];
++                uint8_t a = row[x * 4 + 3];
++                if (a != 0 && a != 255) {
++                    r = (uint8_t)(((unsigned)r * 255 + a / 2) / a);
++                    g = (uint8_t)(((unsigned)g * 255 + a / 2) / a);
++                    b = (uint8_t)(((unsigned)b * 255 + a / 2) / a);
++                }
++                size_t offset = ((size_t)y * iconWidth + x) * 4;
++                argb[offset + 0] = a;
++                argb[offset + 1] = r;
++                argb[offset + 2] = g;
++                argb[offset + 3] = b;
++            }
++        }
++    }
++    CGContextRelease(context);
++    *width = iconWidth;
++    *height = iconHeight;
++    return argb;
++}
++#endif
++
+ @implementation NSStatusItem
+ 
+ #pragma mark Private Methods
+@@ -263,6 +419,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ - (id) init {
+     self = [super init];
+     if (self) {
++        _enabled = YES;
++        _length = NSVariableStatusItemLength;
+ #ifdef WIN32
+         _trayIcon = NULL;
+         _trayIconID = -1;
+@@ -272,6 +430,51 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     return self;
+ }
+ 
++#if defined(DARLING)
++- (void) dealloc {
++    [self _destroyNative];
++    [_button _setStatusItem:nil];
++    [_button release];
++    [_autosaveName release];
++    [_toolTip release];
++    [_image release];
++    [_alternateImage release];
++    [_title release];
++    [_atrTitle release];
++    [_view release];
++    [_menu release];
++    [_nativeMenuItems release];
++    [_nativeTrackingMenus release];
++    [super dealloc];
++}
++#endif
++
++- (NSStatusBarButton *) button {
++    if (_button == nil) {
++        CGFloat width = _length > 0 ? _length : 22;
++        _button = [[NSStatusBarButton alloc] initWithFrame:NSMakeRect(0, 0, width, 22)];
++        [_button _setStatusItem:self];
++        if (_image != nil)
++            [_button setImage:_image];
++        if (_atrTitle != nil)
++            [_button setAttributedTitle:_atrTitle];
++        else if (_title != nil)
++            [_button setTitle:_title];
++        if (_toolTip != nil)
++            [_button setToolTip:_toolTip];
++    }
++    return _button;
++}
++
++- (NSString *) autosaveName {
++    return _autosaveName;
++}
++
++- (void) setAutosaveName: (NSString *) name {
++    [_autosaveName release];
++    _autosaveName = [name copy];
++}
++
+ - (NSStatusBar *) statusBar {
+     return [NSStatusBar systemStatusBar];
+ }
+@@ -300,9 +503,17 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ }
+ 
+ - (void) setImage: (NSImage *) image {
++#if defined(DARLING)
++    if (_button != nil) {
++        [_button setImage:image];
++    } else {
++        [self _buttonImageChanged:image];
++    }
++#else
+     [_image release];
+     _image = nil;
+     _image = [image copy];
++#endif
+ #ifdef WIN32
+     if (_trayIconID <= -1) {
+         [self _createTrayIcon];
+@@ -324,19 +535,38 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     return _title;
+ }
+ - (void) setTitle: (NSString *) title {
+-#ifndef WIN32
++#if defined(DARLING)
++    if (_button != nil) {
++        [_button setTitle:title];
++    } else {
++        [self _buttonTitleChanged:title];
++    }
++#elif !defined(WIN32)
+     [_title release];
+     _title = nil;
+     _title = [title copy];
+ #endif
+ }
+ - (void) setToolTip: (NSString *) toolTip {
++#if defined(DARLING)
++    if (_button != nil) {
++        [_button setToolTip:toolTip];
++    } else {
++        [self _buttonToolTipChanged:toolTip];
++    }
++#endif
+ }
+ - (NSAttributedString *) attributedTitle {
+     return _atrTitle;
+ }
+ - (void) setAttributedTitle: (NSAttributedString *) title {
+-#ifndef WIN32
++#if defined(DARLING)
++    if (_button != nil) {
++        [_button setAttributedTitle:title];
++    } else {
++        [self _buttonAttributedTitleChanged:title];
++    }
++#elif !defined(WIN32)
+     [_atrTitle release];
+     _atrTitle = nil;
+     _atrTitle = [title copy];
+@@ -385,6 +615,14 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ - (void) setLength: (CGFloat) len {
+ #ifndef WIN32
+     _length = len;
++#if defined(DARLING)
++    if (_button != nil) {
++        NSRect frame = [_button frame];
++        frame.size.width = len > 0 ? len : 22;
++        frame.size.height = 22;
++        [_button setFrame:frame];
++    }
++#endif
+ #endif
+ }
+ 
+@@ -392,9 +630,19 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     return _menu;
+ }
+ - (void) setMenu: (NSMenu *) menu {
++#if defined(DARLING)
++    // Preserve the application's live menu and delegate, not a stale snapshot.
++    [menu retain];
++    [self _closeAllNativeMenus];
++    [_menu release];
++    _menu = menu;
++    _nativeMenuDirty = YES;
++    [self _refreshNativeMenu];
++#else
+     [_menu release];
+     _menu = nil;
+     _menu = [menu copy];
++#endif
+ #ifdef WIN32
+     // Preprocess Menu into HMENU ready for Win32 Events
+     if (_win32Menu == NULL) {
+@@ -412,8 +660,376 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ }
+ 
+ - (void) popUpStatusItemMenu: (NSMenu *) menu {
++#if defined(DARLING)
++    if (menu == nil || [menu numberOfItems] == 0)
++        return;
++    [menu popUpMenuPositioningItem:nil
++                        atLocation:[NSEvent mouseLocation]
++                            inView:nil];
++#endif
+ }
+ 
++#if defined(DARLING)
++- (BOOL) _hasNativeContent {
++    return _image != nil ||
++           (_title != nil && [_title length] > 0) ||
++           (_atrTitle != nil && [[_atrTitle string] length] > 0);
++}
++
++- (NSString *) _nativeTitle {
++    if (_atrTitle != nil && [[_atrTitle string] length] > 0)
++        return [_atrTitle string];
++    if (_title != nil && [_title length] > 0)
++        return _title;
++    NSString *name = [[NSProcessInfo processInfo] processName];
++    return name != nil && [name length] > 0 ? name : @"Darling";
++}
++
++- (NSString *) _nativeToolTip {
++    if (_toolTip != nil && [_toolTip length] > 0)
++        return _toolTip;
++    return [self _nativeTitle];
++}
++
++- (BOOL) _ensureNative {
++    if (_nativeItem != NULL)
++        return YES;
++    if (_nativeFailed)
++        return NO;
++    if (![self _hasNativeContent])
++        return NO;
++    if (!_loadDarlingStatus()) {
++        _nativeFailed = YES;
++        return NO;
++    }
++    NSString *identifier = [NSString stringWithFormat:@"org.darling.status.%d.%u",
++            (int)getpid(), ++_darlingStatusIdentifier];
++    NSString *title = [self _nativeTitle];
++    _nativeItem = _darlingStatus.create([identifier UTF8String], [title UTF8String],
++            "application-x-executable");
++    if (_nativeItem == NULL) {
++        _nativeFailed = YES;
++        return NO;
++    }
++    [self _pushNativeTitle];
++    [self _pushNativeIcon];
++    [self _refreshNativeMenu];
++    return YES;
++}
++
++- (void) _pushNativeTitle {
++    if (_nativeItem == NULL)
++        return;
++    NSString *title = [self _nativeTitle];
++    NSString *toolTip = [self _nativeToolTip];
++    if (title != nil)
++        _darlingStatus.set_title(_nativeItem, [title UTF8String]);
++    if (toolTip != nil && _darlingStatus.set_tool_tip != NULL)
++        _darlingStatus.set_tool_tip(_nativeItem, [toolTip UTF8String]);
++}
++
++- (void) _pushNativeIcon {
++    if (_nativeItem == NULL)
++        return;
++    NSImage *image = _image != nil ? _image : [NSApp applicationIconImage];
++    if (image == nil) {
++        _darlingStatus.set_icon(_nativeItem, 0, 0, NULL);
++        _darlingStatus.set_icon_name(_nativeItem, "application-x-executable");
++        return;
++    }
++    uint32_t width = 0, height = 0;
++    uint8_t *argb = _copyARGBFromImage(image, &width, &height);
++    if (argb == NULL)
++        return;
++    if (_darlingStatus.set_icon(_nativeItem, width, height, argb))
++        _darlingStatus.set_icon_name(_nativeItem, ""); // Panels prefer a theme name over pixel data.
++    free(argb);
++}
++
++- (void) _buttonImageChanged: (NSImage *) image {
++    if (image != _image) {
++        [_image release];
++        _image = [image copy];
++    }
++    [self _ensureNative];
++    [self _pushNativeIcon];
++}
++
++- (void) _buttonTitleChanged: (NSString *) title {
++    if (title != _title) {
++        [_title release];
++        _title = [title copy];
++    }
++    [_atrTitle release];
++    _atrTitle = nil;
++    [self _ensureNative];
++    [self _pushNativeTitle];
++}
++
++- (void) _buttonAttributedTitleChanged: (NSAttributedString *) title {
++    if (title != _atrTitle) {
++        [_atrTitle release];
++        _atrTitle = [title copy];
++    }
++    [_title release];
++    _title = nil;
++    [self _ensureNative];
++    [self _pushNativeTitle];
++}
++
++- (void) _buttonToolTipChanged: (NSString *) toolTip {
++    if (toolTip != _toolTip) {
++        [_toolTip release];
++        _toolTip = [toolTip copy];
++    }
++    [self _pushNativeTitle];
++}
++
++- (BOOL) _appendNativeMenu: (NSMenu *) menu
++                   parent: (int32_t) parent
++                    depth: (unsigned) depth
++                  entries: (DarlingStatusMenuEntry *) entries
++                    count: (unsigned *) count
++                    items: (NSMutableDictionary *) items
++                   labels: (NSMutableArray *) labels
++{
++    if (depth > 32)
++        return NO;
++    [menu update]; // Guest delegate and validation always run on the AppKit thread.
++    if (getenv("DARLING_STATUS_NOTIFIER_DEBUG")) {
++        fprintf(stderr, "STATUS_MENU_DEBUG app=%d autoenable=%d delegate=%s\n", NSApp != nil,
++            [menu autoenablesItems], [menu delegate] ? class_getName([[menu delegate] class]) : "nil");
++    }
++    NSArray *snapshot = [[menu itemArray] copy];
++    BOOL valid = YES;
++    for (NSMenuItem *item in snapshot) {
++        if (*count >= 1024) { valid = NO; break; }
++        NSNumber *identifier = nil;
++        for (NSNumber *key in _nativeMenuItems)
++            if ([_nativeMenuItems objectForKey:key] == item) { identifier = key; break; }
++        if (identifier == nil) {
++            if (_nextNativeMenuID == INT32_MAX) { valid = NO; break; }
++            identifier = [NSNumber numberWithInt:++_nextNativeMenuID];
++        }
++        // NSMenu titles have no DBusMenu mnemonic escapes.
++        NSString *label = [[item title] stringByReplacingOccurrencesOfString:@"_" withString:@"__"];
++        if (label == nil) label = @"";
++        const char *bytes = [label UTF8String];
++        if (bytes == NULL || strlen(bytes) > 4096) { valid = NO; break; }
++        [labels addObject:label];
++        uint32_t flags = ([item isEnabled] ? 1 : 0) | ([item isHidden] ? 0 : 2);
++        if (getenv("DARLING_STATUS_NOTIFIER_DEBUG") && ![item isSeparatorItem]) {
++            fprintf(stderr, "STATUS_MENU_DEBUG enabled=%d action=%d target=%s\n", [item isEnabled],
++                [item action] != NULL, [item target] ? class_getName([[item target] class]) : "nil");
++        }
++        if ([item isSeparatorItem]) flags |= 4;
++        NSInteger state = [item state];
++        if (state != 0) flags |= 8;
++        DarlingStatusMenuEntry entry = {
++            [identifier intValue], parent, bytes, flags,
++            state < 0 ? -1 : (state > 0 ? 1 : 0)
++        };
++        entries[(*count)++] = entry;
++        [items setObject:item forKey:identifier];
++        if ([item hasSubmenu]) {
++            NSMenu *submenu = [[item submenu] retain];
++            BOOL appended = NO;
++            @try {
++                appended = [self _appendNativeMenu:submenu parent:entry.id depth:depth + 1
++                    entries:entries count:count items:items labels:labels];
++            } @finally {
++                [submenu release];
++            }
++            if (!appended) { valid = NO; break; }
++        }
++    }
++    [snapshot release];
++    return valid;
++}
++
++- (void) _refreshNativeMenu {
++    if (_nativeItem == NULL || _publishingNativeMenu)
++        return;
++    _publishingNativeMenu = YES;
++    _nativeMenuDirty = NO;
++    NSMenu *menu = [_menu retain];
++    DarlingStatusMenuEntry *entries = calloc(1024, sizeof(*entries));
++    NSMutableDictionary *items = [[NSMutableDictionary alloc] init];
++    NSMutableArray *labels = [[NSMutableArray alloc] init];
++    unsigned count = 0;
++    @try {
++        BOOL valid = entries != NULL && [self _appendNativeMenu:menu parent:0 depth:1
++            entries:entries count:&count items:items labels:labels];
++        // A delegate can remove the status item or replace the menu during update.
++        if (_nativeItem != NULL && _menu == menu) {
++            if (!valid) {
++                // Never leave obsolete actionable entries on the host.
++                count = 0;
++                [items removeAllObjects];
++            }
++            if (_darlingStatus.set_menu(_nativeItem, entries, count)) {
++                [_nativeMenuItems release];
++                _nativeMenuItems = [items retain];
++            }
++        } else if (_nativeItem != NULL) {
++            _nativeMenuDirty = YES;
++            _darlingStatus.set_menu(_nativeItem, NULL, 0);
++            [_nativeMenuItems removeAllObjects];
++        }
++    } @finally {
++        free(entries);
++        [items release];
++        [labels release];
++        [menu release];
++        _publishingNativeMenu = NO;
++    }
++}
++
++- (const char *) _nativeBusName {
++    return _nativeItem != NULL && _darlingStatus.bus_name != NULL ?
++        _darlingStatus.bus_name(_nativeItem) : NULL;
++}
++
++- (void) _openNativeMenuID: (int32_t) identifier {
++    NSNumber *key = [NSNumber numberWithInt:identifier];
++    NSMenu *menu = identifier == 0 ? _menu :
++        [[_nativeMenuItems objectForKey:key] submenu];
++    if (menu == nil) return;
++    if (_nativeTrackingMenus == nil)
++        _nativeTrackingMenus = [[NSMutableDictionary alloc] init];
++    if ([_nativeTrackingMenus objectForKey:key] != menu) {
++        [menu retain];
++        @try {
++            [_nativeTrackingMenus setObject:menu forKey:key];
++            id delegate = [menu delegate];
++            if ([delegate respondsToSelector:@selector(menuWillOpen:)])
++                [delegate menuWillOpen:menu];
++            [[NSNotificationCenter defaultCenter] postNotificationName:NSMenuDidBeginTrackingNotification object:menu];
++        } @finally {
++            [menu release];
++        }
++    }
++    [self _refreshNativeMenu];
++}
++
++- (void) _closeNativeMenuID: (int32_t) identifier {
++    NSNumber *key = [NSNumber numberWithInt:identifier];
++    NSMenu *menu = [[_nativeTrackingMenus objectForKey:key] retain];
++    if (menu == nil) return;
++    [_nativeTrackingMenus removeObjectForKey:key];
++    @try {
++        id delegate = [menu delegate];
++        if ([delegate respondsToSelector:@selector(menuDidClose:)])
++            [delegate menuDidClose:menu];
++        [[NSNotificationCenter defaultCenter] postNotificationName:NSMenuDidEndTrackingNotification object:menu];
++    } @finally {
++        [menu release];
++    }
++    [self _refreshNativeMenu];
++}
++
++- (void) _closeAllNativeMenus {
++    NSArray *keys = [[_nativeTrackingMenus allKeys] copy];
++    for (NSNumber *key in keys)
++        [self _closeNativeMenuID:[key intValue]];
++    [keys release];
++}
++
++- (void) _dispatchNativeMenuID: (int32_t) identifier {
++    [self _refreshNativeMenu]; // Revalidate before acting on a queued click.
++    NSMenuItem *item = [_nativeMenuItems objectForKey:[NSNumber numberWithInt:identifier]];
++    if (!_enabled || ![item isEnabled] || [item isHidden] || [item isSeparatorItem] || [item hasSubmenu])
++        return;
++    NSMenu *menu = [item menu];
++    while (menu != nil && menu != _menu) {
++        NSMenu *parent = [menu supermenu];
++        NSInteger index = [parent indexOfItemWithSubmenu:menu];
++        NSMenuItem *owner = index == NSNotFound ? nil : [parent itemAtIndex:index];
++        if (![owner isEnabled] || [owner isHidden]) return;
++        menu = parent;
++    }
++    if (menu != _menu || menu == nil)
++        return;
++    // The action can remove this item, its menu, or the entire status item.
++    [item retain];
++    @try {
++        [NSApp sendAction:[item action] to:[item target] from:item];
++    } @finally {
++        [item release];
++    }
++    [self _refreshNativeMenu];
++}
++
++- (void) _activate {
++    if (_menu != nil && [_menu numberOfItems] > 0) {
++        [self popUpStatusItemMenu:_menu];
++        return;
++    }
++    if (_button != nil && [_button action] != NULL) {
++        [_button performClick:self];
++        return;
++    }
++    if (_action != NULL)
++        [NSApp sendAction:_action to:_target from:self];
++}
++
++- (void) _showMenuOrActivate {
++    if (_menu != nil && [_menu numberOfItems] > 0)
++        [self popUpStatusItemMenu:_menu];
++    else
++        [self _activate];
++}
++
++- (void) _pollNativeEvents {
++    if (_nativeItem == NULL || _darlingStatus.poll == NULL || _pollingNativeEvents)
++        return;
++    _pollingNativeEvents = YES;
++    @try {
++        if (_nativeMenuDirty) [self _refreshNativeMenu];
++        DarlingStatusEvent event;
++        // Actions can remove this item or enter a nested menu loop. The status
++        // bar snapshot keeps self alive, but the native pointer may become NULL.
++        unsigned budget = 128;
++        while (_nativeItem != NULL && budget-- && _darlingStatus.poll(_nativeItem, &event)) {
++            if (!_enabled)
++                continue;
++            switch (event.kind) {
++            case DarlingStatusActivate:
++                [self _activate];
++                break;
++            case DarlingStatusSecondaryActivate:
++            case DarlingStatusContextMenu:
++                [self _showMenuOrActivate];
++                break;
++            case DarlingStatusMenuClick:
++                [self _dispatchNativeMenuID:event.x];
++                break;
++            case DarlingStatusMenuOpen:
++                [self _openNativeMenuID:event.x];
++                break;
++            case DarlingStatusMenuClose:
++                [self _closeNativeMenuID:event.x];
++                break;
++            default:
++                break;
++            }
++        }
++    } @finally {
++        _pollingNativeEvents = NO;
++    }
++}
++
++- (void) _destroyNative {
++    void *native = _nativeItem;
++    _nativeItem = NULL;
++    _nativeFailed = YES; // Disable before calling application delegates below.
++    if (native != NULL && _darlingStatus.destroy != NULL)
++        _darlingStatus.destroy(native);
++    [self _closeAllNativeMenus];
++    [_nativeMenuItems removeAllObjects];
++}
++#endif
++
+ - (void) _showContextMenu {
+ #ifdef WIN32
+     if (_win32Menu) {
+@@ -442,3 +1057,40 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ }
+ 
+ @end
++
++@implementation NSStatusBarButton
++
++- (void) _setStatusItem: (NSStatusItem *) item {
++    _statusItem = item;
++}
++
++- (void) setImage: (NSImage *) image {
++    [super setImage:image];
++    [_statusItem _buttonImageChanged:image];
++}
++
++- (void) setTitle: (NSString *) title {
++    [super setTitle:title];
++    [_statusItem _buttonTitleChanged:title];
++}
++
++- (void) setAttributedTitle: (NSAttributedString *) title {
++    [super setAttributedTitle:title];
++    [_statusItem _buttonAttributedTitleChanged:title];
++}
++
++- (void) setToolTip: (NSString *) toolTip {
++    [super setToolTip:toolTip];
++    [_statusItem _buttonToolTipChanged:toolTip];
++}
++
++- (void) performClick: (id) sender {
++    NSMenu *menu = [_statusItem menu];
++    if (menu != nil && [menu numberOfItems] > 0) {
++        [_statusItem popUpStatusItemMenu:menu];
++        return;
++    }
++    [super performClick:sender];
++}
++
++@end
+diff --git a/AppKit/include/AppKit/AppKit.h b/AppKit/include/AppKit/AppKit.h
+index ad19074..e91c186 100644
+--- a/AppKit/include/AppKit/AppKit.h
++++ b/AppKit/include/AppKit/AppKit.h
+@@ -162,6 +162,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSSplitView.h>
+ #import <AppKit/NSStackView.h>
+ #import <AppKit/NSStatusBar.h>
++#import <AppKit/NSStatusBarButton.h>
+ #import <AppKit/NSStatusItem.h>
+ #import <AppKit/NSStepper.h>
+ #import <AppKit/NSStepperCell.h>
+diff --git a/AppKit/include/AppKit/NSMenu.h b/AppKit/include/AppKit/NSMenu.h
+index 82873d6..1c12f81 100644
+--- a/AppKit/include/AppKit/NSMenu.h
++++ b/AppKit/include/AppKit/NSMenu.h
+@@ -47,6 +47,11 @@ APPKIT_EXPORT const NSNotificationName NSMenuDidEndTrackingNotification;
+                 withEvent: (NSEvent *) event
+                   forView: (NSView *) view;
+ 
++- (BOOL) popUpMenuPositioningItem: (NSMenuItem *) item
++                       atLocation: (NSPoint) location
++                           inView: (NSView *) view;
++- (void) cancelTracking;
++
+ + (NSZone *) menuZone;
+ 
+ - initWithTitle: (NSString *) title;
+diff --git a/AppKit/include/AppKit/NSStatusItem.h b/AppKit/include/AppKit/NSStatusItem.h
+index 3d80edb..c670185 100644
+--- a/AppKit/include/AppKit/NSStatusItem.h
++++ b/AppKit/include/AppKit/NSStatusItem.h
+@@ -22,7 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #ifdef WIN32
+ #import <windows.h>
+ #endif
+-@class NSStatusBar, NSImage, NSAttributedString, NSMenu, NSView, NSWindow;
++@class NSStatusBar, NSStatusBarButton, NSImage, NSAttributedString, NSMenu, NSView, NSWindow;
+ @interface NSStatusItem : NSObject {
+     SEL _action;
+     SEL _doubleAction;
+@@ -41,6 +41,19 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     CGFloat _length;
+     NSMenu *_menu;
+     NSInteger _actionMask;
++    NSStatusBarButton *_button;
++    NSString *_autosaveName;
++    NSString *_toolTip;
++#ifdef DARLING
++    void *_nativeItem;
++    BOOL _nativeFailed;
++    NSMutableDictionary *_nativeMenuItems;
++    int32_t _nextNativeMenuID;
++    BOOL _publishingNativeMenu;
++    BOOL _nativeMenuDirty;
++    BOOL _pollingNativeEvents;
++    NSMutableDictionary *_nativeTrackingMenus;
++#endif
+ #ifdef WIN32
+     int _trayIconID;
+     HICON _trayIcon;
+@@ -48,6 +61,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #endif
+ }
+ - (NSStatusBar *) statusBar;
++- (NSStatusBarButton *) button;
++
++- (NSString *) autosaveName;
++- (void) setAutosaveName: (NSString *) name;
+ 
+ - (SEL) action;
+ - (void) setAction: (SEL) action;
+diff --git a/AppKit/include/AppKit/NSStatusBarButton.h b/AppKit/include/AppKit/NSStatusBarButton.h
+new file mode 100644
+index 0000000..0abd944
+--- /dev/null
++++ b/AppKit/include/AppKit/NSStatusBarButton.h
+@@ -0,0 +1,27 @@
++/* Copyright (c) 2026 darling-lol contributors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of
++this software and associated documentation files (the "Software"), to deal in
++the Software without restriction, including without limitation the rights to
++use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
++the Software, and to permit persons to whom the Software is furnished to do so,
++subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
++FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
++COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
++IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
++
++#import <AppKit/NSButton.h>
++
++@class NSStatusItem;
++
++@interface NSStatusBarButton : NSButton {
++    NSStatusItem *_statusItem;
++}
++@end

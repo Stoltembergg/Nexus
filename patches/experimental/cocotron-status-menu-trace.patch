@@ -1,0 +1,68 @@
+--- a/AppKit/NSStatusItem.m
++++ b/AppKit/NSStatusItem.m
+@@ -935,24 +935,45 @@
+ }
+ 
+ - (void) _dispatchNativeMenuID: (int32_t) identifier {
+-    [self _refreshNativeMenu]; // Revalidate before acting on a queued click.
++    const char *trace = getenv("DARLING_STATUS_MENU_TRACE");
++    BOOL tracing = trace != NULL && strcmp(trace, "1") == 0;
++    [self _refreshNativeMenu];
+     NSMenuItem *item = [_nativeMenuItems objectForKey:[NSNumber numberWithInt:identifier]];
+-    if (!_enabled || ![item isEnabled] || [item isHidden] || [item isSeparatorItem] || [item hasSubmenu])
++    const char *reason = NULL;
++    if (!_enabled) reason = "status-disabled";
++    else if (item == nil) reason = "missing-item";
++    else if (![item isEnabled]) reason = "item-disabled";
++    else if ([item isHidden]) reason = "item-hidden";
++    else if ([item isSeparatorItem]) reason = "separator";
++    else if ([item hasSubmenu]) reason = "submenu";
++    if (reason != NULL) {
++        if (tracing) fprintf(stderr, "SMTRACE dispatch id=%d result=rejected reason=%s\n", identifier, reason);
+         return;
++    }
+     NSMenu *menu = [item menu];
+     while (menu != nil && menu != _menu) {
+         NSMenu *parent = [menu supermenu];
+         NSInteger index = [parent indexOfItemWithSubmenu:menu];
+         NSMenuItem *owner = index == NSNotFound ? nil : [parent itemAtIndex:index];
+-        if (![owner isEnabled] || [owner isHidden]) return;
++        if (owner == nil || ![owner isEnabled] || [owner isHidden]) {
++            reason = owner == nil ? "parent-missing" : (![owner isEnabled] ? "parent-disabled" : "parent-hidden");
++            if (tracing) fprintf(stderr, "SMTRACE dispatch id=%d result=rejected reason=%s\n", identifier, reason);
++            return;
++        }
+         menu = parent;
+     }
+-    if (menu != _menu || menu == nil)
++    if (menu != _menu || menu == nil) {
++        if (tracing) fprintf(stderr, "SMTRACE dispatch id=%d result=rejected reason=detached\n", identifier);
+         return;
+-    // The action can remove this item, its menu, or the entire status item.
++    }
++    if (tracing) fprintf(stderr, "SMTRACE dispatch id=%d result=accepted reason=ok\n", identifier);
+     [item retain];
+     @try {
+-        [NSApp sendAction:[item action] to:[item target] from:item];
++        SEL action = [item action];
++        id target = [item target];
++        if (tracing) fprintf(stderr, "SMTRACE send id=%d phase=before target=%d action=%d\n", identifier, target != nil, action != NULL);
++        BOOL handled = [NSApp sendAction:action to:target from:item];
++        if (tracing) fprintf(stderr, "SMTRACE send id=%d phase=after target=%d action=%d handled=%d\n", identifier, target != nil, action != NULL, handled);
+     } @finally {
+         [item release];
+     }
+@@ -990,8 +1011,12 @@
+         // bar snapshot keeps self alive, but the native pointer may become NULL.
+         unsigned budget = 128;
+         while (_nativeItem != NULL && budget-- && _darlingStatus.poll(_nativeItem, &event)) {
+-            if (!_enabled)
++            if (!_enabled) {
++                const char *trace = getenv("DARLING_STATUS_MENU_TRACE");
++                if (event.kind == DarlingStatusMenuClick && trace && strcmp(trace, "1") == 0)
++                    fprintf(stderr, "SMTRACE dispatch id=%d result=rejected reason=status-disabled\n", event.x);
+                 continue;
++            }
+             switch (event.kind) {
+             case DarlingStatusActivate:
+                 [self _activate];

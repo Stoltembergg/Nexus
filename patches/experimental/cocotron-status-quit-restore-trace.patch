@@ -1,0 +1,74 @@
+--- a/AppKit/NSApplication.m
++++ b/AppKit/NSApplication.m
+@@ -1,4 +1,9 @@
+ #include "RCLOLCloseTrace.h"
++
++static int smQuitTraceEnabled(void) {
++    const char *value = getenv("DARLING_STATUS_MENU_TRACE");
++    return value != NULL && strcmp(value, "1") == 0;
++}
+ /* Copyright (c) 2006-2007 Christopher J. W. Lloyd
+ 
+ Permission is hereby granted, free of charge, to any person obtaining a copy of
+@@ -1365,6 +1370,7 @@
+ }
+ 
+ - (void) terminate: sender {
++    if (smQuitTraceEnabled()) fprintf(stderr, "SMQTRACE terminate phase=entry\n");
+     [[NSDocumentController sharedDocumentController]
+             closeAllDocumentsWithDelegate: self
+                       didCloseAllSelector: @selector
+@@ -1377,18 +1383,20 @@
+                  contextInfo: (void *) info
+ {
+     // callback method for terminate:
++    if (smQuitTraceEnabled()) fprintf(stderr, "SMQTRACE terminate phase=documents did_close_all=%d\n", didCloseAll);
+     if (didCloseAll) {
+         if ([_delegate
+-                    respondsToSelector: @selector(applicationShouldTerminate:)])
+-            [self replyToApplicationShouldTerminate:
+-                            [_delegate applicationShouldTerminate: self] ==
+-                            NSTerminateNow];
+-        else
++                    respondsToSelector: @selector(applicationShouldTerminate:)]) {
++            NSApplicationTerminateReply reply = [_delegate applicationShouldTerminate: self];
++            if (smQuitTraceEnabled()) fprintf(stderr, "SMQTRACE terminate phase=delegate reply=%ld\n", (long)reply);
++            [self replyToApplicationShouldTerminate: reply == NSTerminateNow];
++        } else
+             [self replyToApplicationShouldTerminate: YES];
+     }
+ }
+ 
+ - (void) replyToApplicationShouldTerminate: (BOOL) terminate {
++    if (smQuitTraceEnabled()) fprintf(stderr, "SMQTRACE terminate phase=reply decision=%d\n", terminate);
+     if (terminate == YES) {
+         [[NSNotificationCenter defaultCenter]
+                 postNotificationName: NSApplicationWillTerminateNotification
+@@ -1397,6 +1405,10 @@
+         [NSClassFromString(@"Win32RunningCopyPipe")
+                 performSelector: @selector(invalidateRunningCopyPipe)];
+ 
++        if (smQuitTraceEnabled()) {
++            fprintf(stderr, "SMQTRACE terminate phase=exit\n");
++            fflush(stderr);
++        }
+         exit(0);
+     }
+ }
+--- a/AppKit/NSStatusItem.m
++++ b/AppKit/NSStatusItem.m
+@@ -971,6 +971,14 @@
+     @try {
+         SEL action = [item action];
+         id target = [item target];
++        if (tracing) {
++            NSUInteger visible = 0;
++            for (NSWindow *window in [NSApp windows])
++                if ([window isVisible]) visible++;
++            fprintf(stderr, "SMQTRACE dispatch id=%d target=%d action=%d quit=%d hidden=%d visible=%lu\n",
++                    identifier, target != nil, action != NULL, action == @selector(terminate:),
++                    [NSApp isHidden], (unsigned long)visible);
++        }
+         if (tracing) fprintf(stderr, "SMTRACE send id=%d phase=before target=%d action=%d\n", identifier, target != nil, action != NULL);
+         BOOL handled = [NSApp sendAction:action to:target from:item];
+         if (tracing) fprintf(stderr, "SMTRACE send id=%d phase=after target=%d action=%d handled=%d\n", identifier, target != nil, action != NULL, handled);

@@ -1,0 +1,149 @@
+--- a/AppKit/NSApplication.m
++++ b/AppKit/NSApplication.m
+@@ -1,3 +1,4 @@
++#include "RCLOLCloseTrace.h"
+ /* Copyright (c) 2006-2007 Christopher J. W. Lloyd
+ 
+ Permission is hereby granted, free of charge, to any person obtaining a copy of
+@@ -748,6 +749,9 @@
+     event = _NSApplyLocalEventMonitors(event);
+     if (event == nil)
+         return;
++    if (rclolCloseTraceEnabled() && ([event type] == NSLeftMouseDown || [event type] == NSLeftMouseUp))
++        NSLog(@"RCLOSE app transition=%s",
++              [event type] == NSLeftMouseDown ? "down" : "up");
+     static int inputTrace = -1;
+     if (inputTrace < 0) inputTrace = getenv("RCLOL_INPUT_TRACE") != NULL;
+     if (inputTrace && ([event type] == NSKeyDown || [event type] == NSLeftMouseDown))
+--- a/AppKit/NSWindow.m
++++ b/AppKit/NSWindow.m
+@@ -1,3 +1,4 @@
++#include "RCLOLCloseTrace.h"
+ /* Copyright (c) 2006-2007 Christopher J. W. Lloyd <cjwl@objc.net>
+                  2009 Markus Hitter <mah@jump-ing.de>
+ 
+@@ -2565,6 +2566,8 @@
+         break;
+     }
+ 
++    if (wasVisible != _isVisible && rclolCloseTraceEnabled())
++        NSLog(@"RCLOSE visibility visible=%d", (int)_isVisible);
+     if (wasVisible != _isVisible)
+         [self postNotificationName: NSWindowDidChangeOcclusionStateNotification];
+     [self postNotificationName: NSWindowDidMoveNotification];
+@@ -2638,9 +2641,13 @@
+              [[[[self toolbar] _view] subviews] containsObject: view])) {
+             switch ([event type]) {
+             case NSLeftMouseDown:
++                if (rclolCloseTraceEnabled())
++                    NSLog(@"RCLOSE window down hit=%@", [view class]);
+                 [[[self toolbar] _view] mouseDown: event];
+                 break;
+             case NSLeftMouseUp:
++                if (rclolCloseTraceEnabled())
++                    NSLog(@"RCLOSE window up recipient=%@", [[[self toolbar] _view] class]);
+                 [[[self toolbar] _view] mouseUp: event];
+                 break;
+             case NSLeftMouseDragged:
+@@ -2665,6 +2672,8 @@
+ 
+     case NSLeftMouseDown: {
+         NSView *view = [_backgroundView hitTest: [event locationInWindow]];
++        if (rclolCloseTraceEnabled())
++            NSLog(@"RCLOSE window down hit=%@", [view class]);
+         if (inputTrace) {
+             FILE *trace=fopen("/tmp/rclol-window-drag.log","a");
+             if(trace) {fprintf(trace,"DOWN pid=%d view=%s movable=%d at=%.0f,%.0f\n",getpid(),class_getName([view class]),_isMovable,[event locationInWindow].x,[event locationInWindow].y);fclose(trace);}
+@@ -2703,10 +2712,14 @@
+         break;
+     }
+ 
+-    case NSLeftMouseUp:
+-        [[_backgroundView hitTest: _mouseDownLocationInWindow] mouseUp: event];
++    case NSLeftMouseUp: {
++        NSView *recipient = [_backgroundView hitTest: _mouseDownLocationInWindow];
++        if (rclolCloseTraceEnabled())
++            NSLog(@"RCLOSE window up recipient=%@", [recipient class]);
++        [recipient mouseUp: event];
+         _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
+         break;
++    }
+ 
+     case NSRightMouseDown:
+         _mouseDownLocationInWindow = [event locationInWindow];
+@@ -3148,6 +3161,8 @@
+     } else {
+         [[self platformWindow] hideWindow];
+     }
++    if (changed && rclolCloseTraceEnabled())
++        NSLog(@"RCLOSE visibility visible=%d", (int)_isVisible);
+     if (changed)
+         [self postNotificationName: NSWindowDidChangeOcclusionStateNotification];
+ }
+@@ -3167,16 +3182,19 @@
+ - (void) performClose: (id) sender {
+     if ([_delegate respondsToSelector: @selector(windowShouldClose:)]) {
+         if (![_delegate windowShouldClose: self]) {
++            if (rclolCloseTraceEnabled()) NSLog(@"RCLOSE close outcome=delegate-veto");
+             return;
+         }
+     } else if ([self respondsToSelector: @selector(windowShouldClose:)]) {
+         if (![(id<NSWindowDelegate>) self windowShouldClose: self]) {
++            if (rclolCloseTraceEnabled()) NSLog(@"RCLOSE close outcome=window-veto");
+             return;
+         }
+     }
+ 
+     NSDocument *document = [_windowController document];
+     if (document) {
++        if (rclolCloseTraceEnabled()) NSLog(@"RCLOSE close outcome=document-path");
+         [document shouldCloseWindowController: _windowController
+                                      delegate: self
+                           shouldCloseSelector: @selector(_document:
+@@ -3188,8 +3206,10 @@
+         // window, we abort the session, but do not close the window. So far it
+         // looks like we should not close the window too.
+         if ([NSApp modalWindow] == self) {
++            if (rclolCloseTraceEnabled()) NSLog(@"RCLOSE close outcome=modal-abort");
+             [NSApp abortModal];
+         } else {
++            if (rclolCloseTraceEnabled()) NSLog(@"RCLOSE close outcome=close-requested");
+             [self close];
+         }
+     }
+@@ -3200,6 +3220,7 @@
+         contextInfo: (void *) context
+ {
+     // Callback used by performClose:
++    if (rclolCloseTraceEnabled()) NSLog(@"RCLOSE close outcome=%s", shouldClose ? "document-approved" : "document-veto");
+     if (shouldClose) {
+         [self close];
+     }
+--- /dev/null
++++ b/AppKit/RCLOLCloseTrace.h
+@@ -0,0 +1,8 @@
++/* Experimental, opt-in AppKit close diagnostics. */
++#include <stdlib.h>
++#include <string.h>
++
++static inline int rclolCloseTraceEnabled(void) {
++    const char *value = getenv("RCLOL_CLOSE_TRACE");
++    return value != NULL && strcmp(value, "1") == 0;
++}
+--- a/AppKit/X11.backend/X11Display.m
++++ b/AppKit/X11.backend/X11Display.m
+@@ -1,3 +1,4 @@
++#include "../RCLOLCloseTrace.h"
+ /* Copyright (c) 2008 Johannes Fortmann
+ 
+  Permission is hereby granted, free of charge, to any person obtaining a copy of
+@@ -1731,6 +1732,9 @@
+     X11Window* window = (X11Window*) [self windowForID: ev->xany.window];
+ 
+     id delegate = [window delegate];
++    if (rclolCloseTraceEnabled() && (ev->type == ButtonPress || ev->type == ButtonRelease) && ev->xbutton.button == Button1)
++        NSLog(@"RCLOSE x11 transition=%s",
++              ev->type == ButtonPress ? "down" : "up");
+     rclolLoadServerModifiers(_display);
+     static int inputTrace = -1;
+     if (inputTrace < 0) inputTrace = getenv("RCLOL_INPUT_TRACE") != NULL;

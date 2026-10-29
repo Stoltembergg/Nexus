@@ -218,8 +218,12 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn('synthetic-riot', text)
 
     def test_workspace_paths_are_redacted(self):
-        archive, _ = self.build(launch_log=None,
-                                env=dict(self.env, DARLING_WORKSPACE=str(self.root / 'work')))
+        workspace = self.root / 'work'
+        launch_log = workspace / 'build/desktop-launch.log'
+        launch_log.parent.mkdir(parents=True)
+        launch_log.write_text(str(workspace / 'private-path') + '\n')
+        archive, _ = self.build(launch_log=launch_log,
+                                env=dict(self.env, DARLING_WORKSPACE=str(workspace)))
         with tarfile.open(archive) as tar:
             text = tar.extractfile('lol-report/logs/launch.log.tail').read().decode()
         self.assertNotIn(str(self.root), text)
@@ -248,7 +252,8 @@ class BuildTests(unittest.TestCase):
         self.assertIn(str(Path.home()), text)
 
     def test_missing_logs_are_explained(self):
-        archive, manifest = self.build(launch_log=None)
+        missing_log = self.root / 'build/desktop-launch.log'
+        archive, manifest = self.build(launch_log=missing_log)
         self.assertIn('logs/launch.log.tail', manifest['files'])
         self.assertEqual(manifest['processes']['included'], 'runtime-client-zombies')
         with tarfile.open(archive) as tar:

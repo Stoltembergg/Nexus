@@ -1,0 +1,14 @@
+diff --git a/AppKit/NSMenu.subproj/NSMenuItem.m b/AppKit/NSMenu.subproj/NSMenuItem.m
+--- a/AppKit/NSMenu.subproj/NSMenuItem.m
++++ b/AppKit/NSMenu.subproj/NSMenuItem.m
+@@ -117,6 +117,10 @@
+     return self;
+ }
+ 
++- (id) init {
++    return [self initWithTitle: @"" action: NULL keyEquivalent: @""];
++}
++
+ - initWithTitle: (NSString *) title
+                action: (SEL) action
+         keyEquivalent: (NSString *) keyEquivalent
