@@ -139,6 +139,30 @@ class ActionHelperTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.module.session_prefix()
 
+    def test_prefix_from_inherited_loader_socket(self):
+        socket_key = os.fsdecode(self.module.SOCK_VARIABLE)
+        with patch.dict(os.environ, {socket_key: str(self.socket), 'HOME': '/guest/home'}, clear=True):
+            self.assertEqual(self.module.session_prefix(), self.prefix.resolve())
+            os.environ['DPREFIX'] = str(self.prefix)
+            self.assertEqual(self.module.session_prefix(), self.prefix.resolve())
+            os.environ['DPREFIX'] = str(self.base / 'another-prefix')
+            with self.assertRaises(SystemExit):
+                self.module.session_prefix()
+
+    def test_prefix_rejects_invalid_socket_and_missing_identity(self):
+        socket_key = os.fsdecode(self.module.SOCK_VARIABLE)
+        for socket in ('relative/.darlingserver.sock', str(self.prefix / 'wrong.sock'),
+                       str(self.socket) + '/', ''):
+            with self.subTest(socket=socket), patch.dict(os.environ, {
+                    socket_key: socket, 'DPREFIX': str(self.prefix)}, clear=True):
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix()
+        with patch.dict(os.environ, {'HOME': str(self.base)}, clear=True):
+            with self.assertRaises(SystemExit):
+                self.module.session_prefix()
+        with patch.dict(os.environ, {'DPREFIX': str(self.prefix)}, clear=True):
+            self.assertEqual(self.module.session_prefix(), self.prefix.resolve())
+
     def test_a_match_of_this_prefix_is_detected(self):
         proc_root = self.base / 'proc'
         proc_root.mkdir()
@@ -154,6 +178,74 @@ class ActionHelperTests(unittest.TestCase):
         self.fake_process(proc_root, 42, '/prefix/Applications/LeagueofLegends',
                           socket=str(other / '.darlingserver.sock'))
         self.assertFalse(self.module.game_running(self.prefix, proc_root))
+
+    def test_match_inspection_is_conservative(self):
+        root = self.base / 'proc'
+        root.mkdir()
+        proc = self.fake_process(root, 42, '/games/LeagueofLegends', socket=self.socket)
+        (proc / 'environ').unlink()
+        self.assertIsNone(self.module.game_running(self.prefix, root))
+        (proc / 'cmdline').unlink()
+        self.assertIsNone(self.module.game_running(self.prefix, root))
+        self.assertIsNone(self.module.game_running(self.prefix, root / 'missing'))
+        self.module.game_running = lambda prefix: None
+        self.module.confirm = lambda *args: None
+        self.module.stop_session = lambda prefix: self.fail('unknown match must not stop without confirmation')
+        self.module.notify = lambda *args: None
+        self.assertEqual(self.module.quit_action(self.prefix), 1)
+
+    def test_session_process_scan_scopes_and_fails_closed(self):
+        root = self.base / 'proc'
+        root.mkdir()
+        other = self.base / 'other'
+        other.mkdir()
+        proc = self.fake_process(root, 42, '/client', socket=other / '.darlingserver.sock')
+        scan = lambda: self.module.session_processes_running(self.prefix, root)
+        self.assertIs(scan(), False)
+        (proc / 'environ').write_bytes(b'__mldr_sockpath=' + os.fsencode(self.socket))
+        self.assertIs(scan(), True)
+        (proc / 'environ').write_bytes(b'DPREFIX=' + os.fsencode(self.prefix))
+        self.assertIs(scan(), True)
+        (proc / 'environ').write_bytes(b'')
+        (proc / 'cmdline').write_bytes(b'/bin/darlingserver\0' + os.fsencode(self.prefix) + b'\0')
+        self.assertIs(scan(), True)
+        (proc / 'environ').unlink()
+        self.assertIsNone(scan())
+        (proc / 'cmdline').unlink()
+        self.assertIsNone(scan())
+        self.assertIsNone(self.module.session_processes_running(self.prefix, root / 'missing'))
+
+    def test_shutdown_requires_success_and_proof(self):
+        root = self.base / 'proc'
+        root.mkdir()
+        proc = self.fake_process(root, 42, '/client', socket=self.socket)
+        self.module.STOP_WAIT_SECONDS = 0
+        with patch.object(self.module.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            self.assertFalse(self.module.stop_session(self.prefix, root))
+            (proc / 'environ').unlink()
+            self.assertFalse(self.module.stop_session(self.prefix, root))
+            proc.rename(root / 'gone')
+            self.assertTrue(self.module.stop_session(self.prefix, root))
+            self.assertEqual(run.call_args.kwargs['env']['DPREFIX'], str(self.prefix))
+            run.return_value.returncode = 1
+            self.assertFalse(self.module.stop_session(self.prefix, root))
+            run.side_effect = subprocess.TimeoutExpired('darling', 60)
+            self.assertFalse(self.module.stop_session(self.prefix, root))
+
+    def test_permission_and_race_do_not_prove_absence(self):
+        root = self.base / 'proc'
+        root.mkdir()
+        proc = self.fake_process(root, 42, '/client', socket=self.socket)
+        original = Path.read_bytes
+        for error in (PermissionError('denied'), FileNotFoundError('gone')):
+            def read_bytes(path):
+                if path == proc / 'cmdline':
+                    raise error
+                return original(path)
+            with self.subTest(error=error), patch.object(Path, 'read_bytes', read_bytes):
+                self.assertIsNone(self.module.game_running(self.prefix, root))
+                self.assertIsNone(self.module.session_processes_running(self.prefix, root))
 
     def test_the_client_window_is_found_and_scoped(self):
         proc_root = self.base / 'proc'

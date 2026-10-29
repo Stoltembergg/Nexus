@@ -207,11 +207,12 @@ project does not add a second entry with the same name: the client's own entry
 is handled by the host instead.
 
 - **Sair** asks the session of this prefix to stop through `darling shutdown`.
-  Every process of the game tree belongs to that session, so they all end
-  with it. Nothing is killed by name, no process outside the prefix is
-  touched, and the prefix is the one of the session that started the helper.
-  A running match asks for confirmation first; when no confirmation dialog is
-  available, the session is left running and the user is told why.
+  It does not kill processes by name. A running match or an inconclusive match
+  check requires confirmation; if confirmation is unavailable, the session is
+  left running. After shutdown it checks for processes identifiable by the
+  prefix or loader socket and reports an inconclusive result if it cannot
+  verify their absence. Processes that cannot be associated with the prefix
+  cannot be ruled out by this check.
 - **Riot Games** attempts to bring an existing client window back without
   restarting the session. It uses XRes 1.2 to identify the X11 resource owner
   and checks its UID and loader socket against the prefix. Small, untitled or

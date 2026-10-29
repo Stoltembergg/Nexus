@@ -18,8 +18,8 @@ this helper:
     reports that instead: the session is never restarted behind the user's
     back.
 
-The helper only acts on the prefix of the session that started it
-(``DPREFIX``). It never reads or writes account data, and it never touches
+The helper only acts on the prefix of the session that started it, identified
+by its loader socket or an explicit ``DPREFIX``. It never reads or writes account data, and it never touches
 the client binaries.
 """
 
@@ -54,12 +54,26 @@ def log(message):
 
 
 def session_prefix():
-    """The prefix of this session. It is the only path this helper acts on."""
-    value = os.environ.get('DPREFIX') or str(Path.home() / '.darling')
-    prefix = Path(value).expanduser()
-    if not prefix.is_absolute():
-        raise SystemExit(f'DPREFIX must be an absolute path: {prefix}')
-    return prefix.resolve()
+    """Identify the session explicitly, never from the guest's HOME."""
+    socket = os.environ.get(os.fsdecode(SOCK_VARIABLE))
+    value = os.environ.get('DPREFIX')
+    prefix = None
+    if value is not None:
+        path = Path(value)
+        if not path.is_absolute():
+            raise SystemExit(f'DPREFIX must be an absolute path: {value}')
+        prefix = path.resolve()
+    if socket is not None:
+        path = Path(socket)
+        if not path.is_absolute() or os.path.basename(socket) != SOCK_NAME:
+            raise SystemExit(f'invalid loader socket path: {socket}')
+        socket_prefix = path.parent.resolve()
+        if prefix is not None and prefix != socket_prefix:
+            raise SystemExit('DPREFIX conflicts with the loader socket')
+        return socket_prefix
+    if prefix is None:
+        raise SystemExit('session prefix is not available')
+    return prefix
 
 
 def prefix_server(prefix):
@@ -104,7 +118,7 @@ def process_environment(proc):
 
 
 def game_running(prefix, proc_root=Path('/proc')):
-    """Whether a match of this prefix is running.
+    """Whether a match is running, or None if inspection is inconclusive.
 
     The game is attributed to the prefix through the loader socket, because
     the guest processes do not carry DPREFIX themselves.
@@ -112,28 +126,70 @@ def game_running(prefix, proc_root=Path('/proc')):
     try:
         entries = list(proc_root.iterdir())
     except OSError:
-        return False
+        return None
+    unknown = False
     for proc in entries:
         if not proc.name.isdigit():
             continue
         try:
             executable = (proc / 'cmdline').read_bytes().split(b'\0')[0].decode(errors='replace')
-        except (FileNotFoundError, ProcessLookupError, OSError):
+        except OSError:
+            unknown = True
             continue
         if not executable.endswith('/' + GAME_NAME):
             continue
         environment = process_environment(proc)
         if environment is None:
+            unknown = True
             continue
         socket = environment.get(SOCK_VARIABLE)
         if socket is None:
+            unknown = True
             continue
         try:
-            if Path(os.fsdecode(socket)).parent.resolve() == (prefix / SOCK_NAME).parent.resolve():
+            if Path(os.fsdecode(socket)).resolve() == (prefix / SOCK_NAME).resolve():
                 return True
-        except OSError:
+        except (OSError, ValueError):
+            unknown = True
+    return None if unknown else False
+
+
+def session_processes_running(prefix, proc_root=Path('/proc')):
+    """Return True for a scoped process, False if absent, None if unprovable.
+
+    Guest processes identify their session by loader socket; the server uses
+    its prefix argument. DPREFIX also identifies host-side session processes.
+    Unreadable processes owned by us prevent a claim of successful shutdown.
+    """
+    try:
+        entries = list(proc_root.iterdir())
+        target = prefix.resolve()
+    except (OSError, ValueError):
+        return None
+    unknown = False
+    for proc in entries:
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
             continue
-    return False
+        try:
+            if proc.stat().st_uid != os.getuid():
+                continue
+            argv = (proc / 'cmdline').read_bytes().split(b'\0')
+            environment = process_environment(proc)
+            if environment is None:
+                unknown = True
+                continue
+            socket = environment.get(SOCK_VARIABLE)
+            dprefix = environment.get(b'DPREFIX')
+            if socket and Path(os.fsdecode(socket)).resolve() == target / SOCK_NAME:
+                return True
+            if dprefix and Path(os.fsdecode(dprefix)).resolve() == target:
+                return True
+            if (len(argv) > 1 and os.path.basename(argv[0]) == b'darlingserver'
+                    and Path(os.fsdecode(argv[1])).resolve() == target):
+                return True
+        except (OSError, ValueError):
+            unknown = True
+    return None if unknown else False
 
 
 def notify(summary, body):
@@ -161,42 +217,48 @@ def confirm(summary, body):
     return None
 
 
-def stop_session(prefix):
-    """Ask the session to stop and wait for its server to disappear."""
+def stop_session(prefix, proc_root=Path('/proc')):
+    """Ask the session to stop and prove its processes have disappeared."""
     environment = dict(os.environ, DPREFIX=str(prefix))
     try:
-        subprocess.run(['darling', 'shutdown'], check=False, capture_output=True,
-                       timeout=60, env=environment)
+        result = subprocess.run(['darling', 'shutdown'], check=False, capture_output=True,
+                                timeout=60, env=environment)
     except (OSError, subprocess.SubprocessError) as error:
         log(f'the shutdown request failed: {error}')
         return False
+    if result.returncode != 0:
+        log(f'the shutdown request returned {result.returncode}')
+        return False
     deadline = time.monotonic() + STOP_WAIT_SECONDS
     while time.monotonic() < deadline:
-        if not prefix_server(prefix):
+        if session_processes_running(prefix, proc_root) is False:
             return True
         time.sleep(0.5)
-    return not prefix_server(prefix)
+    return session_processes_running(prefix, proc_root) is False
 
 
 def quit_action(prefix):
     """End every process of the game tree by ending this session."""
-    if game_running(prefix):
+    match = game_running(prefix)
+    if match is not False:
         answer = confirm('Encerrar a partida?',
-                         'Uma partida está em andamento. Encerrar a sessão do '
+                         ('Uma partida está em andamento. ' if match else
+                          'Não foi possível verificar se há uma partida. ') +
+                         'Encerrar a sessão do '
                          'Riot Client também encerra a partida. Continuar?')
         if answer is not True:
             if answer is None:
-                log('a match is running and no confirmation dialog is available; '
+                log('a match is running or its status is unknown and no confirmation dialog is available; '
                     'the session was left running')
-                notify('Riot Client', 'Uma partida está em andamento. Use o '
+                notify('Riot Client', 'Uma partida pode estar em andamento. Use o '
                        'lançador para encerrar a sessão.')
             else:
                 log('the shutdown was cancelled')
             return 1
     log(f'asking the session of {prefix} to stop')
     if not stop_session(prefix):
-        log('the session did not stop in time')
-        notify('Riot Client', 'A sessão não foi encerrada. Use o lançador para tentar de novo.')
+        log('the session shutdown result is inconclusive')
+        notify('Riot Client', 'Não foi possível confirmar o encerramento da sessão. Use o lançador para verificar.')
         return 1
     log('the session stopped')
     notify('Riot Client', 'A sessão do Riot Client foi encerrada.')
