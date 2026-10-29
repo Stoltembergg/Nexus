@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="League client">
+  <title>League client</title>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#0f172a"/>
+  <!-- A shield: the pre-match client screen. -->
+  <path fill="#1e293b" d="M64 22 100 34v30c0 22-15 35-36 42-21-7-36-20-36-42V34l36-12z"/>
+  <path fill="#2dd4bf" d="M64 32 90 41v23c0 16-11 26-26 32-15-6-26-16-26-32V41l26-9z"/>
+  <!-- The launcher mark of this project, kept legible at small sizes. -->
+  <path fill-rule="evenodd" fill="#0f172a" d="M54 48h9c10 0 16 7 16 17s-6 17-16 17h-9V48zm8 9v16h1c4 0 7-3 7-8s-3-8-7-8h-1z"/>
+  <rect x="44" y="92" width="40" height="6" rx="3" fill="#818cf8"/>
+</svg>

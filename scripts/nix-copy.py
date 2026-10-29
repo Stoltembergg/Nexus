@@ -15,8 +15,8 @@ import stat
 import sys
 import tempfile
 
-ITEMS = 'docs patches research scripts tests tools upstream LICENSE NOTICE.md README.md requirements.txt'.split()
-DIRECTORY_ITEMS = set(ITEMS[:7])
+ITEMS = 'assets docs patches research scripts tests tools upstream LICENSE NOTICE.md README.md requirements.txt'.split()
+DIRECTORY_ITEMS = set(ITEMS[:8])
 MANIFEST = '.nix-managed-files.json'
 
 

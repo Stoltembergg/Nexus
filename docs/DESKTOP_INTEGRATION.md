@@ -324,9 +324,10 @@ not a success marker. The runner still checks that the temporary item disappears
 
 ## Application/session integration (separate patch)
 
-Build on `tools/desktop-entry.py` and `scripts/desktop-run.sh` rather than adding
-another competing desktop installer. Project-shipped names/artwork must follow
-the existing neutral branding and trademark policy.
+Build on `tools/desktop-entry.py` and the graphical launcher
+(`scripts/riot-launcher-gui.py`, backed by `scripts/riot-launcher.sh`) rather
+than adding another competing desktop installer. Project-shipped names/artwork
+must follow the existing neutral branding and trademark policy.
 
 - A desktop activation opens/restores the existing application, not a second
   prefix session or a forced `xdotool windowmap`.
@@ -433,12 +434,37 @@ The experimental StatusNotifier adapter uses an item's own image first, then
 when neither image exists. No client artwork is copied into the repository or
 installed client bundles are modified.
 
-Keep the KDE application menu to the single project-owned `Darling Launcher`
-entry. The package does not expose Riot Client, LeagueClient, or League of
-Legends as independent launch targets, and must not add or link their artwork.
-`scripts/create-desktop-entry.sh` installs the neutral project icon and creates
-the launcher entry plus a desktop shortcut. StatusNotifier remains experimental
-and outside the production manifest/runtime.
+The application menu carries one entry per client window class — `Darling
+Launcher` (`darling-launcher.desktop`, `RiotClientServices`), `Riot Client`
+(`nexus-riot-client.desktop`, `Riot Client`), `League of Legends`
+(`nexus-league-client.desktop`, `LeagueClientUx`) and `League of Legends
+(match)` (`nexus-league-game.desktop`, `LeagueofLegends`). All four start the
+same graphical launcher
+(`scripts/riot-launcher-gui.py`); they are window associations, not separate
+game targets, and they never start a second prefix session. Each entry uses the
+`StartupWMClass` that Darling's AppKit derives from
+`-[NSProcessInfo processName]` (the basename of `argv[0]`), so the desktop can
+group and decorate the window without any manual step.
+
+The installer never overwrites an entry that belongs to another program: when
+a file name is taken by somebody else it writes the entry under a `nexus-`
+prefixed name, and it removes entries the project wrote earlier under other
+names so the same window is not listed twice.
+
+The icons are **original artwork created for this project**
+(`assets/riot-client.svg`, `assets/league-client.svg`,
+`assets/league-game.svg`, plus the existing `darling-lol.svg`/`.png`). No game
+logo or client artwork is added to the repository or linked to the package, as
+required by [compliance](COMPLIANCE.md). The product names in the entry names
+and comments are nominative use: they describe the window the entry groups,
+and the entries carry no brand artwork and imply no endorsement. A user who
+wants other artwork places
+an image named `nexus-riot-client`, `nexus-league-client` or
+`nexus-league-game` (PNG or SVG) in `~/.local/share/icons/` or
+`~/.config/nexus/icons/`; the installer then prefers that image over the
+shipped one. See [setup](SETUP.md#graphical-launcher-desktop-entries-and-icons)
+for the full procedure. StatusNotifier remains experimental and outside the
+production manifest/runtime.
 
 `tools/check-installed-bundle-icons.py` decodes bundle icons in place without
 emitting or copying pixels; run it with `build/venv/bin/python3` and explicit

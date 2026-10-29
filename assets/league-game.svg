@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="League of Legends match">
+  <title>League of Legends match</title>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#0f172a"/>
+  <!-- A sword: the window that is open during a match. -->
+  <path fill="#1e293b" d="M74 20 92 38 60 70 48 76l6-12 32-32z"/>
+  <path fill="#2dd4bf" d="M76 28 84 36 58 62l-8 8 8-8 26-26z"/>
+  <path fill="#818cf8" d="M46 74 30 90l-8 8 8-8 16-16 4 4-16 16 8-8 16-16-4-4z"/>
+  <rect x="44" y="100" width="40" height="6" rx="3" fill="#2dd4bf"/>
+</svg>

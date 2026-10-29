@@ -105,7 +105,8 @@ insensitivity, A queries, non-CDN names and misleading domain suffixes without
 sending a DNS query. Recovery tests use fake `/proc` entries and mock every
 compositor/shutdown command. The desktop test checks exit/argument forwarding,
 append-only output and tightening an existing public log to mode 0600. The
-desktop-entry test renders the helper against a disposable `HOME` and checks
+desktop-entry test renders the helper against a disposable project root and
+`HOME` and checks
 the neutral fields, Exec quoting, icon paths, that only launcher artifacts
 this project created are removed, and that the checkout and packaged entries
 share their identity fields. The runner test uses a fake `darling` executable to verify loopback fixtures and

@@ -228,6 +228,11 @@
           cp darling-lol.png $out/share/pixmaps/darling-launcher.png
           cp darling-lol.svg $out/share/pixmaps/darling-launcher.svg
 
+          # Original artwork for the client, league client and match windows.
+          cp assets/riot-client.svg $out/share/icons/hicolor/scalable/apps/nexus-riot-client.svg
+          cp assets/league-client.svg $out/share/icons/hicolor/scalable/apps/nexus-league-client.svg
+          cp assets/league-game.svg $out/share/icons/hicolor/scalable/apps/nexus-league-game.svg
+
           # Install configured launcher
           substitute ./darling-lol-launcher.sh $out/bin/darling-lol \
             --replace-fail "@SHARE_DIR@" "$out/share/darling-lol" \

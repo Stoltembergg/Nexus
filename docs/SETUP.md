@@ -63,18 +63,83 @@ The normal launcher starts neither an Electron inspector nor client API/UI helpe
 
 ## Application-menu diagnostics and recovery options
 
-`scripts/create-desktop-entry.sh` creates a `Darling Launcher` application-menu
-entry that runs `scripts/desktop-run.sh`, preserving the normal launcher behavior
-and saving stdout/stderr in `build/desktop-launch.log` with mode 0600. Logs can
+`scripts/create-desktop-entry.sh` installs the application-menu entries and the
+icons described in [graphical launcher, desktop entries and icons](#graphical-launcher-desktop-entries-and-icons).
+It preserves the normal launcher behavior and saves stdout/stderr in
+`build/desktop-launch.log` with mode 0600. Logs can
 contain private session details; do not attach raw launcher logs to a public
 issue. The helper also removes the `league-of-legends.*` entry and icons written
-by older versions, but only when it can prove this project created them. The
-entry keeps `StartupWMClass=RiotClientServices` for the initial process that the
-launcher starts. Child windows can expose different `WM_CLASS` values (the
-observed classes include `Riot Client` and `LeagueClientUx`), so this single
-desktop-entry hint does not match every window or assign its icon. Do not add
-separate launch targets or change the class speculatively to force grouping.
+by older versions, but only when it can prove this project created them.
 Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
+
+## Graphical launcher, desktop entries and icons
+
+The project ships a graphical launcher, so nothing has to be typed in a
+terminal and no desktop file has to be edited by hand:
+
+```sh
+python3 scripts/riot-launcher.sh status   # same operations, from a terminal
+python3 scripts/riot-launcher-gui.py       # the window
+```
+
+The window offers **Iniciar**, **Parar**, **Reiniciar** and **Atualizar
+status**, plus a log pane. It only ever touches the Darling prefix it owns
+(`$HOME/.darling`, or `DPREFIX` when set): it never kills processes by name and
+never interrupts a session that is already running. `Parar` asks the Darling
+server in that prefix to shut the session down; if the server does not stop in
+time, the launcher reports it instead of killing anything by force. The
+terminal script accepts the same verbs (`start`, `stop`, `restart`, `status`).
+
+`scripts/create-desktop-entry.sh` installs one application-menu entry per window
+class the client uses, so the dock or panel can tell them apart and assign an
+icon without any manual step:
+
+| Entry | File | `StartupWMClass` | Icon |
+| --- | --- | --- | --- |
+| `Darling Launcher` | `darling-launcher.desktop` | `RiotClientServices` | `darling-launcher` |
+| `Riot Client` | `nexus-riot-client.desktop` | `Riot Client` | `nexus-riot-client` |
+| `League of Legends` | `nexus-league-client.desktop` | `LeagueClientUx` | `nexus-league-client` |
+| `League of Legends (match)` | `nexus-league-game.desktop` | `LeagueofLegends` | `nexus-league-game` |
+
+These values are interoperability identifiers: Darling's AppKit derives
+`WM_CLASS` from `-[NSProcessInfo processName]`, which is the basename of
+`argv[0]`. All four entries start the same graphical launcher; they are not
+separate game targets and they do not launch a second prefix session.
+
+The installer never overwrites a desktop entry that belongs to another
+program. When one of the file names above is already taken by somebody else,
+the project writes its entry under the `nexus-` prefixed name instead, and
+entries the project wrote earlier under other names are removed so the same
+window is never listed twice.
+
+### Icon policy
+
+The icons installed by default (`assets/riot-client.svg`,
+`assets/league-client.svg`, `assets/league-game.svg` and the existing
+`darling-lol.svg`/`darling-lol.png`) are **original artwork created for this
+project**. No game logo, client artwork or other third-party asset is stored
+in the repository, as required by [compliance](COMPLIANCE.md).
+
+A user who wants different artwork does not have to edit any file. Put an
+image with one of these names in your own icon directory and re-run
+`scripts/create-desktop-entry.sh`; the installer prefers it over the shipped
+artwork and installs it under the same icon name:
+
+```text
+~/.local/share/icons/nexus-riot-client.png    (or .svg)
+~/.local/share/icons/nexus-league-client.png   (or .svg)
+~/.local/share/icons/nexus-league-game.png     (or .svg)
+~/.config/nexus/icons/nexus-riot-client.png    (or .svg)
+```
+
+A supplied PNG is installed into `~/.local/share/icons/hicolor/128x128/apps/`
+and a supplied SVG into `~/.local/share/icons/hicolor/scalable/apps/`, so the
+desktop finds it without a theme rebuild. Re-running the installer restores
+the shipped artwork when the local files are removed.
+
+The experimental tray work and the JP2 icon decoder are described in
+[desktop integration](DESKTOP_INTEGRATION.md). They are opt-in and are not
+required for the launcher, the entries or the icons above.
 
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
 to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`

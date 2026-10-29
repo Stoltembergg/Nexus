@@ -14,6 +14,14 @@ FLAKE = ROOT / 'flake.nix'
 OLD_SVG = '<svg><linearGradient id="goldGrad"/><path d="M172 108 L242 108"/></svg>'
 IDENTITY_KEYS = ('Name', 'GenericName', 'Comment', 'Icon', 'Keywords', 'Categories', 'StartupWMClass')
 
+# One entry per window class the client uses.
+ENTRIES = {
+    'darling-launcher.desktop': 'RiotClientServices',
+    'nexus-riot-client.desktop': 'Riot Client',
+    'nexus-league-client.desktop': 'LeagueClientUx',
+    'nexus-league-game.desktop': 'LeagueofLegends',
+}
+
 
 def parse_entry(text):
     entry = {}
@@ -37,6 +45,9 @@ class DesktopEntryTests(unittest.TestCase):
         project.mkdir(parents=True)
         shutil.copy2(ROOT / 'darling-lol.svg', project / 'darling-lol.svg')
         shutil.copy2(ROOT / 'darling-lol.png', project / 'darling-lol.png')
+        (project / 'assets').mkdir()
+        for icon in ('riot-client', 'league-client', 'league-game'):
+            shutil.copy2(ROOT / f'assets/{icon}.svg', project / f'assets/{icon}.svg')
         return project
 
     def install(self, project):
@@ -71,6 +82,73 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertTrue(png.is_file())
         self.assertEqual(png.read_bytes(), (project / 'darling-lol.png').read_bytes())
 
+    def test_creates_one_entry_per_window_class(self):
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        applications = self.home / '.local/share/applications'
+        for name, wm_class in ENTRIES.items():
+            path = applications / name
+            self.assertTrue(path.is_file(), name)
+            text = path.read_text()
+            self.assertIn(f'StartupWMClass={wm_class}\n', text)
+            self.assertIn('Type=Application\n', text)
+            self.assertIn('Terminal=false\n', text)
+            self.assertIn('scripts/riot-launcher-gui.py', text)
+        scalable = self.home / '.local/share/icons/hicolor/scalable/apps'
+        for icon in ('darling-launcher.svg', 'nexus-riot-client.svg',
+                     'nexus-league-client.svg', 'nexus-league-game.svg'):
+            self.assertTrue((scalable / icon).is_file(), icon)
+
+    def test_entries_point_at_the_graphical_launcher(self):
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in (self.home / '.local/share/applications').glob('*.desktop'):
+            text = path.read_text()
+            exec_line = next(line for line in text.splitlines() if line.startswith('Exec='))
+            self.assertIn(str(project / 'scripts/riot-launcher-gui.py'), exec_line)
+            self.assertTrue(path.stat().st_mode & 0o111, path)
+
+    def test_user_supplied_icon_wins(self):
+        icons = self.home / '.local/share/icons'
+        icons.mkdir(parents=True)
+        artwork = b'\x89PNG\r\n\x1a\nlocal artwork'
+        (icons / 'nexus-riot-client.png').write_bytes(artwork)
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = self.home / '.local/share/icons/hicolor/128x128/apps/nexus-riot-client.png'
+        self.assertTrue(installed.is_file())
+        self.assertEqual(installed.read_bytes(), artwork)
+        scalable = self.home / '.local/share/icons/hicolor/scalable/apps'
+        self.assertFalse((scalable / 'nexus-riot-client.png').exists())
+        self.assertFalse((scalable / 'nexus-riot-client.svg').exists())
+
+    def test_user_supplied_icon_in_config_directory_wins(self):
+        icons = self.home / '.config/nexus/icons'
+        icons.mkdir(parents=True)
+        (icons / 'nexus-league-client.svg').write_text('<svg/>')
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        scalable = self.home / '.local/share/icons/hicolor/scalable/apps'
+        self.assertTrue((scalable / 'nexus-league-client.svg').is_file())
+
+    def test_installed_files_have_no_unresolved_placeholders(self):
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in (self.home / '.local/share/applications').glob('*.desktop'):
+            text = path.read_text()
+            self.assertNotIn('@HOST_HOME@', text)
+            self.assertNotIn('@PROJECT_ROOT@', text)
+
+    def test_template_has_no_hardcoded_home_directory(self):
+        source = HELPER.read_text()
+        self.assertNotIn('/home/', source)
+        self.assertNotIn('/Users/', source)
+
     def test_preserves_entries_and_icons_it_did_not_create(self):
         project = self.project()
         other = self.root / 'elsewhere'
@@ -89,6 +167,11 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertTrue(desktop_entry.is_file())
         self.assertEqual((icons / 'league-of-legends.png').read_text(), 'user icon')
         self.assertTrue(self.entry().is_file())
+        # The foreign file was not overwritten, so the project wrote its entry
+        # under a project-scoped name instead.
+        self.assertEqual(parse_entry(legacy_entry.read_text())['Exec'],
+                         f'{other}/scripts/desktop-run.sh')
+        self.assertTrue((self.home / '.local/share/applications/nexus-league-client.desktop').is_file())
 
     def test_removes_legacy_artifacts_it_created(self):
         project = self.project()
@@ -117,15 +200,29 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertFalse(legacy_png.exists())
         self.assertTrue(self.entry().is_file())
 
+    def test_replaces_its_own_previous_entry(self):
+        project = self.project()
+        applications = self.home / '.local/share/applications'
+        applications.mkdir(parents=True)
+        previous = applications / 'riot-client.desktop'
+        previous.write_text(f'[Desktop Entry]\nExec={project}/scripts/riot-launcher-gui.sh\n')
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The earlier entry of this project is removed instead of duplicated.
+        self.assertFalse(previous.exists())
+        text = (applications / 'nexus-riot-client.desktop').read_text()
+        self.assertIn('StartupWMClass=Riot Client\n', text)
+        self.assertIn('scripts/riot-launcher-gui.py', text)
+
     def test_quotes_exec_arguments_with_reserved_characters(self):
         project = self.project('proj $dollar#hash\'quote')
         result = self.install(project)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.entry().read_text()
         exec_line = next(line for line in text.splitlines() if line.startswith('Exec='))
-        self.assertTrue(exec_line.startswith('Exec="'), exec_line)
-        self.assertTrue(exec_line.endswith('"'), exec_line)
+        self.assertIn('"', exec_line)
         self.assertIn('\\$dollar', exec_line)
+        self.assertIn('#hash', exec_line)
         if shutil.which('desktop-file-validate'):
             check = subprocess.run(['desktop-file-validate', str(self.entry())],
                                    capture_output=True, text=True, check=False)
