@@ -236,6 +236,12 @@ def desktop_content(entry, icon_name: str) -> str:
     exec_cmd = quote_exec_argument(sys.executable)
     gui = quote_exec_argument(str(PROJECT_ROOT / GUI_LAUNCHER))
     project_path = escape_string(str(PROJECT_ROOT))
+    action = ''
+    actions_key = ''
+    if entry['id'] == 'darling-launcher':
+        actions_key = 'Actions=InstallExperiment;\n'
+        experiment = quote_exec_argument(str(PROJECT_ROOT / 'scripts/tray-jp2-experiment.py'))
+        action = f'\n[Desktop Action InstallExperiment]\nName=Instalar atalho experimental (tray/JP2)\nExec={exec_cmd} {experiment} --install\n'
     return f"""[Desktop Entry]
 Version=1.0
 Type=Application
@@ -248,8 +254,8 @@ Terminal=false
 Categories=Game;
 StartupWMClass={entry['wm_class']}
 StartupNotify=false
-{ENTRY_MARKER}
-"""
+{actions_key}{ENTRY_MARKER}
+{action}"""
 
 
 def target_name(entry, directory: Path) -> Path:

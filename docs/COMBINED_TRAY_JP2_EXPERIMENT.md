@@ -10,6 +10,12 @@ decoder's narrow input restrictions and limitations are in
 `ICNS_JP2_EXPERIMENT.md`. SMCOUNT records may disclose activity; see
 `STATUS_MENU_COUNT_DIAGNOSTIC.md` before enabling them.
 
+The desktop launcher's **Install experimental shortcut (tray/JP2)** action can
+create an opt-in desktop shortcut. The shortcut requires a complete stage at
+`build/tray-jp2-experiment` (or `NEXUS_TRAY_JP2_STAGE`), validates the wrapper's
+bound host-library path and refuses to start if the prefix already has a
+running server. It does not build the stage or restart an existing session.
+
 The following command is provided for review only. **Do not run it until an
 explicitly authorized restart/test.** It retains the specified normal runner,
 flags, default guest runtime fallback paths, and region/locale; it assumes the

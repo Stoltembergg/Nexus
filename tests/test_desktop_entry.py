@@ -26,6 +26,8 @@ ENTRIES = {
 def parse_entry(text):
     entry = {}
     for line in text.splitlines():
+        if line.startswith('[Desktop Action '):
+            break
         if '=' in line and not line.startswith(('#', '[')):
             key, value = line.split('=', 1)
             entry[key] = value
@@ -81,6 +83,15 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertTrue(svg.is_file())
         self.assertTrue(png.is_file())
         self.assertEqual(png.read_bytes(), (project / 'darling-lol.png').read_bytes())
+
+    def test_experimental_action_is_opt_in(self):
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.entry().read_text()
+        self.assertIn('Actions=InstallExperiment;', text)
+        self.assertIn('tray-jp2-experiment.py" --install', text)
+        self.assertFalse(list((self.home / '.local/share/applications').glob('*experimental*')))
 
     def test_creates_one_entry_per_window_class(self):
         project = self.project()
