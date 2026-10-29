@@ -14,6 +14,7 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$runner_dir/runtime-paths.sh"
+export DARLING_STATUS_MENU_PREFIX="$prefix_dir"
 # Opt-in partial recovery: if Darling is alive but a previous client tree is
 # windowless, stop only that client/CEF tree and reuse the runtime. Never
 # touches the game, darlingserver or the runtime sockets.

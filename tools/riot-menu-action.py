@@ -19,8 +19,8 @@ this helper:
     back.
 
 The helper only acts on the prefix of the session that started it, identified
-by its loader socket or an explicit ``DPREFIX``. It never reads or writes account data, and it never touches
-the client binaries.
+by its dedicated launcher prefix, loader socket or an explicit ``DPREFIX``.
+It never reads or writes account data, and it never touches the client binaries.
 """
 
 import argparse
@@ -88,21 +88,30 @@ def session_prefix(proc_root=Path('/proc')):
     """Identify the session explicitly, never from the guest's HOME."""
     socket = os.environ.get(os.fsdecode(SOCK_VARIABLE))
     value = os.environ.get('DPREFIX')
-    if socket is None and value is None:
+    dedicated = os.environ.get('DARLING_STATUS_MENU_PREFIX')
+    if socket is None and value is None and dedicated is None:
         socket, value = parent_loader_socket(proc_root)
     prefix = None
+    if dedicated is not None:
+        path = Path(dedicated)
+        if not path.is_absolute():
+            raise SystemExit(f'DARLING_STATUS_MENU_PREFIX must be an absolute path: {dedicated}')
+        prefix = path.resolve()
     if value is not None:
         path = Path(value)
         if not path.is_absolute():
             raise SystemExit(f'DPREFIX must be an absolute path: {value}')
-        prefix = path.resolve()
+        dprefix = path.resolve()
+        if prefix is not None and prefix != dprefix:
+            raise SystemExit('DARLING_STATUS_MENU_PREFIX conflicts with DPREFIX')
+        prefix = dprefix
     if socket is not None:
         path = Path(socket)
         if not path.is_absolute() or os.path.basename(socket) != SOCK_NAME:
             raise SystemExit(f'invalid loader socket path: {socket}')
         socket_prefix = path.parent.resolve()
         if prefix is not None and prefix != socket_prefix:
-            raise SystemExit('DPREFIX conflicts with the loader socket')
+            raise SystemExit('session prefix conflicts with the loader socket')
         return socket_prefix
     if prefix is None:
         raise SystemExit('session prefix is not available')

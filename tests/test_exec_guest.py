@@ -24,7 +24,8 @@ REQUIRED = {
     'VK_ICD_FILENAMES': '/usr/share/vulkan/icd.d/nvidia_icd.json', 'LIBGL_ALWAYS_SOFTWARE': '0',
     'LD_PRELOAD': 'libgamemodeauto.so.0', 'LD_LIBRARY_PATH': '/run/opengl-driver/lib',
     'HOME': '/home/u', 'USER': 'u', 'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8',
-    'DPREFIX': '/home/u/.darling', 'RCLOL_REFRESH_HZ': '144', 'DYLD_LIBRARY_PATH': '/Users/u/RuntimeLibraries',
+    'DPREFIX': '/home/u/.darling', 'DARLING_STATUS_MENU_PREFIX': '/home/u/.darling',
+    'RCLOL_REFRESH_HZ': '144', 'DYLD_LIBRARY_PATH': '/Users/u/RuntimeLibraries',
 }
 SESSION = {
     'TERM': 'xterm', 'STARSHIP_SESSION_KEY': 'host-prompt', 'AWS_PROFILE': 'host-profile',

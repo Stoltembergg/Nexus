@@ -139,6 +139,33 @@ class ActionHelperTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.module.session_prefix()
 
+    def test_dedicated_prefix_and_conflicts(self):
+        key = 'DARLING_STATUS_MENU_PREFIX'
+        socket_key = os.fsdecode(self.module.SOCK_VARIABLE)
+        with patch.dict(os.environ, {key: str(self.prefix), 'HOME': '/guest/home'}, clear=True):
+            self.assertEqual(self.module.session_prefix(), self.prefix.resolve())
+            os.environ['DPREFIX'] = str(self.prefix / '..' / self.prefix.name)
+            os.environ[socket_key] = str(self.socket)
+            self.assertEqual(self.module.session_prefix(), self.prefix.resolve())
+            os.environ['DPREFIX'] = str(self.base / 'other')
+            with self.assertRaises(SystemExit):
+                self.module.session_prefix()
+            os.environ['DPREFIX'] = str(self.prefix)
+            os.environ[socket_key] = str(self.base / 'other' / '.darlingserver.sock')
+            with self.assertRaises(SystemExit):
+                self.module.session_prefix()
+        for invalid in ('', 'relative/path'):
+            with self.subTest(invalid=invalid), patch.dict(os.environ, {key: invalid}, clear=True):
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix()
+
+    def test_launcher_exports_dedicated_prefix_after_runtime_paths(self):
+        source = (ROOT / 'tools/run-riot-client.sh').read_text()
+        runtime = '. "$runner_dir/runtime-paths.sh"'
+        export = 'export DARLING_STATUS_MENU_PREFIX="$prefix_dir"'
+        self.assertIn(export, source)
+        self.assertLess(source.index(runtime), source.index(export))
+
     def test_prefix_from_inherited_loader_socket(self):
         socket_key = os.fsdecode(self.module.SOCK_VARIABLE)
         with patch.dict(os.environ, {socket_key: str(self.socket), 'HOME': '/guest/home'}, clear=True):
