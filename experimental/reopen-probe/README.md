@@ -1,5 +1,53 @@
 # Experimental reopen probe (opt-in)
 
+## Isolated preparation (no guest)
+
+`prepare.py` takes a **nonexistent** output directory outside the Nexus and
+Cocotron trees. It archives the committed `AppKit` from a Cocotron git checkout
+(not its working tree or a scratch stage), applies the status-notifier and
+reopen patches in order, and records the revision and limitations in a manifest.
+It requires Python 3, git, tar and patch. Specify `--source` if the default
+`build/darling-src/src/external/cocotron` checkout is unavailable. Failed
+preparation leaves partial output for inspection; use a different path to retry.
+
+```
+python3 experimental/reopen-probe/prepare.py /tmp/reopen-isolated
+python3 -m unittest discover -s tests -p test_reopen_isolation.py
+```
+
+Optionally add `--compile --sdk /path/to/sdk --flags-file /path/to/flags.make`.
+This attempts to compile the real experimental native library, its Mach-O
+wrapper, and the existing standalone neutral probe, requiring cc, pkg-config
+with gio-2.0, clang/lld, the SDK, Darling elfcalls headers and existing AppKit
+build flags. All outputs stay under the new directory. The probe links against
+the supplied SDK, **not** the patched AppKit source: this command does not build
+AppKit, install anything, start a guest, or change the session.
+The wrapper embeds the isolated native library's absolute path. Existing
+`run.py` is for the separate standalone probe, not this preparation.
+
+### Isolated AppKit relink
+
+With a complete, up-to-date Makefile build and its matching installed framework:
+
+```
+python3 experimental/reopen-probe/build-appkit.py /tmp/reopen-appkit \
+  --framework /usr/local/libexec/darling/System/Library/Frameworks/AppKit.framework
+```
+
+This copies the actual build's AppKit working tree, applies both patches, uses
+dependency files to recompile patched sources and consumers of changed existing
+headers (including the status-item ivars), and relinks with remaining existing
+objects read-only. It rejects missing or stale dependencies and mismatched
+framework binaries. The framework and resources are copied, then the isolated
+binary is replaced; resource contents and dispatch markers are checked before
+writing the success manifest. `llvm-nm` is required for method-symbol checks.
+Partial output is retained on failure and is not
+marked successful. Build inputs include the local working tree and toolchain,
+not solely the git revision; this is not a hermetic rebuild. The link emits
+existing duplicate-category warnings. Presence checks are not runtime proof.
+No probe is linked to this framework or run, and transport-to-guest delivery,
+framework loading and window restoration remain unproven.
+
 This standalone, neutral guest process directly schedules Cocotron's private
 `NSApplication _reopen` on the main run loop. Its delegate records
 `applicationShouldHandleReopen:hasVisibleWindows:` for return values NO and YES;
