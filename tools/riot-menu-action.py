@@ -207,55 +207,113 @@ def xprop_value(window, prop):
     return capture(['xprop', '-id', window, prop])
 
 
-def window_pid(window):
-    match = re.search(r'=\s*(\d+)', xprop_value(window, '_NET_WM_PID'))
-    return int(match.group(1)) if match else None
+class XResClientIdSpec(ctypes.Structure):
+    _fields_ = [('client', ctypes.c_ulong), ('mask', ctypes.c_uint)]
 
 
-def host_socket_for_guest(guest_pid, proc_root=Path('/proc')):
-    """The loader socket of the host process that runs a guest PID."""
-    direct = proc_root / str(guest_pid)
-    if direct.exists():
-        environment = process_environment(direct)
-        if environment and SOCK_VARIABLE in environment:
-            return environment[SOCK_VARIABLE]
-    sockets = set()
-    try:
-        entries = list(proc_root.iterdir())
-    except OSError:
-        return None
-    for proc in entries:
-        if not proc.name.isdigit():
-            continue
+class XResClientIdValue(ctypes.Structure):
+    _fields_ = [('spec', XResClientIdSpec), ('length', ctypes.c_long),
+                ('value', ctypes.c_void_p)]
+
+
+class XRes:
+    """Resolve an X resource to its local host PID, never a window property."""
+
+    def __init__(self):
+        self.x11 = ctypes.CDLL('libX11.so.6')
+        self.res = ctypes.CDLL('libXRes.so.1')
+        self.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        self.x11.XOpenDisplay.restype = ctypes.c_void_p
+        self.x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        error_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        self._error_handler = error_type(lambda _display, _event: 0)
+        self.x11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+        self.x11.XSetErrorHandler.restype = ctypes.c_void_p
+        self._previous_handler = self.x11.XSetErrorHandler(
+            ctypes.cast(self._error_handler, ctypes.c_void_p))
+        self.res.XResQueryVersion.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+                                              ctypes.POINTER(ctypes.c_int)]
+        self.res.XResQueryVersion.restype = ctypes.c_int
+        self.res.XResQueryClientIds.argtypes = [ctypes.c_void_p, ctypes.c_long,
+            ctypes.POINTER(XResClientIdSpec), ctypes.POINTER(ctypes.c_long),
+            ctypes.POINTER(ctypes.POINTER(XResClientIdValue))]
+        self.res.XResQueryClientIds.restype = ctypes.c_int
+        self.res.XResGetClientPid.argtypes = [ctypes.POINTER(XResClientIdValue)]
+        self.res.XResGetClientPid.restype = ctypes.c_int
+        self.res.XResClientIdsDestroy.argtypes = [ctypes.c_long, ctypes.POINTER(XResClientIdValue)]
+        self.res.XResClientIdsDestroy.restype = None
+        self.display = self.x11.XOpenDisplay(None)
+        if not self.display:
+            self.x11.XSetErrorHandler(self._previous_handler)
+            raise RuntimeError('cannot open the display')
+        major, minor = ctypes.c_int(), ctypes.c_int()
+        if (not self.res.XResQueryVersion(self.display, ctypes.byref(major), ctypes.byref(minor))
+                or (major.value, minor.value) < (1, 2)):
+            self.close()
+            raise RuntimeError('XRes 1.2 is unavailable')
+
+    def window_pid(self, window):
         try:
-            status = (proc / 'status').read_text()
-        except (OSError, FileNotFoundError, ProcessLookupError):
-            continue
-        for line in status.splitlines():
-            if line.startswith('NSpid:') and str(guest_pid) in line.split()[1:]:
-                environment = process_environment(proc)
-                if environment and SOCK_VARIABLE in environment:
-                    sockets.add(environment[SOCK_VARIABLE])
-                break
-    return sockets.pop() if len(sockets) == 1 else None
+            xid = int(window, 16)
+        except (ValueError, TypeError):
+            return None
+        if not 0 < xid <= 0xffffffff:
+            return None
+        spec = XResClientIdSpec(xid, 2)
+        count = ctypes.c_long()
+        values = ctypes.POINTER(XResClientIdValue)()
+        try:
+            # libXRes versions can return 0 even with a successful reply.
+            # Accept only one unambiguous, populated PID result instead.
+            self.res.XResQueryClientIds(self.display, 1, ctypes.byref(spec),
+                                        ctypes.byref(count), ctypes.byref(values))
+            if count.value != 1 or not values or not (values[0].spec.mask & 2):
+                return None
+            if not values[0].value or values[0].length != 4:
+                return None
+            pid = self.res.XResGetClientPid(ctypes.byref(values[0]))
+            return pid if pid > 0 else None
+        finally:
+            if values:
+                self.res.XResClientIdsDestroy(count.value, values)
+
+    def close(self):
+        self.x11.XCloseDisplay(self.display)
+        self.x11.XSetErrorHandler(self._previous_handler)
 
 
-def belongs_to_prefix(window, prefix, proc_root=Path('/proc')):
-    """Whether a window belongs to this prefix. Unknown windows are refused."""
-    pid = window_pid(window)
-    if pid is None:
-        return False
-    socket = host_socket_for_guest(pid, proc_root)
-    if socket is None:
+def belongs_to_prefix(window, prefix, proc_root=Path('/proc'), xres=None):
+    """Require the X server's host PID, its UID and the exact loader socket."""
+    if xres is None:
         return False
     try:
-        return Path(os.fsdecode(socket)).parent.resolve() == (prefix / SOCK_NAME).parent.resolve()
-    except OSError:
+        pid = xres.window_pid(window)
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        proc = proc_root / str(pid)
+        if proc.stat().st_uid != os.getuid():
+            return False
+        environment = process_environment(proc)
+        return (environment is not None and
+                environment.get(SOCK_VARIABLE) == os.fsencode(prefix / SOCK_NAME))
+    except (OSError, ValueError, RuntimeError):
         return False
 
 
-def client_windows(prefix, proc_root=Path('/proc')):
-    """Every Riot Client window of this prefix, mapped or not.
+def plausible_client_window(window):
+    """Reject auxiliary or uninspectable windows, including withdrawn ones."""
+    info = capture(['xwininfo', '-id', window])
+    title = re.search(r'^xwininfo: Window id: 0x[0-9a-fA-F]+ "([^"\n]+)"', info, re.M)
+    width = re.search(r'^\s*Width:\s*(\d+)\s*$', info, re.M)
+    height = re.search(r'^\s*Height:\s*(\d+)\s*$', info, re.M)
+    override = re.search(r'^\s*Override Redirect State:\s*(yes|no)\s*$', info, re.M)
+    return bool(title and title.group(1).strip() and width and height and override
+                and int(width.group(1)) >= 100 and int(height.group(1)) >= 100
+                and override.group(1) == 'no')
+
+
+def client_windows(prefix, proc_root=Path('/proc'), xres=None):
+    """Plausible Riot Client windows of this prefix, mapped or not.
 
     The managed list of the desktop is checked first. When the window is not
     managed any more, the whole window tree is searched, so a window that was
@@ -267,16 +325,16 @@ def client_windows(prefix, proc_root=Path('/proc')):
         value = xprop_value(raw, 'WM_CLASS').lower()
         if CLIENT_CLASS not in value:
             continue
-        if belongs_to_prefix(raw, prefix, proc_root):
+        if belongs_to_prefix(raw, prefix, proc_root, xres) and plausible_client_window(raw):
             found.append(raw)
     if found:
         return found
     tree = capture(['xwininfo', '-root', '-tree'], timeout=10)
     for raw, instance, klass in re.findall(
-            r'^\s*(0x[0-9a-fA-F]+)\s+"[^"]*":\s+\("([^"]*)"\s+"([^"]*)"\)', tree, re.M):
+            r'^\s*(0x[0-9a-fA-F]+)\s+(?:"[^"]*":|\(has no name\):)\s+\("([^"]*)"\s+"([^"]*)"\)', tree, re.M):
         if CLIENT_CLASS not in klass.lower() and CLIENT_CLASS not in instance.lower():
             continue
-        if belongs_to_prefix(raw, prefix, proc_root):
+        if belongs_to_prefix(raw, prefix, proc_root, xres) and plausible_client_window(raw):
             found.append(raw)
     return found
 
@@ -316,10 +374,19 @@ class X11:
 
 def reopen_action(prefix):
     """Bring the Riot Client window back without restarting the session."""
-    windows = client_windows(prefix)
+    try:
+        xres = XRes()
+    except (OSError, RuntimeError, AttributeError) as error:
+        log(f'XRes cannot be used: {error}')
+        notify('Riot Client', 'A janela do Riot Client não pôde ser identificada.')
+        return 1
+    try:
+        windows = client_windows(prefix, xres=xres)
+    finally:
+        xres.close()
     if not windows:
-        log('no Riot Client window of this prefix exists')
-        notify('Riot Client', 'A janela do Riot Client não existe mais. '
+        log('no identifiable main Riot Client window of this prefix found')
+        notify('Riot Client', 'A janela principal do Riot Client não foi identificada. '
                'A sessão não foi reiniciada.')
         return 1
     try:

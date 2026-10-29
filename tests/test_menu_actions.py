@@ -4,6 +4,7 @@ Two parts are covered: the native module that decides which menu entries the
 host owns, and the helper that performs the action. Neither part touches a
 desktop, a client process or the real session bus.
 """
+import ctypes
 import importlib.util
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTION = ROOT / 'tools/riot-menu-action.py'
@@ -164,6 +166,9 @@ class ActionHelperTests(unittest.TestCase):
         def fake_capture(command, timeout=5):
             if command[:2] == ['xprop', '-root']:
                 return '_NET_CLIENT_LIST(WINDOW) = window id # 0x3200007\n'
+            if command[0] == 'xwininfo':
+                return ('xwininfo: Window id: 0x3200007 "Riot Client"\n'
+                        '  Width: 1200\n  Height: 800\n  Override Redirect State: no\n')
             if command[1] == '-id':
                 if command[3] == '_NET_WM_PID':
                     return pid_value
@@ -171,7 +176,7 @@ class ActionHelperTests(unittest.TestCase):
             return ''
 
         self.module.capture = fake_capture
-        self.assertEqual(self.module.client_windows(self.prefix, proc_root), ['0x3200007'])
+        self.assertEqual(self.module.client_windows(self.prefix, proc_root, xres=type("Resolver", (), {"window_pid": lambda self, window: 4242})()), ['0x3200007'])
 
     def test_a_window_of_another_prefix_is_not_touched(self):
         proc_root = self.base / 'proc'
@@ -191,7 +196,94 @@ class ActionHelperTests(unittest.TestCase):
             return ''
 
         self.module.capture = fake_capture
-        self.assertEqual(self.module.client_windows(self.prefix, proc_root), [])
+        self.assertEqual(self.module.client_windows(self.prefix, proc_root, xres=type("Resolver", (), {"window_pid": lambda self, window: 4242})()), [])
+
+    def test_window_identity_requires_exact_socket_and_uid(self):
+        proc_root = self.base / 'proc'
+        proc_root.mkdir()
+        proc = self.fake_process(proc_root, 42, '/client', socket=str(self.socket))
+        resolver = type('Resolver', (), {'window_pid': lambda self, window: 42})()
+        belongs = lambda: self.module.belongs_to_prefix('0x123', self.prefix, proc_root, resolver)
+        self.assertTrue(belongs())
+        (proc / 'environ').write_bytes(b'__mldr_sockpath=' + os.fsencode(self.prefix / 'other.sock'))
+        self.assertFalse(belongs())
+        (proc / 'environ').write_bytes(b'__mldr_sockpath=' + os.fsencode(self.socket))
+        with patch.object(self.module.os, 'getuid', return_value=os.getuid() + 1):
+            self.assertFalse(belongs())
+        (proc / 'environ').unlink()
+        self.assertFalse(belongs())
+        self.assertFalse(self.module.belongs_to_prefix('0x123', self.prefix, proc_root))
+
+    def test_auxiliary_withdrawn_window_is_not_reopened(self):
+        proc_root = self.base / 'proc'
+        proc_root.mkdir()
+        self.fake_process(proc_root, 42, '/client', socket=str(self.socket))
+        resolver = type('Resolver', (), {'window_pid': lambda self, window: 42})()
+        def capture(command, timeout=5):
+            if command[:2] == ['xwininfo', '-root']:
+                return '  0x100003c (has no name): ("Riot Client" "Riot Client")  20x20+0+1060\n'
+            if command[:2] == ['xwininfo', '-id']:
+                return ('xwininfo: Window id: 0x100003c (has no name)\n'
+                        '  Width: 20\n  Height: 20\n  Map State: IsUnMapped\n'
+                        '  Override Redirect State: yes\n')
+            return '_NET_CLIENT_LIST(WINDOW): window id # '
+        self.module.capture = capture
+        self.assertEqual(self.module.client_windows(self.prefix, proc_root, resolver), [])
+        self.module.XRes = lambda: resolver
+        resolver.close = lambda: None
+        original = self.module.client_windows
+        self.module.client_windows = lambda prefix, xres=None: original(prefix, proc_root, xres)
+        self.module.X11 = lambda: self.fail('auxiliary window must not be mapped')
+        messages = []
+        self.module.notify = lambda summary, body: messages.append(body)
+        self.assertEqual(self.module.reopen_action(self.prefix), 1)
+        self.assertNotIn('foi aberto', messages[0])
+
+    def test_window_inspection_fails_closed(self):
+        valid = ('xwininfo: Window id: 0x123 "Riot Client"\n'
+                 '  Width: 1200\n  Height: 800\n  Override Redirect State: no\n')
+        for info, expected in [(valid, True), ('', False),
+                               (valid.replace('State: no', 'State: yes'), False),
+                               (valid.replace('Width: 1200', 'Width: 20'), False),
+                               (valid.replace('"Riot Client"', '(has no name)'), False)]:
+            with self.subTest(info=info):
+                self.module.capture = lambda command, timeout=5: info
+                self.assertEqual(self.module.plausible_client_window('0x123'), expected)
+
+    def test_xres_zero_status_and_ambiguous_results(self):
+        module = self.module
+        xres = module.XRes.__new__(module.XRes)
+        xres.display = 1
+        pid_value = ctypes.c_uint32(42)
+        values = (module.XResClientIdValue * 2)()
+        for value in values:
+            value.spec.mask = 2
+            value.length = 4
+            value.value = ctypes.cast(ctypes.pointer(pid_value), ctypes.c_void_p)
+        class FakeRes:
+            count = 1
+            freed = []
+            def XResQueryClientIds(self, display, n, spec, count, result):
+                ctypes.cast(count, ctypes.POINTER(ctypes.c_long))[0] = self.count
+                ctypes.cast(result, ctypes.POINTER(ctypes.POINTER(module.XResClientIdValue)))[0] = ctypes.cast(values, ctypes.POINTER(module.XResClientIdValue))
+                return 0
+            def XResGetClientPid(self, value):
+                return 42
+            def XResClientIdsDestroy(self, count, result):
+                self.freed.append(count)
+        xres.res = FakeRes()
+        self.assertEqual(xres.window_pid('0x123'), 42)
+        xres.res.count = 2
+        self.assertIsNone(xres.window_pid('0x123'))
+        self.assertEqual(xres.res.freed, [1, 2])
+        self.assertIsNone(xres.window_pid('invalid'))
+
+    def test_reopen_fails_closed_when_xres_unavailable(self):
+        def unavailable():
+            raise OSError('missing library')
+        self.module.XRes = unavailable
+        self.module.notify = lambda *args: None
+        self.assertEqual(self.module.reopen_action(self.prefix), 1)
 
     def test_quit_asks_before_a_match_ends(self):
         asked = []
@@ -230,7 +322,8 @@ class ActionHelperTests(unittest.TestCase):
         self.assertEqual(asked, [])
 
     def test_reopen_reports_when_no_window_exists(self):
-        self.module.client_windows = lambda prefix, proc_root=None: []
+        self.module.client_windows = lambda prefix, proc_root=None, xres=None: []
+        self.module.XRes = lambda: type("Resolver", (), {"close": lambda self: None})()
         messages = []
         self.module.notify = lambda summary, body: messages.append(body)
         self.assertEqual(self.module.reopen_action(self.prefix), 1)

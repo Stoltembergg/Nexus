@@ -212,11 +212,13 @@ is handled by the host instead.
   touched, and the prefix is the one of the session that started the helper.
   A running match asks for confirmation first; when no confirmation dialog is
   available, the session is left running and the user is told why.
-- **Riot Games** brings the client window back without restarting the
-  session. The window is looked up in the desktop's managed list and in the
-  whole window tree, and it is only touched when its loader socket proves it
-  belongs to this prefix. When the window no longer exists the action says so
-  and leaves the session alone: **it never restarts the session**.
+- **Riot Games** attempts to bring an existing client window back without
+  restarting the session. It uses XRes 1.2 to identify the X11 resource owner
+  and checks its UID and loader socket against the prefix. Small, untitled or
+  override-redirect windows are rejected as potential auxiliary windows. If a
+  suitable window cannot be identified, it reports failure and leaves the
+  session alone: **it never restarts the session**. This check can also reject
+  a legitimate window; XRes and `libXRes.so.1` must be available.
 
 The labels can be changed with `DARLING_STATUS_MENU_QUIT_LABEL` and
 `DARLING_STATUS_MENU_REOPEN_LABEL`; the defaults are `Sair` and
