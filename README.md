@@ -1,33 +1,19 @@
 # darling-lol
 
-> [!IMPORTANT]
-> ## Announcement
->
-> This project has gained a lot of attention, so a few things need to be said clearly.
->
-> **1. Maintenance.** I built this mainly as a technical challenge, because everyone kept telling me it was impossible. I don't have the time to maintain it fully. Apart from open issues that block you completely, I will only review and merge pull requests.
->
-> **2. Bans.** This project can get you permanently banned, as I have said many times. I am not responsible for your actions. You alone are responsible for launching the game in a modified environment (Darling). If you use it:
-> - don't cheat;
-> - don't play ranked;
-> - don't use your main account.
->
-> 3-Day Suspension ("UNSUPPORTED_THIRD_PARTY_TOOLS") DON'T USE IT RN
->
-> Even with all of that, you will probably still get permabanned.
->
-> **3. Continuity.** If this repository is discontinued, the patches remain available under their upstream licenses, and the original integration tooling remains available under GPL-3.0.
->
-> **4. To Riot.** If you are reading this, it means a lot of people want to play your game on Linux and are disappointed that they currently can't. As with macOS for your other games (TFT, Valorant), it feels like Riot doesn't care about a part of its players who have been waiting the longest. If you want to fix this, make LoL Next compatible with Linux, either natively or through a layer like Proton. Yes, that includes your kernel anticheat: Epic Games did it with Easy Anti-Cheat. Follow the trend. This is the year of Linux, and people shouldn't be locked out of a platform or forced to dual boot for a single game.
-> Since Riot have heard of the repo if you want to contact me you can at darling-lolriot@proton.me (especially if you want to do an official or supported version of league of legends on linux)
+> [!WARNING]
+> This is an unofficial, experimental compatibility project, not a Riot-supported Linux client. Running League through a modified runtime may violate Riot's terms and can lead to account restrictions. Do not test with an account you value or play ranked. This project cannot guarantee account safety.
 
-If someone else wants to contact me know that i'm open to jobs, part-time remote only as a employee and full time remote as a freelancer for a mission
+This repository continues the Darling LoL work originally published at [lucannez64/darling-lol](https://github.com/lucannez64/darling-lol). It contains experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
 
-A short manual ARAM run and the current compatibility status are documented in [docs/STATUS.md](docs/STATUS.md). Real machines that have played, and their measured frame times, are listed in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md); `darling-lol --doctor` and `darling-lol --perf` produce the data for a new row.
+This is a development snapshot, not a finished launcher. Riot and League clients can launch, and manually played matches have run on the machines listed in [the compatibility matrix](docs/COMPATIBILITY.md). A fresh checkout has not been validated end to end on another machine. Review [current status](docs/STATUS.md) for measurement details and known limitations.
 
-Experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
+## Current development focus
 
-This is a development snapshot, not a finished launcher. Riot and League clients can launch and manually played ARAM games have run. Graphics, audio, input, startup crashes and memory reclamation have received compatibility fixes. On the Ryzen 5 5500 / RX 6600 PC, ARAM now averages about 118–135 FPS, with the slowest 10-second stretches around 106–119 (the higher figures with Hyprland's direct scanout off; fights were 70–80 FPS before the 2026-10-13/14 work, versus 170–190 on Windows). The effect of the memory changes on client RAM remains unmeasured. A fresh checkout has not been validated end to end on another machine.
+The current priority is performance and stability across the launcher, Darling runtime, desktop integration and gameplay. Work is focused on repeatable frame-pacing baselines, CPU/GPU profiling, memory behavior in longer sessions, and failures between launch and entering or continuing a match. Performance changes remain experimental until comparable measurements support them.
+
+Available results come from specific machines and manually played matches; they are not a general performance guarantee. The Ryzen 5 5500 / RX 6600 development PC reached 135.4 average FPS in one ARAM match, while five ARAM matches on an Intel UHD 620 laptop averaged 24–32 FPS. See [status](docs/STATUS.md) and [compatibility](docs/COMPATIBILITY.md) for the conditions and limitations. The effect of memory changes on real-client RAM use remains unmeasured.
+
+`darling-lol --doctor` and `darling-lol --perf` collect host and game-log data for compatibility reports. The performance percentiles are based on League's ten-second frame-time samples, not individual frame timings; see [how the numbers are measured](docs/COMPATIBILITY.md#what-the-numbers-mean).
 
 ## Included
 
@@ -50,10 +36,10 @@ Use the dependency list in the [pinned Darling source](https://github.com/darlin
 ## Experimental Nix/rootless package
 
 ```sh
-nix run github:lucannez64/darling-lol#installer
-nix run github:lucannez64/darling-lol#default -- --update
-nix run github:lucannez64/darling-lol#default
-nix run github:lucannez64/darling-lol#shell
+nix run github:Stoltembergg/Nexus-LoL#installer
+nix run github:Stoltembergg/Nexus-LoL#default -- --update
+nix run github:Stoltembergg/Nexus-LoL#default
+nix run github:Stoltembergg/Nexus-LoL#shell
 ```
 
 Or from a local checkout:
@@ -74,11 +60,11 @@ compatible package/runtime/source identity. Store closure roots are retained
 for mutable binaries; do not delete `build/nix-gcroots/` while using them.
 See [Nix setup and operational limits](docs/SETUP.md#nixos-package).
 
-## Build on the other PC (non-Nix)
+## Build from source (non-Nix)
 
 ```sh
-git clone https://github.com/lucannez64/darling-lol.git
-cd darling-lol
+git clone https://github.com/Stoltembergg/Nexus-LoL.git
+cd Nexus-LoL
 python3 -m venv build/venv
 build/venv/bin/pip install -r requirements.txt
 python3 scripts/configure.py --guest-user "$USER"
@@ -180,7 +166,7 @@ upstream/manifest.json  exact base revisions and patch ownership
 patches/             current source changes, one patch per repository
 tools/               runtime templates, installers and standalone regression probes
 docs/                setup, testing, status, compliance and interoperability notes
-build/               local sources, outputs and rendered tools (ignored)
+build/               local generated sources, outputs and rendered tools (ignored; not tracked)
 ```
 
 Darling/upstream components retain their existing licenses; see [third-party notes](NOTICE.md). Original integration tooling is distributed under GPL-3.0; patches retain the licensing of their target files.
@@ -197,8 +183,3 @@ sponsored by Riot Games. No game client, game assets, or account data are distri
 repository.
 
 See [compliance and terminology guidance](docs/COMPLIANCE.md) and [interoperability and compliance scope](docs/INTEROPERABILITY.md) for the project's scope and review expectations.
-
-## Donations
-
-If you want to help me live or just pay me a coffee
-you can at [Ko-Fi](https://ko-fi.com/lucannez64)
