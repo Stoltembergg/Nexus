@@ -167,6 +167,8 @@ def main():
             except (OSError, subprocess.SubprocessError) as error:
                 success, message = False, str(error)
             def report():
+                if success:
+                    return GLib.SOURCE_REMOVE
                 dialog = Gtk.MessageDialog(message_type=(Gtk.MessageType.INFO if success else Gtk.MessageType.ERROR),
                     buttons=Gtk.ButtonsType.CLOSE, text=('Inicialização solicitada' if success else
                                                          'Não foi possível iniciar o Riot Client'))

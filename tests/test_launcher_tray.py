@@ -30,6 +30,33 @@ class TraySourceTests(unittest.TestCase):
         gui = (ROOT / 'scripts/riot-launcher-gui.py').read_text()
         self.assertIn('riot-launcher-tray.py', gui)
 
+    def test_start_client_reports_failures_but_not_success(self):
+        source = (ROOT / 'scripts/riot-launcher-tray.py').read_text()
+        tree = ast.parse(source)
+        start = next(node for node in ast.walk(tree)
+                     if isinstance(node, ast.FunctionDef) and node.name == 'start_client')
+        launch = next(node for node in ast.walk(start)
+                      if isinstance(node, ast.FunctionDef) and node.name == 'launch')
+        report = next(node for node in ast.walk(launch)
+                      if isinstance(node, ast.FunctionDef) and node.name == 'report')
+        idle_add = next(node for node in ast.walk(launch)
+                        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == 'GLib' and node.func.attr == 'idle_add')
+        self.assertNotIn(idle_add, list(ast.walk(report)))
+        self.assertEqual(idle_add.args[0].id, 'report')
+        self.assertTrue(any(isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                            and node.test.id == 'success'
+                            and any(isinstance(child, ast.Return) for child in node.body)
+                            for node in ast.walk(report)))
+        self.assertTrue(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == 'MessageDialog'
+                            and any(keyword.arg == 'message_type'
+                                    for keyword in node.keywords)
+                            and any(isinstance(child, ast.Attribute) and child.attr == 'ERROR'
+                                    for child in ast.walk(node))
+                            for node in ast.walk(report)))
+
     def test_explicit_prefix_wins_over_saved_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / 'config.json'
