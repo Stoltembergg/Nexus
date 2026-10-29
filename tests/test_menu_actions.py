@@ -353,6 +353,48 @@ class ActionHelperTests(unittest.TestCase):
         self.module.capture = fake_capture
         self.assertEqual(self.module.client_windows(self.prefix, proc_root, xres=type("Resolver", (), {"window_pid": lambda self, window: 4242})()), [])
 
+    def test_exact_client_classes_in_managed_and_withdrawn_windows(self):
+        proc_root = self.base / 'proc'
+        proc_root.mkdir()
+        self.fake_process(proc_root, 42, '/client', socket=str(self.socket))
+        resolver = type('Resolver', (), {'window_pid': lambda self, window: 42})()
+        for managed in (True, False):
+            for instance, klass, expected in [
+                ('riot client', 'Riot Client', True),
+                ('riotclientservices', 'RiotClientServices', True),
+                ('other', 'RiotClientServices', True),
+                ('fake riot client', 'other', False),
+                ('other', 'RiotClientServicesHelper', False),
+            ]:
+                with self.subTest(managed=managed, instance=instance, klass=klass):
+                    def capture(command, timeout=5):
+                        if command[:2] == ['xprop', '-root']:
+                            return '_NET_CLIENT_LIST(WINDOW) = window id # ' + ('0xe00002' if managed else '')
+                        if command[:2] == ['xprop', '-id']:
+                            return f'WM_CLASS(STRING) = "{instance}", "{klass}"'
+                        if command[:2] == ['xwininfo', '-root']:
+                            return f'  0xe00002 "Cliente Riot": ("{instance}" "{klass}")  392x488+0+0\n'
+                        return ('xwininfo: Window id: 0xe00002 "Cliente Riot"\n'
+                                '  Width: 392\n  Height: 488\n  Map State: IsUnMapped\n'
+                                '  Override Redirect State: no\n')
+                    self.module.capture = capture
+                    self.assertEqual(self.module.client_windows(self.prefix, proc_root, resolver),
+                                     ['0xe00002'] if expected else [])
+
+    def test_managed_class_requires_valid_wm_class_property(self):
+        proc_root = self.base / 'proc'
+        proc_root.mkdir()
+        self.fake_process(proc_root, 42, '/client', socket=str(self.socket))
+        resolver = type('Resolver', (), {'window_pid': lambda self, window: 42})()
+        for value in ('OTHER(STRING) = "other", "RiotClientServices"',
+                      'WM_CLASS(STRING) = "other", "RiotClientServices" extra',
+                      'WM_CLASS(STRING) = "RiotClientServices"'):
+            with self.subTest(value=value):
+                self.module.capture = lambda command, timeout=5: (
+                    '_NET_CLIENT_LIST(WINDOW) = window id # 0xe00002' if command[:2] == ['xprop', '-root']
+                    else value if command[:2] == ['xprop', '-id'] else '')
+                self.assertEqual(self.module.client_windows(self.prefix, proc_root, resolver), [])
+
     def test_window_identity_requires_exact_socket_and_uid(self):
         proc_root = self.base / 'proc'
         proc_root.mkdir()

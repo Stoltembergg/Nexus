@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 
 GAME_NAME = 'LeagueofLegends'
-CLIENT_CLASS = 'riot client'
+CLIENT_CLASSES = frozenset(('riot client', 'riotclientservices'))
 SOCK_VARIABLE = b'__mldr_sockpath'
 SOCK_NAME = '.darlingserver.sock'
 STOP_WAIT_SECONDS = 30
@@ -311,6 +311,10 @@ def xprop_value(window, prop):
     return capture(['xprop', '-id', window, prop])
 
 
+def is_client_class(instance, klass):
+    return instance.lower() in CLIENT_CLASSES or klass.lower() in CLIENT_CLASSES
+
+
 class XResClientIdSpec(ctypes.Structure):
     _fields_ = [('client', ctypes.c_ulong), ('mask', ctypes.c_uint)]
 
@@ -426,8 +430,9 @@ def client_windows(prefix, proc_root=Path('/proc'), xres=None):
     found = []
     listing = capture(['xprop', '-root', '_NET_CLIENT_LIST'])
     for raw in re.findall(r'0x[0-9a-fA-F]+', listing):
-        value = xprop_value(raw, 'WM_CLASS').lower()
-        if CLIENT_CLASS not in value:
+        value = xprop_value(raw, 'WM_CLASS')
+        match = re.fullmatch(r'\s*WM_CLASS\(STRING\)\s*=\s*"([^"\\]*)"\s*,\s*"([^"\\]*)"\s*', value)
+        if not match or not is_client_class(*match.groups()):
             continue
         if belongs_to_prefix(raw, prefix, proc_root, xres) and plausible_client_window(raw):
             found.append(raw)
@@ -436,7 +441,7 @@ def client_windows(prefix, proc_root=Path('/proc'), xres=None):
     tree = capture(['xwininfo', '-root', '-tree'], timeout=10)
     for raw, instance, klass in re.findall(
             r'^\s*(0x[0-9a-fA-F]+)\s+(?:"[^"]*":|\(has no name\):)\s+\("([^"]*)"\s+"([^"]*)"\)', tree, re.M):
-        if CLIENT_CLASS not in klass.lower() and CLIENT_CLASS not in instance.lower():
+        if not is_client_class(instance, klass):
             continue
         if belongs_to_prefix(raw, prefix, proc_root, xres) and plausible_client_window(raw):
             found.append(raw)
