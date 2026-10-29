@@ -1,4 +1,4 @@
-# darling-lol
+# Nexus
 
 > [!WARNING]
 > This is an unofficial, experimental compatibility project, not a Riot-supported Linux client. Running League through a modified runtime may violate Riot's terms and can lead to account restrictions. Do not test with an account you value or play ranked. This project cannot guarantee account safety.
