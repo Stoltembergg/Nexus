@@ -190,6 +190,46 @@ with no Riot process, tray backend, window, login or network request. Expected:
 MENU_ITEM_INIT init=1 new=1 objc_alloc_init=1 explicit_disable=1 separator=1 designated=1
 ```
 
+## Host-side menu actions
+
+Two entries of the exported tray menu cannot be implemented by the guest
+application: ending every process of the game tree, and bringing the client
+window back after it was closed. They are therefore owned by the project and
+handled on the host, in `tools/darling-menu-actions.c` and
+`tools/riot-menu-action.py`.
+
+The menu gains a separator and two entries, **Sair** and **Riot Games**. They
+appear only when the experimental transport is active, because the launcher
+exports `DARLING_STATUS_MENU_ACTION_SCRIPT` for the session. Without that
+variable the menu keeps exactly the entries of the client and every click is
+forwarded unchanged. When the client already uses one of those labels, the
+project does not add a second entry with the same name: the client's own entry
+is handled by the host instead.
+
+- **Sair** asks the session of this prefix to stop through `darling shutdown`.
+  Every process of the game tree belongs to that session, so they all end
+  with it. Nothing is killed by name, no process outside the prefix is
+  touched, and the prefix is the one of the session that started the helper.
+  A running match asks for confirmation first; when no confirmation dialog is
+  available, the session is left running and the user is told why.
+- **Riot Games** brings the client window back without restarting the
+  session. The window is looked up in the desktop's managed list and in the
+  whole window tree, and it is only touched when its loader socket proves it
+  belongs to this prefix. When the window no longer exists the action says so
+  and leaves the session alone: **it never restarts the session**.
+
+The labels can be changed with `DARLING_STATUS_MENU_QUIT_LABEL` and
+`DARLING_STATUS_MENU_REOPEN_LABEL`; the defaults are `Sair` and
+`Riot Games`. `tests/test_menu_actions.py` covers the decision of the native
+module and the behaviour of the helper offline, without a desktop, a client
+process or the session bus.
+
+Known limits: the reopen action maps and focuses an X11 window directly, so a
+window that the client already destroyed cannot be recreated from the host;
+the guest would have to create it again. The quit action ends the whole
+session, which also ends the game, and it is not a replacement for the
+client's own quit when that one works.
+
 ## Experimental guest adapter and DBusMenu
 
 Current experimental files:

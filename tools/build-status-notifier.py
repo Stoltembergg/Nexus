@@ -16,6 +16,7 @@ def build(output):
                     '-fPIC', '-shared', '-pthread',
                     str(root / 'tools/darling-status-notifier.c'),
                     str(root / 'tools/darling-dbus-menu.c'),
+                    str(root / 'tools/darling-menu-actions.c'),
                     '-o', str(output), *flags], check=True)
     return output
 

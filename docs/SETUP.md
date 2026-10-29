@@ -141,6 +141,12 @@ The experimental tray work and the JP2 icon decoder are described in
 [desktop integration](DESKTOP_INTEGRATION.md). They are opt-in and are not
 required for the launcher, the entries or the icons above.
 
+With the experimental tray transport active, the exported menu also carries
+two entries owned by the project: **Sair**, which ends the session of this
+prefix so every process of the game tree ends with it, and **Riot Games**,
+which brings the client window back without restarting the session. See
+[host-side menu actions](DESKTOP_INTEGRATION.md#host-side-menu-actions).
+
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
 to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`
 opts in to Hyprland-only recovery of a default-prefix Riot session with no

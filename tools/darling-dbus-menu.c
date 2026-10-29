@@ -3,6 +3,7 @@
  * No guest callbacks or client-specific menu items.
  */
 #include "darling-dbus-menu.h"
+#include "darling-menu-actions.h"
 #include <string.h>
 
 #define MENU_IFACE "com.canonical.dbusmenu"
@@ -116,6 +117,17 @@ static gboolean event_received(DarlingDBusMenu *menu, gint id, const char *name)
     }
     if (!entry) return FALSE;
     if (!strcmp(name, "clicked") && !(entry->flags & DARLING_MENU_SEPARATOR) && !children(menu, id)) {
+        /* The host owns two actions of this menu. They are handled here, on
+         * the host, and never reach the guest: the guest cannot end the
+         * process tree and cannot restore a closed client window. */
+        int action = DARLING_MENU_ACTION_NONE;
+        if (id == DARLING_MENU_ACTION_QUIT_ID) action = DARLING_MENU_ACTION_QUIT;
+        else if (id == DARLING_MENU_ACTION_REOPEN_ID) action = DARLING_MENU_ACTION_REOPEN;
+        else action = darling_menu_action_for_label(entry->label);
+        if (action != DARLING_MENU_ACTION_NONE) {
+            darling_menu_action_run(action);
+            return TRUE;
+        }
         gboolean allowed = TRUE;
         for (DarlingStatusMenuEntry *ancestor = entry; ancestor;
              ancestor = find(menu, ancestor->parent)) {
@@ -278,23 +290,34 @@ int darling_menu_set(DarlingDBusMenu *menu, const DarlingStatusMenuEntry *entrie
         }
         if (!parent_found || depths[i] > MAX_DEPTH) return 0;
     }
-    gboolean unchanged = menu->count == count;
-    for (guint i = 0; unchanged && i < count; i++) {
-        DarlingStatusMenuEntry *old = &menu->entries[i];
-        const DarlingStatusMenuEntry *entry = &entries[i];
-        unchanged = old->id == entry->id && old->parent == entry->parent &&
-                    old->flags == entry->flags && old->toggle_state == entry->toggle_state &&
-                    !strcmp(old->label, entry->label);
-    }
-    if (unchanged) return 1;
-    DarlingStatusMenuEntry *copy = g_new0(DarlingStatusMenuEntry, count);
+    DarlingStatusMenuEntry actions[3];
+    guint action_count = darling_menu_action_entries(entries, count, actions, G_N_ELEMENTS(actions));
+    guint total = count + action_count;
+    if (total > MAX_ENTRIES) return 0;
+    DarlingStatusMenuEntry *copy = g_new0(DarlingStatusMenuEntry, total);
     for (guint i = 0; i < count; i++) {
         copy[i] = entries[i];
         copy[i].label = g_strdup(entries[i].label);
     }
+    for (guint i = 0; i < action_count; i++) {
+        copy[count + i] = actions[i];
+        copy[count + i].label = g_strdup(actions[i].label);
+    }
+    gboolean unchanged = menu->count == total;
+    for (guint i = 0; unchanged && i < total; i++) {
+        DarlingStatusMenuEntry *old = &menu->entries[i];
+        const DarlingStatusMenuEntry *entry = &copy[i];
+        unchanged = old->id == entry->id && old->parent == entry->parent &&
+                    old->flags == entry->flags && old->toggle_state == entry->toggle_state &&
+                    !strcmp(old->label, entry->label);
+    }
+    if (unchanged) {
+        free_entries(copy, total);
+        return 1;
+    }
     free_entries(menu->entries, menu->count);
     menu->entries = copy;
-    menu->count = count;
+    menu->count = total;
     menu->revision++;
     g_dbus_connection_emit_signal(menu->bus, NULL, MENU_PATH, MENU_IFACE,
         "LayoutUpdated", g_variant_new("(ui)", menu->revision, 0), NULL);

@@ -3,6 +3,7 @@
  * No guest callbacks or client-specific menu items.
  */
 #include "darling-dbus-menu.h"
+#include "darling-menu-actions.h"
 #include <string.h>
 
 #define MENU_IFACE "com.canonical.dbusmenu"
@@ -116,6 +117,17 @@ static gboolean event_received(DarlingDBusMenu *menu, gint id, const char *name)
     }
     if (!entry) return FALSE;
     if (!strcmp(name, "clicked") && !(entry->flags & DARLING_MENU_SEPARATOR) && !children(menu, id)) {
+        /* The host owns two actions of this menu. They are handled here, on
+         * the host, and never reach the guest: the guest cannot end the
+         * process tree and cannot restore a closed client window. */
+        int action = DARLING_MENU_ACTION_NONE;
+        if (id == DARLING_MENU_ACTION_QUIT_ID) action = DARLING_MENU_ACTION_QUIT;
+        else if (id == DARLING_MENU_ACTION_REOPEN_ID) action = DARLING_MENU_ACTION_REOPEN;
+        else action = darling_menu_action_for_label(entry->label);
+        if (action != DARLING_MENU_ACTION_NONE) {
+            darling_menu_action_run(action);
+            return TRUE;
+        }
         gboolean allowed = TRUE;
         for (DarlingStatusMenuEntry *ancestor = entry; ancestor;
              ancestor = find(menu, ancestor->parent)) {
@@ -266,10 +278,12 @@ static void append_changes(DarlingDBusMenu *old, DarlingDBusMenu *next, gint id,
     guint nvalues = 0, nnames = 0;
     g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
     g_variant_builder_init(&names, G_VARIANT_TYPE("as"));
+    /* A new item has no previous properties: every property it exposes is
+     * published, so the panel does not have to guess the defaults. */
+    gboolean is_new = find(old, id) == NULL;
     for (guint k = 0; keys[k]; k++) {
-        GVariant *a = property(old, id, keys[k]);
+        GVariant *a = is_new ? NULL : property(old, id, keys[k]);
         GVariant *b = property(next, id, keys[k]);
-        if (a) g_variant_ref_sink(a);
         if (b) g_variant_ref_sink(b);
         if (b && (!a || !g_variant_equal(a, b))) {
             g_variant_builder_add(&values, "{sv}", keys[k], b);
@@ -308,31 +322,42 @@ int darling_menu_set(DarlingDBusMenu *menu, const DarlingStatusMenuEntry *entrie
         }
         if (!parent_found || depths[i] > MAX_DEPTH) return 0;
     }
-    gboolean unchanged = menu->count == count;
-    for (guint i = 0; unchanged && i < count; i++) {
-        DarlingStatusMenuEntry *old = &menu->entries[i];
-        const DarlingStatusMenuEntry *entry = &entries[i];
-        unchanged = old->id == entry->id && old->parent == entry->parent &&
-                    old->flags == entry->flags && old->toggle_state == entry->toggle_state &&
-                    !strcmp(old->label, entry->label);
-    }
-    if (unchanged) return 1;
-    DarlingStatusMenuEntry *copy = g_new0(DarlingStatusMenuEntry, count);
+    DarlingStatusMenuEntry actions[3];
+    guint action_count = darling_menu_action_entries(entries, count, actions, G_N_ELEMENTS(actions));
+    guint total = count + action_count;
+    if (total > MAX_ENTRIES) return 0;
+    DarlingStatusMenuEntry *copy = g_new0(DarlingStatusMenuEntry, total);
     for (guint i = 0; i < count; i++) {
         copy[i] = entries[i];
         copy[i].label = g_strdup(entries[i].label);
     }
+    for (guint i = 0; i < action_count; i++) {
+        copy[count + i] = actions[i];
+        copy[count + i].label = g_strdup(actions[i].label);
+    }
+    gboolean unchanged = menu->count == total;
+    for (guint i = 0; unchanged && i < total; i++) {
+        DarlingStatusMenuEntry *old = &menu->entries[i];
+        const DarlingStatusMenuEntry *entry = &copy[i];
+        unchanged = old->id == entry->id && old->parent == entry->parent &&
+                    old->flags == entry->flags && old->toggle_state == entry->toggle_state &&
+                    !strcmp(old->label, entry->label);
+    }
+    if (unchanged) {
+        free_entries(copy, total);
+        return 1;
+    }
     DarlingDBusMenu next = *menu;
     next.entries = copy;
-    next.count = count;
+    next.count = total;
     GVariantBuilder updated, removed;
     g_variant_builder_init(&updated, G_VARIANT_TYPE("a(ia{sv})"));
     g_variant_builder_init(&removed, G_VARIANT_TYPE("a(ias)"));
     append_changes(menu, &next, 0, &updated, &removed);
-    /* Stable ordering: root first, then surviving IDs in new snapshot order. */
-    for (guint i = 0; i < count; i++)
-        if (find(menu, copy[i].id))
-            append_changes(menu, &next, copy[i].id, &updated, &removed);
+    /* Stable ordering: root first, then every item of the new snapshot in
+     * its own order. */
+    for (guint i = 0; i < total; i++)
+        append_changes(menu, &next, copy[i].id, &updated, &removed);
     GVariant *updates = g_variant_ref_sink(g_variant_builder_end(&updated));
     GVariant *removals = g_variant_ref_sink(g_variant_builder_end(&removed));
     free_entries(menu->entries, menu->count);

@@ -32,6 +32,7 @@ def build():
         host = folder / 'libdarling-status-notifier.so'
         subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fPIC', '-shared', '-pthread',
                         '-I' + str(ROOT / 'tools'), str(ROOT / 'tools/darling-status-notifier.c'), str(menu),
+                        str(ROOT / 'tools/darling-menu-actions.c'),
                         '-o', str(host), *flags], check=True)
         subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-dynamiclib',
                         '-nostdlib', '-O2', '-Wall', '-Wextra', '-Werror', '-isysroot', CONFIG['sdk'],

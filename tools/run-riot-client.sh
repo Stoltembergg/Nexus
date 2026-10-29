@@ -168,6 +168,12 @@ export __GL_YIELD="${__GL_YIELD:-NOTHING}"
 if [ -w /proc/self/timerslack_ns ]; then
   echo 1 > /proc/self/timerslack_ns 2>/dev/null || true
 fi
+# The experimental tray transport can hand two entries of its menu to a
+# project-owned helper on the host: ending the whole session of this prefix
+# and bringing the client window back. The helper only acts on DPREFIX and
+# never restarts the session behind the user's back. Without this variable
+# the menu keeps exactly the entries of the client.
+export DARLING_STATUS_MENU_ACTION_SCRIPT="$runner_dir/riot-menu-action.py"
 # On affected setups Chromium's default temp directory is unusable. Electron
 # can copy app.asar entries to temporary files for async reads and report a
 # failed copy as "not found". Use a writable guest directory by default.
