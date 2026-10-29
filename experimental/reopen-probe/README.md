@@ -50,3 +50,19 @@ transport through `DarlingStatusNotifierPoll` is proven: guest dispatch and
 actual window restoration have not been tested or implemented by this transport
 experiment. The standalone AppKit probe above is a separate, limited observation
 and does not prove transport-to-guest delivery.
+
+## Guest patch variant
+
+`cocotron-reopen.patch` is a separate opt-in AppKit patch, applied with
+`patch -p1` after `patches/experimental/cocotron-status-notifier.patch`,
+optionally after the complete count-diagnostic chain. It does not alter the
+production build. Pair it explicitly with the experimental transport above;
+the existing `DARLING_STATUS_NOTIFIER_LIBRARY` opt-in and a live, enabled
+status item are required. Event kind 8 invokes private `[NSApp _reopen]` via
+the existing main-run-loop polling timer; its menu ID is not used. Other events
+retain their existing behavior. This depends on Cocotron's private selector.
+
+Run `python3 -m unittest discover -s tests -p test_reopen_guest_patch.py` for
+clean git-derived patch application and static ABI/dispatch checks. These do
+not execute guest code: transport-to-guest delivery, main-thread execution in
+a real guest, and real client/window restoration remain unproven.
