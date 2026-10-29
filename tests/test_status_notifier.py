@@ -119,6 +119,11 @@ def probe(library, watcher):
             return call('com.canonical.dbusmenu.' + method, *args,
                         path='/Menu', check=check)
 
+        # A new item has no menu; an explicit empty snapshot remains valid.
+        assert "objectpath '/'" in prop('Menu')
+        assert lib.DarlingStatusNotifierSetMenu(item, None, 0) == 1
+        assert "objectpath '/'" in prop('Menu')
+
         entries = (MenuEntry * 6)(
             MenuEntry(10, 0, b'_Open', 3, 0),
             MenuEntry(20, 0, b'Options', 3, 0),
@@ -185,9 +190,12 @@ def probe(library, watcher):
             assert menu_call('GetLayout', '0', '-1', '[]').stdout == previous
         duplicate = (MenuEntry * 2)(MenuEntry(1, 0, b'A', 3, 0), MenuEntry(1, 0, b'B', 3, 0))
         assert lib.DarlingStatusNotifierSetMenu(item, duplicate, 2) == 0
+        assert menu_call('GetLayout', '0', '-1', '[]').stdout == previous
         deep = (MenuEntry * 33)(*(MenuEntry(i, i - 1, b'Deep', 3, 0) for i in range(1, 34)))
         assert lib.DarlingStatusNotifierSetMenu(item, deep, 33) == 0
+        assert menu_call('GetLayout', '0', '-1', '[]').stdout == previous
         assert lib.DarlingStatusNotifierSetMenu(item, entries, 1025) == 0
+        assert menu_call('GetLayout', '0', '-1', '[]').stdout == previous
         entries[1].flags = 2 # Disabled parent must suppress child activation too.
         assert lib.DarlingStatusNotifierSetMenu(item, entries, len(entries)) == 1
         menu_call('Event', '21', 'clicked', '<0>', '0')
@@ -200,6 +208,10 @@ def probe(library, watcher):
         assert lib.DarlingStatusNotifierSetMenu(item, None, 0) == 1
         assert "objectpath '/'" in prop('Menu')
         assert menu_call('Event', '10', 'clicked', '<0>', '0', check=False).returncode != 0
+        assert lib.DarlingStatusNotifierSetMenu(item, entries, len(entries)) == 1
+        assert "objectpath '/Menu'" in prop('Menu')
+        assert 'Caller changed its memory' in menu_call('GetLayout', '0', '-1', '[]').stdout
+        assert lib.DarlingStatusNotifierSetMenu(item, None, 0) == 1
         # The transport accepts events without a host, then re-registers when
         # one appears and again when it restarts. No application restart needed.
         panel = start_panel()
@@ -237,6 +249,87 @@ def probe(library, watcher):
     print('SNI_PASS properties icons activation bounded_queue independent_items watcher_restart removal')
 
 
+def menu_race_probe(library):
+    """Owned item and monitor on a private bus; simulate the snapshot owner."""
+    lib = load(library)
+    item = lib.DarlingStatusNotifierCreate(b'race-test', b'Race test', b'')
+    assert item
+    name = lib.DarlingStatusNotifierBusName(item).decode()
+    monitor = subprocess.Popen(['gdbus', 'monitor', '--session', '--dest', name],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+    def call(path, method, *args):
+        return subprocess.run(['gdbus', 'call', '--session', '--dest', name,
+                               '--object-path', path, '--method', method, '--', *args],
+                              text=True, capture_output=True, check=True, timeout=8).stdout
+
+    def menu(method, *args):
+        return call('/Menu', 'com.canonical.dbusmenu.' + method, *args)
+
+    def menu_path():
+        return call('/StatusNotifierItem', 'org.freedesktop.DBus.Properties.Get',
+                    'org.kde.StatusNotifierItem', 'Menu')
+
+    try:
+        assert select.select([monitor.stdout], [], [], 8)[0], 'monitor timed out'
+        assert b'Monitoring signals' in monitor.stdout.readline()
+        assert "objectpath '/'" in menu_path()
+        before = menu('GetLayout', '0', '-1', '[]')
+        assert "uint32 0" in before, before
+        assert menu('GetProperty', '0', 'visible') == '(<true>,)\n'
+        assert menu('GetProperty', '0', 'enabled') == '(<true>,)\n'
+        entries = (MenuEntry * 4)(
+            MenuEntry(1, 0, b'Play', 3, 0), MenuEntry(2, 0, b'Settings', 3, 0),
+            MenuEntry(3, 0, b'Disabled', 2, 0), MenuEntry(4, 0, b'Hidden', 1, 0))
+        assert lib.DarlingStatusNotifierSetMenu(item, entries, 4) == 1
+        assert "objectpath '/Menu'" in menu_path()
+        layout = menu('GetLayout', '0', '-1', '[]')
+        assert 'uint32 1' in layout and all(label in layout for label in
+                                            ('Play', 'Settings', 'Disabled', 'Hidden')), layout
+        assert menu('GetProperty', '3', 'enabled') == '(<false>,)\n'
+        assert menu('GetProperty', '4', 'visible') == '(<false>,)\n'
+        event = Event()
+        for id in (3, 4):
+            menu('Event', str(id), 'clicked', '<0>', '0')
+        assert lib.DarlingStatusNotifierPoll(item, ctypes.byref(event)) == 0
+
+        # A panel gets false immediately; only the owner can subsequently poll
+        # the queued open and publish a new snapshot, triggering LayoutUpdated.
+        assert menu('AboutToShow', '0') == '(false,)\n'
+        assert menu('GetLayout', '0', '-1', '[]') == layout
+        assert lib.DarlingStatusNotifierPoll(item, ctypes.byref(event)) == 1
+        assert (event.kind, event.x) == (6, 0)
+        entries[0].label = b'Play updated'
+        assert lib.DarlingStatusNotifierSetMenu(item, entries, 4) == 1
+        changed = menu('GetLayout', '0', '-1', '[]')
+        assert 'uint32 2' in changed and 'Play updated' in changed, changed
+        assert "objectpath '/Menu'" in menu_path()
+        assert lib.DarlingStatusNotifierSetMenu(item, entries, 4) == 1
+        assert menu('GetLayout', '0', '-1', '[]') == changed
+        assert lib.DarlingStatusNotifierSetMenu(item, None, 0) == 1
+        assert "objectpath '/'" in menu_path()
+        assert 'uint32 3' in menu('GetLayout', '0', '-1', '[]')
+        # Wait for the final signal rather than racing monitor termination.
+        observed = b''
+        while observed.count(b'.LayoutUpdated ') < 3 or observed.count(b'.NewMenu ') < 2:
+            assert select.select([monitor.stdout], [], [], 8)[0], observed
+            chunk = os.read(monitor.stdout.fileno(), 4096)
+            assert chunk, observed
+            observed += chunk
+    finally:
+        lib.DarlingStatusNotifierDestroy(item)
+        monitor.terminate()
+        output, errors = monitor.communicate(timeout=8)
+    signals = (observed + output).decode()
+    layouts = [line for line in signals.splitlines() if '.LayoutUpdated ' in line]
+    new_menus = [line for line in signals.splitlines() if '.NewMenu ' in line]
+    assert len(layouts) == 3, (signals, errors)
+    for revision, line in enumerate(layouts, 1):
+        assert f'(uint32 {revision}, 0)' in line, line
+    assert len(new_menus) == 2, signals
+    print('MENU_RACE_PASS', layouts, new_menus)
+
+
 class StatusNotifierTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -249,6 +342,13 @@ class StatusNotifierTests(unittest.TestCase):
         cls.addClassCleanup(cls.directory.cleanup)
         cls.library = Path(cls.directory.name) / 'status.so'
         cls.watcher = Path(cls.directory.name) / 'watcher'
+        # Guard the public ABI independently of the numeric protocol assertions.
+        subprocess.run(['cc', '-std=c11', '-Werror', '-fsyntax-only', '-x', 'c', '-',
+                        '-I' + str(ROOT / 'tools')], input='''
+#include "darling-status-notifier.h"
+_Static_assert(DARLING_STATUS_MENU_OPEN == 6, "MENU_OPEN ABI changed");
+_Static_assert(DARLING_STATUS_MENU_CLOSE == 7, "MENU_CLOSE ABI changed");
+''', text=True, check=True)
         subprocess.run([sys.executable, str(ROOT / 'tools/build-status-notifier.py'),
                         '--output', str(cls.library)], check=True, capture_output=True, text=True)
         flags = shlex.split(subprocess.check_output(
@@ -300,6 +400,13 @@ struct elf_calls *_elfcalls = &calls;
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('SNI_PASS', result.stdout)
 
+    def test_private_bus_menu_snapshot_race(self):
+        result = subprocess.run(['dbus-run-session', '--', sys.executable, str(Path(__file__).resolve()),
+                                 '--menu-race-probe', str(self.library)],
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('MENU_RACE_PASS', result.stdout)
+
     def test_unavailable_bus_does_not_abort(self):
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                                  '--missing-bus', str(self.library)], text=True,
@@ -327,6 +434,8 @@ struct elf_calls *_elfcalls = &calls;
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--bus-probe':
         probe(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) > 1 and sys.argv[1] == '--menu-race-probe':
+        menu_race_probe(sys.argv[2])
     elif len(sys.argv) > 1 and sys.argv[1] == '--missing-bus':
         lib = load(sys.argv[2])
         assert not lib.DarlingStatusNotifierCreate(b'test', b'Test', b'')

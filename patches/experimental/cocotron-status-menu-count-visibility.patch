@@ -1,0 +1,43 @@
+--- a/AppKit/NSStatusItem.m
++++ b/AppKit/NSStatusItem.m
+@@ -805,6 +805,7 @@
+     if (countTrace && strcmp(countTrace, "1") == 0)
+         fprintf(stderr, "SMCOUNT update depth=%u items=%lu\n", depth, (unsigned long)[snapshot count]);
+     BOOL valid = YES;
++    unsigned visible = 0, hidden = 0, enabled = 0, disabled = 0, submenus = 0, processed = 0;
+     for (NSMenuItem *item in snapshot) {
+         if (*count >= 1024) { valid = NO; break; }
+         NSNumber *identifier = nil;
+@@ -821,6 +822,11 @@
+         if (bytes == NULL || strlen(bytes) > 4096) { valid = NO; break; }
+         [labels addObject:label];
+         uint32_t flags = ([item isEnabled] ? 1 : 0) | ([item isHidden] ? 0 : 2);
++        if (countTrace && strcmp(countTrace, "1") == 0) {
++            processed++;
++            if (flags & 1) enabled++; else disabled++;
++            if (flags & 2) visible++; else hidden++;
++        }
+         if (getenv("DARLING_STATUS_NOTIFIER_DEBUG") && ![item isSeparatorItem]) {
+             fprintf(stderr, "STATUS_MENU_DEBUG enabled=%d action=%d target=%s\n", [item isEnabled],
+                 [item action] != NULL, [item target] ? class_getName([[item target] class]) : "nil");
+@@ -834,7 +840,9 @@
+         };
+         entries[(*count)++] = entry;
+         [items setObject:item forKey:identifier];
+-        if ([item hasSubmenu]) {
++        BOOL hasSubmenu = [item hasSubmenu];
++        if (countTrace && strcmp(countTrace, "1") == 0 && hasSubmenu) submenus++;
++        if (hasSubmenu) {
+             NSMenu *submenu = [[item submenu] retain];
+             BOOL appended = NO;
+             @try {
+@@ -846,6 +854,9 @@
+             if (!appended) { valid = NO; break; }
+         }
+     }
++    if (countTrace && strcmp(countTrace, "1") == 0)
++        fprintf(stderr, "SMCOUNT aggregate depth=%u processed=%u visible=%u hidden=%u enabled=%u disabled=%u submenus=%u complete=%d\n",
++            depth, processed, visible, hidden, enabled, disabled, submenus, valid);
+     [snapshot release];
+     return valid;
+ }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in real-session DBusMenu -> guest AppKit integration check (no Riot)."""
 import argparse
+import ast
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +41,42 @@ def manual_outcome(text):
     if not clicks:
         return 'finished_without_confirming'
     return 'unexpected_action_count'
+
+
+def watcher_items(text):
+    """Parse the gdbus Properties.Get result as an array of exact strings."""
+    match = re.fullmatch(r'\s*\(<\s*(?:@as\s+)?(\[.*\])\s*>,\s*\)\s*', text, re.DOTALL)
+    try:
+        items = ast.literal_eval(match.group(1)) if match else None
+    except (ValueError, SyntaxError):
+        items = None
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        raise RuntimeError('unexpected RegisteredStatusNotifierItems: ' + repr(text))
+    return items
+
+
+def watcher_contains(text, name):
+    # Zorin's local AppIndicator uses busName@objectPath; KDE uses concatenation.
+    return any(item in (name + '/StatusNotifierItem', name + '@/StatusNotifierItem')
+               for item in watcher_items(text))
+
+
+def cleanup(process, completed, binary, previous):
+    if process is not None and process.poll() is None:
+        try:
+            process.kill()
+            process.wait(timeout=3)
+        except PermissionError as error:
+            print('probe cleanup permission denied: ' + str(error), file=sys.stderr)
+    if process is not None and not completed:
+        for pid, identity in owned_guests(binary).items():
+            if pid not in previous and owned_guests(binary).get(pid) == identity:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError as error:
+                    print('probe cleanup permission denied: ' + str(error), file=sys.stderr)
 
 
 def owned_guests(binary):
@@ -149,10 +187,18 @@ def main(argv=None):
                 raise RuntimeError('theme icon would mask the probe pixel data')
             if '(22, 22,' not in item_property('IconPixmap'):
                 raise RuntimeError('probe image was not exported as a 22x22 pixmap')
-            eventually(lambda: name + '/StatusNotifierItem' in call(
-                'org.kde.StatusNotifierWatcher', '/StatusNotifierWatcher',
-                'org.freedesktop.DBus.Properties.Get', 'org.kde.StatusNotifierWatcher',
-                'RegisteredStatusNotifierItems').stdout)
+            observed = None
+            def registered():
+                nonlocal observed
+                observed = call('org.kde.StatusNotifierWatcher', '/StatusNotifierWatcher',
+                    'org.freedesktop.DBus.Properties.Get', 'org.kde.StatusNotifierWatcher',
+                    'RegisteredStatusNotifierItems').stdout
+                return watcher_contains(observed, name)
+
+            try:
+                eventually(registered)
+            except RuntimeError as error:
+                raise RuntimeError(f'{error}; RegisteredStatusNotifierItems observed: {observed!r}') from error
 
             def menu(method, *values):
                 return call(name, '/Menu', 'com.canonical.dbusmenu.' + method, *values).stdout
@@ -187,10 +233,10 @@ def main(argv=None):
                 raise RuntimeError('guest action/run-loop test failed; see ' + str(log))
             eventually(lambda: 'false' in call('org.freedesktop.DBus', '/org/freedesktop/DBus',
                 'org.freedesktop.DBus.NameHasOwner', name).stdout)
-            eventually(lambda: name + '/StatusNotifierItem' not in call(
-                'org.kde.StatusNotifierWatcher', '/StatusNotifierWatcher',
-                'org.freedesktop.DBus.Properties.Get', 'org.kde.StatusNotifierWatcher',
-                'RegisteredStatusNotifierItems').stdout)
+            try:
+                eventually(lambda: not registered())
+            except RuntimeError as error:
+                raise RuntimeError(f'{error}; RegisteredStatusNotifierItems observed: {observed!r}') from error
             completed = True
             if args.manual:
                 if outcome != 'passed':
@@ -202,16 +248,7 @@ def main(argv=None):
                 print('STATUS_DESKTOP_CHECK bus=1 kde_registration=1 dbus_to_guest=1 '
                       'main_thread=1 about_to_show=1 menu_update=1 removal=1')
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait(timeout=3)
-        if process is not None and not completed:
-            for pid, identity in owned_guests(binary).items():
-                if pid not in previous and owned_guests(binary).get(pid) == identity:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+        cleanup(process, completed, binary, previous)
         # Deliberately never shut down a shared Darling session here.
 
 

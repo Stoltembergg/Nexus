@@ -1,0 +1,100 @@
+--- a/Onyx2D/O2ImageSource_ICNS.m
++++ b/Onyx2D/O2ImageSource_ICNS.m
+@@ -23,6 +23,87 @@
+ #import <Onyx2D/O2ImageSource_ICNS.h>
+ #import <Onyx2D/O2ImageSource_PNG.h>
+ #include <limits.h>
++#include <openjpeg.h>
++
++/* Experimental ic08 JP2 only. All callbacks are bounded to the ICNS chunk. */
++typedef struct { const uint8_t *bytes; size_t size, offset; } ICNSJP2Stream;
++static OPJ_SIZE_T icnsJP2Read(void *out, OPJ_SIZE_T count, void *context) {
++    ICNSJP2Stream *s = context;
++    size_t n = MIN(count, s->size - s->offset);
++    if (!n) return (OPJ_SIZE_T)-1;
++    memcpy(out, s->bytes + s->offset, n); s->offset += n; return n;
++}
++static OPJ_OFF_T icnsJP2Skip(OPJ_OFF_T count, void *context) {
++    ICNSJP2Stream *s = context;
++    if (count < 0 || (uint64_t)count > s->size - s->offset) return -1;
++    s->offset += (size_t)count; return count;
++}
++static OPJ_BOOL icnsJP2Seek(OPJ_OFF_T offset, void *context) {
++    ICNSJP2Stream *s = context;
++    if (offset < 0 || (uint64_t)offset > s->size) return OPJ_FALSE;
++    s->offset = (size_t)offset; return OPJ_TRUE;
++}
++static O2Image *icnsDecodeJP2(const uint8_t *bytes, size_t length) {
++    static const uint8_t signature[] = {0,0,0,12,'j','P',' ',' ',13,10,135,10};
++    if (length < sizeof(signature) || length > 16 * 1024 * 1024 ||
++        memcmp(bytes, signature, sizeof(signature))) return nil;
++    ICNSJP2Stream input = {bytes, length, 0};
++    opj_codec_t *codec = opj_create_decompress(OPJ_CODEC_JP2);
++    opj_stream_t *stream = opj_stream_create(4096, OPJ_TRUE);
++    opj_image_t *image = NULL;
++    O2Image *result = nil;
++    opj_dparameters_t parameters;
++    if (!codec || !stream) goto done;
++    opj_set_default_decoder_parameters(&parameters);
++    opj_stream_set_user_data(stream, &input, NULL);
++    opj_stream_set_user_data_length(stream, length);
++    opj_stream_set_read_function(stream, icnsJP2Read);
++    opj_stream_set_skip_function(stream, icnsJP2Skip);
++    opj_stream_set_seek_function(stream, icnsJP2Seek);
++    if (!opj_setup_decoder(codec, &parameters) || !opj_read_header(stream, codec, &image) || !image) goto done;
++    if (image->x0 != 0 || image->y0 != 0 || image->x1 != 256 || image->y1 != 256 ||
++        (image->numcomps != 3 && image->numcomps != 4) || image->icc_profile_len != 0 ||
++        (image->color_space != OPJ_CLRSPC_SRGB && image->color_space != OPJ_CLRSPC_UNSPECIFIED)) goto done;
++    for (unsigned c = 0; c < image->numcomps; c++) {
++        opj_image_comp_t *comp = &image->comps[c];
++        if (comp->w != 256 || comp->h != 256 || comp->dx != 1 || comp->dy != 1 ||
++            comp->x0 != 0 || comp->y0 != 0 || comp->prec != 8 || comp->sgnd) goto done;
++    }
++    if (!opj_decode(codec, stream, image) || !opj_end_decompress(codec, stream)) goto done;
++    if (image->icc_profile_len != 0 || image->color_space != OPJ_CLRSPC_SRGB) goto done;
++    for (unsigned c = 0; c < image->numcomps; c++) {
++        opj_image_comp_t *comp = &image->comps[c];
++        if (!comp->data || comp->w != 256 || comp->h != 256 || comp->prec != 8 || comp->sgnd ||
++            comp->alpha != (c == 3 ? 1 : 0)) goto done;
++    }
++    NSMutableData *bitmap = [[NSMutableData alloc] initWithLength: 256 * 256 * 4];
++    if (!bitmap) goto done;
++    uint8_t *pixels = [bitmap mutableBytes];
++    for (unsigned i = 0; i < 256 * 256; i++) {
++        int a = image->numcomps == 4 ? image->comps[3].data[i] : 255;
++        if (a < 0 || a > 255) { [bitmap release]; goto done; }
++        for (unsigned c = 0; c < 3; c++) {
++            int v = image->comps[c].data[i];
++            if (v < 0 || v > 255) { [bitmap release]; goto done; }
++            pixels[4 * i + c] = O2Image_8u_mul_8u_div_255(v, a);
++        }
++        pixels[4 * i + 3] = a;
++    }
++    O2ColorSpaceRef space = O2ColorSpaceCreateDeviceRGB();
++    O2DataProvider *provider = O2DataProviderCreateWithCFData((CFDataRef)bitmap);
++    if (space && provider)
++        result = [[O2Image alloc] initWithWidth:256 height:256 bitsPerComponent:8 bitsPerPixel:32
++            bytesPerRow:1024 colorSpace:space bitmapInfo:kO2BitmapByteOrder32Big | kO2ImageAlphaPremultipliedLast
++            decoder:NULL provider:provider decode:NULL interpolate:NO renderingIntent:kO2RenderingIntentDefault];
++    if (provider) O2DataProviderRelease(provider);
++    if (space) O2ColorSpaceRelease(space);
++    [bitmap release];
++done:
++    if (image) opj_image_destroy(image);
++    if (stream) opj_stream_destroy(stream);
++    if (codec) opj_destroy_codec(codec);
++    return result;
++}
+ 
+ typedef struct O2ICNSNode {
+     struct O2ICNSNode *next;
+@@ -430,6 +511,9 @@
+                 O2DataProviderRelease(provider);
+                 [data release];
+             }
++        } else if (type == BigEndianOSType('i', 'c', '0', '8')) {
++            O2Image *image = icnsDecodeJP2(png, length);
++            if (image) { [_images addObject:image]; [image release]; }
+         }
+     } else if (isMask) {
+         O2ICNSNode *node = [self createNodeForWidth: width

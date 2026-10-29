@@ -1,0 +1,36 @@
+--- a/AppKit/NSStatusItem.m
++++ b/AppKit/NSStatusItem.m
+@@ -806,6 +806,7 @@
+         fprintf(stderr, "SMCOUNT update depth=%u items=%lu\n", depth, (unsigned long)[snapshot count]);
+     BOOL valid = YES;
+     unsigned visible = 0, hidden = 0, enabled = 0, disabled = 0, submenus = 0, processed = 0;
++    unsigned emptyTitles = 0, nonemptyTitles = 0, separators = 0;
+     for (NSMenuItem *item in snapshot) {
+         if (*count >= 1024) { valid = NO; break; }
+         NSNumber *identifier = nil;
+@@ -826,12 +827,14 @@
+             processed++;
+             if (flags & 1) enabled++; else disabled++;
+             if (flags & 2) visible++; else hidden++;
++            if (bytes[0] == 0) emptyTitles++; else nonemptyTitles++;
+         }
+         if (getenv("DARLING_STATUS_NOTIFIER_DEBUG") && ![item isSeparatorItem]) {
+             fprintf(stderr, "STATUS_MENU_DEBUG enabled=%d action=%d target=%s\n", [item isEnabled],
+                 [item action] != NULL, [item target] ? class_getName([[item target] class]) : "nil");
+         }
+         if ([item isSeparatorItem]) flags |= 4;
++        if (countTrace && strcmp(countTrace, "1") == 0 && (flags & 4)) separators++;
+         NSInteger state = [item state];
+         if (state != 0) flags |= 8;
+         DarlingStatusMenuEntry entry = {
+@@ -855,8 +858,8 @@
+         }
+     }
+     if (countTrace && strcmp(countTrace, "1") == 0)
+-        fprintf(stderr, "SMCOUNT aggregate depth=%u processed=%u visible=%u hidden=%u enabled=%u disabled=%u submenus=%u complete=%d\n",
+-            depth, processed, visible, hidden, enabled, disabled, submenus, valid);
++        fprintf(stderr, "SMCOUNT aggregate depth=%u processed=%u visible=%u hidden=%u enabled=%u disabled=%u submenus=%u empty=%u nonempty=%u separators=%u complete=%d\n",
++            depth, processed, visible, hidden, enabled, disabled, submenus, emptyTitles, nonemptyTitles, separators, valid);
+     [snapshot release];
+     return valid;
+ }

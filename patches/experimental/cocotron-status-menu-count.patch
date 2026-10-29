@@ -1,0 +1,44 @@
+--- a/AppKit/NSStatusItem.m
++++ b/AppKit/NSStatusItem.m
+@@ -801,6 +801,9 @@
+             [menu autoenablesItems], [menu delegate] ? class_getName([[menu delegate] class]) : "nil");
+     }
+     NSArray *snapshot = [[menu itemArray] copy];
++    const char *countTrace = getenv("DARLING_STATUS_MENU_COUNT_TRACE");
++    if (countTrace && strcmp(countTrace, "1") == 0)
++        fprintf(stderr, "SMCOUNT update depth=%u items=%lu\n", depth, (unsigned long)[snapshot count]);
+     BOOL valid = YES;
+     for (NSMenuItem *item in snapshot) {
+         if (*count >= 1024) { valid = NO; break; }
+@@ -860,6 +863,9 @@
+     @try {
+         BOOL valid = entries != NULL && [self _appendNativeMenu:menu parent:0 depth:1
+             entries:entries count:&count items:items labels:labels];
++        const char *countTrace = getenv("DARLING_STATUS_MENU_COUNT_TRACE");
++        BOOL tracingCount = countTrace && strcmp(countTrace, "1") == 0;
++        if (tracingCount) fprintf(stderr, "SMCOUNT build valid=%d entries=%u\n", valid, count);
+         // A delegate can remove the status item or replace the menu during update.
+         if (_nativeItem != NULL && _menu == menu) {
+             if (!valid) {
+@@ -867,14 +873,19 @@
+                 count = 0;
+                 [items removeAllObjects];
+             }
+-            if (_darlingStatus.set_menu(_nativeItem, entries, count)) {
++            BOOL sent = _darlingStatus.set_menu(_nativeItem, entries, count);
++            if (tracingCount) fprintf(stderr, "SMCOUNT send kind=snapshot entries=%u accepted=%d\n", count, sent);
++            if (sent) {
+                 [_nativeMenuItems release];
+                 _nativeMenuItems = [items retain];
+             }
+         } else if (_nativeItem != NULL) {
+             _nativeMenuDirty = YES;
+-            _darlingStatus.set_menu(_nativeItem, NULL, 0);
++            BOOL sent = _darlingStatus.set_menu(_nativeItem, NULL, 0);
++            if (tracingCount) fprintf(stderr, "SMCOUNT send kind=clear entries=0 accepted=%d\n", sent);
+             [_nativeMenuItems removeAllObjects];
++        } else if (tracingCount) {
++            fprintf(stderr, "SMCOUNT send kind=skipped reason=removed\n");
+         }
+     } @finally {
+         free(entries);

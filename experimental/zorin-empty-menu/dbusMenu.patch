@@ -1,0 +1,38 @@
+--- a/dbusMenu.js
++++ b/dbusMenu.js
+@@ -479,16 +479,33 @@
+         }
+     }
+ 
++    // PopupMenu.isEmpty() ignores separators. A root with only hidden items
++    // cannot open, so waiting for active would indefinitely defer updates.
++    _canDeferUpdates() {
++        const root = this.getRoot();
++        if (!root?.hasChildren())
++            return false;
++
++        return root.getChildrenIds().some(id => {
++            const item = this._items.get(id);
++            // An incomplete cache is not evidence that the popup is empty.
++            if (!item)
++                return true;
++            return item.propertyGet('type') !== 'separator' &&
++                item.propertyGetBool('visible');
++        });
++    }
++
+     _onSignal(_sender, signal, params) {
+         if (signal === 'LayoutUpdated') {
+-            if (!this._active && this.getRoot()?.hasChildren()) {
++            if (!this._active && this._canDeferUpdates()) {
+                 this._flagLayoutUpdateRequired = true;
+                 return;
+             }
+ 
+             this._requestLayoutUpdate();
+         } else if (signal === 'ItemsPropertiesUpdated') {
+-            if (!this._active && this.getRoot()?.hasChildren()) {
++            if (!this._active && this._canDeferUpdates()) {
+                 this._flagItemsUpdateRequired = true;
+                 return;
+             }
