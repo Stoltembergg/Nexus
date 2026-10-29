@@ -1,5 +1,28 @@
 # Experimental reopen probe (opt-in)
 
+## Owned window restoration probe
+
+`python3 experimental/reopen-probe/build-window.py` builds a separate binary;
+`python3 -m unittest discover -s tests -p test_reopen_window_probe.py` performs
+offline source-contract checks only. Neither starts a guest or creates a prefix.
+The binary maps its own window, orders it out, invokes private `_reopen` twice,
+and compares the X11 backend's private `windowHandle` before, hidden, and after.
+It fails if the handle is unavailable or zero. It checks a delegate veto with no
+restoration, then a delegate-owned explicit restoration of only that window,
+leaving a second, designated ineligible window hidden. Both callbacks return NO:
+the second callback itself orders the window front. This is not a test of default
+reopen restoration or a general eligibility algorithm. `isVisible` and backend
+handles are AppKit observations, not independent X server map-state evidence.
+
+To test without another prefix leak, use only an already-running **disposable,
+explicitly owned** guest session and display, after its owner approves: run its
+existing guest shell command on `/Volumes/SystemRoot` followed by the absolute
+path to `build/reopen-probe/window-probe`. Do not use `run.py`, which creates a
+new prefix; do not create, stop, or clean up any prefix for this probe. A zero
+exit and `WINDOW_REOPEN_RESULT` fields all equal to 1 (with matching nonzero
+handles) are required; a timeout or missing result is inconclusive. No guest run
+has been performed by this preparation, and no client behavior is established.
+
 ## Isolated preparation (no guest)
 
 `prepare.py` takes a **nonexistent** output directory outside the Nexus and
