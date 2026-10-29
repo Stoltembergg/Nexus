@@ -242,5 +242,51 @@ class ActionHelperTests(unittest.TestCase):
         self.assertNotIn('recover-hidden-riot-client', source)
 
 
+class MenuActionBusTests(unittest.TestCase):
+    """The whole host path on a private bus: layout, click and helper."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not all(shutil.which(name) for name in
+                   ('cc', 'pkg-config', 'dbus-run-session', 'gdbus')):
+            raise unittest.SkipTest('the private bus test tools are not installed')
+        if subprocess.run(['pkg-config', '--exists', 'gio-2.0']).returncode:
+            raise unittest.SkipTest('gio-2.0 development files are not installed')
+        cls.directory = tempfile.TemporaryDirectory(prefix='menu-actions-bus-')
+        cls.addClassCleanup(cls.directory.cleanup)
+        cls.library = Path(cls.directory.name) / 'status.so'
+        subprocess.run([sys.executable, str(ROOT / 'tools/build-status-notifier.py'),
+                        '--output', str(cls.library)], check=True, capture_output=True, text=True)
+        # The helper records what it was asked to do.
+        cls.record = Path(cls.directory.name) / 'actions.txt'
+        cls.helper = Path(cls.directory.name) / 'helper.sh'
+        cls.helper.write_text(f'#!/bin/sh\necho "$1" >> "{cls.record}"\n')
+        cls.helper.chmod(0o755)
+
+    def test_the_actions_are_in_the_menu_and_do_not_reach_the_guest(self):
+        result = subprocess.run(['dbus-run-session', '--', sys.executable,
+                                 str(ROOT / 'tests/fixtures/menu-actions-probe.py'),
+                                 str(self.library), str(self.helper)],
+                                text=True, capture_output=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        layout = values.get('LAYOUT', '')
+        self.assertIn('Sair', layout)
+        self.assertIn('Riot Games', layout)
+        self.assertIn('Configuracoes', layout)
+        # The guest already had a "Sair" entry, so the project did not add a
+        # second one with the same name.
+        self.assertEqual(layout.count('Sair'), 1)
+        self.assertEqual(values.get('EVENT_OK'), 'True')
+        self.assertEqual(values.get('GUEST_EVENT_OK'), 'True')
+        self.assertEqual(values.get('ORDINARY_EVENT_OK'), 'True')
+        # Only the ordinary entry reached the guest: the host owns the two
+        # actions. DARLING_STATUS_MENU_CLICK is 5.
+        kinds = [kind for kind in values.get('EVENTS', '').split(',') if kind]
+        self.assertEqual(kinds, ['5'])
+        self.assertTrue(self.record.is_file())
+        self.assertEqual(self.record.read_text().split(), ['reopen', 'quit'])
+
+
 if __name__ == '__main__':
     unittest.main()

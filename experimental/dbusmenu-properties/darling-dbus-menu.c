@@ -278,11 +278,8 @@ static void append_changes(DarlingDBusMenu *old, DarlingDBusMenu *next, gint id,
     guint nvalues = 0, nnames = 0;
     g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
     g_variant_builder_init(&names, G_VARIANT_TYPE("as"));
-    /* A new item has no previous properties: every property it exposes is
-     * published, so the panel does not have to guess the defaults. */
-    gboolean is_new = find(old, id) == NULL;
     for (guint k = 0; keys[k]; k++) {
-        GVariant *a = is_new ? NULL : property(old, id, keys[k]);
+        GVariant *a = property(old, id, keys[k]);
         GVariant *b = property(next, id, keys[k]);
         if (b) g_variant_ref_sink(b);
         if (b && (!a || !g_variant_equal(a, b))) {
@@ -354,10 +351,12 @@ int darling_menu_set(DarlingDBusMenu *menu, const DarlingStatusMenuEntry *entrie
     g_variant_builder_init(&updated, G_VARIANT_TYPE("a(ia{sv})"));
     g_variant_builder_init(&removed, G_VARIANT_TYPE("a(ias)"));
     append_changes(menu, &next, 0, &updated, &removed);
-    /* Stable ordering: root first, then every item of the new snapshot in
-     * its own order. */
+    /* Stable ordering: root first, then surviving IDs in new snapshot order.
+     * Items that are new are announced by LayoutUpdated: the panel reads
+     * their properties from the layout it fetches again. */
     for (guint i = 0; i < total; i++)
-        append_changes(menu, &next, copy[i].id, &updated, &removed);
+        if (find(menu, copy[i].id))
+            append_changes(menu, &next, copy[i].id, &updated, &removed);
     GVariant *updates = g_variant_ref_sink(g_variant_builder_end(&updated));
     GVariant *removals = g_variant_ref_sink(g_variant_builder_end(&removed));
     free_entries(menu->entries, menu->count);
