@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 import subprocess
 import sys
@@ -154,13 +155,36 @@ def main():
             dialog.format_secondary_text(str(error))
             dialog.run()
             dialog.destroy()
+    def start_client(_entry):
+        env = prefix_environment(os.environ.copy())
+        def launch():
+            try:
+                result = subprocess.run([str(ROOT / 'scripts/riot-launcher.sh'), 'start'],
+                                        cwd=ROOT, env=env, capture_output=True, text=True)
+                success = result.returncode == 0
+                message = ('O servidor Darling iniciou. A janela do cliente pode demorar a aparecer.'
+                           if success else 'Não foi possível iniciar. Verifique se já existe uma sessão ativa.')
+            except (OSError, subprocess.SubprocessError) as error:
+                success, message = False, str(error)
+            def report():
+                dialog = Gtk.MessageDialog(message_type=(Gtk.MessageType.INFO if success else Gtk.MessageType.ERROR),
+                    buttons=Gtk.ButtonsType.CLOSE, text=('Inicialização solicitada' if success else
+                                                         'Não foi possível iniciar o Riot Client'))
+                dialog.format_secondary_text(message)
+                dialog.connect('response', lambda window, _response: window.destroy())
+                dialog.show()
+                return GLib.SOURCE_REMOVE
+            GLib.idle_add(report)
+        threading.Thread(target=launch, daemon=True).start()
     add('Abrir launcher', 1, open_gui)
     add('Riot Games', 2, lambda _entry: action('reopen'))
+    add('Iniciar Riot Client', 4, start_client)
     menu.append(Gtk.SeparatorMenuItem())
     add('Sair', 3, lambda _entry: action('quit'))
     menu.show_all()
-    entries = (MenuEntry * 3)(MenuEntry(1, 0, b'Abrir launcher', 3, 0),
+    entries = (MenuEntry * 4)(MenuEntry(1, 0, b'Abrir launcher', 3, 0),
                               MenuEntry(2, 0, b'Riot Games', 3, 0),
+                              MenuEntry(4, 0, b'Iniciar Riot Client', 3, 0),
                               MenuEntry(3, 0, b'Sair', 3, 0))
     if not lib.DarlingStatusNotifierSetMenu(item, entries, len(entries)):
         lib.DarlingStatusNotifierDestroy(item)

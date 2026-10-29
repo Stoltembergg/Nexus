@@ -193,7 +193,8 @@ MENU_ITEM_INIT init=1 new=1 objc_alloc_init=1 explicit_disable=1 separator=1 des
 ## Host-side menu actions
 
 Opening the graphical launcher also starts a separate Nexus host tray process.
-Its menu offers **Abrir launcher**, **Riot Games** and **Sair**. It builds the
+Its menu offers **Abrir launcher**, **Iniciar Riot Client**, **Riot Games** and
+**Sair**. Starting refuses to interrupt an existing session. It builds the
 project's native StatusNotifier transport on demand and needs GTK 3, a session
 watcher and native build prerequisites. The existing experimental guest tray
 is not suppressed, so both icons can appear. The host tray does not recreate

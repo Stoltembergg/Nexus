@@ -20,8 +20,9 @@ class TraySourceTests(unittest.TestCase):
     def test_tray_menu_uses_launcher_and_scoped_actions(self):
         source = (ROOT / 'scripts/riot-launcher-tray.py').read_text()
         ast.parse(source)
-        for text in ('Abrir launcher', 'Riot Games', 'Sair', 'riot-launcher-gui.py',
+        for text in ('Abrir launcher', 'Riot Games', 'Iniciar Riot Client', 'Sair', 'riot-launcher-gui.py',
                      "'reopen'", "'quit'", 'darling-launcher',
+                     'scripts/riot-launcher.sh', "'start'", 'threading.Thread', 'GLib.idle_add',
                      'DarlingStatusNotifierCreate', 'DarlingStatusNotifierPoll',
                      'fcntl.flock'):
             self.assertIn(text, source)
