@@ -53,10 +53,43 @@ def log(message):
         pass
 
 
-def session_prefix():
+def parent_loader_socket(proc_root):
+    """Read only the immediate parent's socket, failing closed on races."""
+    pid = os.getppid()
+    if pid <= 1:
+        raise SystemExit('session prefix is not available')
+    proc = proc_root / str(pid)
+    try:
+        fd = os.open(proc, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            before = os.fstat(fd)
+            if before.st_uid != os.getuid():
+                raise SystemExit('parent process has a different owner')
+            env_fd = os.open('environ', os.O_RDONLY | os.O_CLOEXEC, dir_fd=fd)
+            with os.fdopen(env_fd, 'rb') as handle:
+                raw = handle.read()
+            after = os.stat(proc)
+            if (os.getppid() != pid or before.st_uid != after.st_uid or
+                    (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
+                raise SystemExit('parent process changed during inspection')
+        finally:
+            os.close(fd)
+    except OSError:
+        raise SystemExit('parent process is not available') from None
+    entries = [item.split(b'=', 1) for item in raw.split(b'\0') if b'=' in item]
+    sockets = [value for key, value in entries if key == SOCK_VARIABLE]
+    prefixes = [value for key, value in entries if key == b'DPREFIX']
+    if len(sockets) != 1 or len(prefixes) > 1:
+        raise SystemExit('session prefix is not available')
+    return os.fsdecode(sockets[0]), os.fsdecode(prefixes[0]) if prefixes else None
+
+
+def session_prefix(proc_root=Path('/proc')):
     """Identify the session explicitly, never from the guest's HOME."""
     socket = os.environ.get(os.fsdecode(SOCK_VARIABLE))
     value = os.environ.get('DPREFIX')
+    if socket is None and value is None:
+        socket, value = parent_loader_socket(proc_root)
     prefix = None
     if value is not None:
         path = Path(value)

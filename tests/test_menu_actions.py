@@ -163,6 +163,42 @@ class ActionHelperTests(unittest.TestCase):
         with patch.dict(os.environ, {'DPREFIX': str(self.prefix)}, clear=True):
             self.assertEqual(self.module.session_prefix(), self.prefix.resolve())
 
+    def test_parent_socket_fallback_and_conflicts(self):
+        root = self.base / 'proc'
+        proc = self.fake_process(root, 42, 'guest', str(self.socket))
+        with patch.dict(os.environ, {'HOME': '/guest/home'}, clear=True), \
+                patch.object(self.module.os, 'getppid', return_value=42):
+            self.assertEqual(self.module.session_prefix(root), self.prefix.resolve())
+            for extra in (b'\0DPREFIX=/other', b'\0__mldr_sockpath=/other/.darlingserver.sock'):
+                (proc / 'environ').write_bytes(b'__mldr_sockpath=' + os.fsencode(self.socket) + extra)
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix(root)
+            for socket in (b'relative/.darlingserver.sock', b'/tmp/wrong.sock',
+                           os.fsencode(self.socket) + b'/'):
+                (proc / 'environ').write_bytes(b'__mldr_sockpath=' + socket)
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix(root)
+
+    def test_parent_fallback_fails_closed(self):
+        root = self.base / 'proc'
+        proc = self.fake_process(root, 42, 'guest', str(self.socket))
+        with patch.dict(os.environ, {'HOME': str(self.prefix)}, clear=True):
+            with patch.object(self.module.os, 'getppid', return_value=42), \
+                    patch.object(self.module.os, 'getuid', return_value=os.getuid() + 1):
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix(root)
+            with patch.object(self.module.os, 'getppid', side_effect=[42, 43]):
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix(root)
+            (proc / 'environ').unlink()
+            with patch.object(self.module.os, 'getppid', return_value=42):
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix(root)
+            shutil.rmtree(proc)
+            with patch.object(self.module.os, 'getppid', return_value=42):
+                with self.assertRaises(SystemExit):
+                    self.module.session_prefix(root)
+
     def test_a_match_of_this_prefix_is_detected(self):
         proc_root = self.base / 'proc'
         proc_root.mkdir()
