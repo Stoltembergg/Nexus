@@ -201,6 +201,16 @@ def main():
     if not LAUNCHER.is_file():
         print(f"launcher not found: {LAUNCHER}", file=sys.stderr)
         return 1
+    # Keep one host-side launcher icon available while the GUI is in use.
+    # The tray script takes a per-user lock, so multiple GUI windows do not
+    # create duplicate items. Missing optional transport fails independently.
+    tray = ROOT / "scripts/riot-launcher-tray.py"
+    if tray.is_file():
+        try:
+            subprocess.Popen([sys.executable, str(tray)], cwd=ROOT,
+                             start_new_session=True)
+        except OSError:
+            pass
     window = LauncherWindow()
     window.connect("destroy", Gtk.main_quit)
     Gtk.main()
