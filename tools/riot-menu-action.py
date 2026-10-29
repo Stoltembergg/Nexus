@@ -38,6 +38,7 @@ CLIENT_CLASSES = frozenset(('riot client', 'riotclientservices'))
 SOCK_VARIABLE = b'__mldr_sockpath'
 SOCK_NAME = '.darlingserver.sock'
 STOP_WAIT_SECONDS = 30
+REOPEN_POLL_ATTEMPTS = 10
 LOG_FILE = Path("@PROJECT_ROOT@") / 'build' / 'riot-menu-action.log'
 
 
@@ -461,24 +462,47 @@ class X11:
         self.lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self.lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
         error_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
-        self._error_handler = error_type(lambda _display, _event: 0)
-        self.lib.XSetErrorHandler.argtypes = [error_type]
+        self._x_error = False
+        def record_error(_display, _event):
+            self._x_error = True
+            return 0
+        self._error_handler = error_type(record_error)
+        self.lib.XSetErrorHandler.argtypes = [ctypes.c_void_p]
         self.lib.XSetErrorHandler.restype = ctypes.c_void_p
-        self.lib.XSetErrorHandler(self._error_handler)
+        self._previous_handler = self.lib.XSetErrorHandler(ctypes.cast(self._error_handler, ctypes.c_void_p))
         self.display = self.lib.XOpenDisplay(None)
         if not self.display:
+            self.lib.XSetErrorHandler(self._previous_handler)
             raise RuntimeError('cannot open the display')
 
     def show(self, window):
         """Map, raise and focus a window."""
+        self._x_error = False
         self.lib.XMapRaised(self.display, window)
         self.lib.XRaiseWindow(self.display, window)
         self.lib.XSync(self.display, 0)
+        if self._x_error:
+            raise RuntimeError('X error while mapping window')
         self.lib.XSetInputFocus(self.display, window, 1, 0)
         self.lib.XSync(self.display, 0)
+        if self._x_error:
+            raise RuntimeError('X error while focusing window')
 
     def close(self):
         self.lib.XCloseDisplay(self.display)
+        self.lib.XSetErrorHandler(self._previous_handler)
+
+
+def window_viewable(window, prefix, xres):
+    """Require a live, scoped X resource and an unambiguous viewable state."""
+    if not belongs_to_prefix(window, prefix, xres=xres):
+        return False
+    info = capture(['xwininfo', '-id', window], timeout=2)
+    identity = re.search(r'^xwininfo: Window id: (0x[0-9a-fA-F]+)(?:\s|$)', info, re.M)
+    states = re.findall(r'^\s*Map State:\s*(\S+)\s*$', info, re.M)
+    return bool(identity and int(identity.group(1), 16) == int(window, 16)
+                and states == ['IsViewable']
+                and belongs_to_prefix(window, prefix, xres=xres))
 
 
 def reopen_action(prefix):
@@ -491,27 +515,46 @@ def reopen_action(prefix):
         return 1
     try:
         windows = client_windows(prefix, xres=xres)
+        if not windows:
+            log('no identifiable main Riot Client window of this prefix found')
+            notify('Riot Client', 'A janela principal do Riot Client não foi identificada. '
+                   'A sessão não foi reiniciada.')
+            return 1
+        try:
+            x11 = X11()
+        except (OSError, RuntimeError, AttributeError) as error:
+            log(f'the display cannot be used: {error}')
+            notify('Riot Client', 'A janela do Riot Client não pôde ser aberta.')
+            return 1
+        try:
+            for window in windows:
+                if not belongs_to_prefix(window, prefix, xres=xres):
+                    continue
+                try:
+                    x11.show(int(window, 16))
+                except (OSError, RuntimeError, ValueError) as error:
+                    log(f'cannot map or focus {window}: {error}')
+                    continue
+                consecutive = 0
+                for attempt in range(REOPEN_POLL_ATTEMPTS):
+                    if window_viewable(window, prefix, xres):
+                        consecutive += 1
+                        if consecutive >= 2:
+                            log(f'the client window {window} is viewable')
+                            notify('Riot Client', 'O Riot Client foi aberto.')
+                            return 0
+                    else:
+                        consecutive = 0
+                    if attempt + 1 < REOPEN_POLL_ATTEMPTS:
+                        time.sleep(0.3)
+        finally:
+            x11.close()
     finally:
         xres.close()
-    if not windows:
-        log('no identifiable main Riot Client window of this prefix found')
-        notify('Riot Client', 'A janela principal do Riot Client não foi identificada. '
-               'A sessão não foi reiniciada.')
-        return 1
-    try:
-        x11 = X11()
-    except (OSError, RuntimeError) as error:
-        log(f'the display cannot be used: {error}')
-        notify('Riot Client', 'A janela do Riot Client não pôde ser aberta.')
-        return 1
-    try:
-        for window in windows:
-            x11.show(int(window, 16))
-            log(f'the client window {window} was mapped and focused')
-    finally:
-        x11.close()
-    notify('Riot Client', 'O Riot Client foi aberto.')
-    return 0
+    log('could not confirm a viewable client window')
+    notify('Riot Client', 'Não foi possível confirmar que a janela do Riot Client está visível. '
+           'A sessão não foi reiniciada.')
+    return 1
 
 
 def main():

@@ -482,6 +482,55 @@ class ActionHelperTests(unittest.TestCase):
         self.module.notify = lambda *args: None
         self.assertEqual(self.module.reopen_action(self.prefix), 1)
 
+    def test_reopen_requires_scoped_viewable_window(self):
+        module = self.module
+        module.REOPEN_POLL_ATTEMPTS = 3
+        messages = []
+        module.notify = lambda summary, body: messages.append(body)
+        module.client_windows = lambda prefix, xres=None: ['0xe00002']
+        class Resolver:
+            def close(self): pass
+        class FakeX:
+            error = False
+            def show(self, xid):
+                self.xid = xid
+                if self.error:
+                    raise RuntimeError('BadWindow')
+            def close(self): pass
+        x = FakeX()
+        module.XRes = Resolver
+        module.X11 = lambda: x
+        with patch.object(module, 'belongs_to_prefix', return_value=True), \
+                patch.object(module.time, 'sleep') as sleep, \
+                patch.object(module.subprocess, 'check_output') as output:
+            output.side_effect = ['xwininfo: Window id: 0xe00002 "Riot"\n  Map State: IsUnMapped\n',
+                                  'xwininfo: Window id: 0xe00002 "Riot"\n  Map State: IsViewable\n',
+                                  'xwininfo: Window id: 0xe00002 "Riot"\n  Map State: IsViewable\n']
+            self.assertEqual(module.reopen_action(self.prefix), 0)
+            self.assertEqual(sleep.call_args_list, [unittest.mock.call(0.3), unittest.mock.call(0.3)])
+            self.assertEqual(x.xid, 0xe00002)
+            self.assertIn('foi aberto', messages[-1])
+            output.side_effect = ['xwininfo: Window id: 0xe00002 "Riot"\n  Map State: IsViewable\n',
+                                  subprocess.CalledProcessError(1, 'xwininfo'),
+                                  subprocess.CalledProcessError(1, 'xwininfo')]
+            self.assertEqual(module.reopen_action(self.prefix), 1)
+            self.assertNotIn('foi aberto', messages[-1])
+            output.side_effect = subprocess.CalledProcessError(1, 'xwininfo')
+            self.assertEqual(module.reopen_action(self.prefix), 1)
+            self.assertNotIn('foi aberto', messages[-1])
+            output.side_effect = None
+            output.return_value = 'xwininfo: Window id: 0xe00002 "Riot"\n  Map State: IsUnMapped\n'
+            self.assertEqual(module.reopen_action(self.prefix), 1)
+            x.error = True
+            self.assertEqual(module.reopen_action(self.prefix), 1)
+        x.error = False
+        with patch.object(module, 'belongs_to_prefix', side_effect=[True, False, False, False]), \
+                patch.object(module.time, 'sleep'), \
+                patch.object(module.subprocess, 'check_output') as output:
+            self.assertEqual(module.reopen_action(self.prefix), 1)
+            output.assert_not_called()
+            self.assertNotIn('foi aberto', messages[-1])
+
     def test_quit_asks_before_a_match_ends(self):
         asked = []
         self.module.game_running = lambda prefix, proc_root=None: True
