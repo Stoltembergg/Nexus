@@ -105,7 +105,14 @@ class ControlledProbe:
     def _wait_log(self, pattern, offset):
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
-            text = self.log.read_text(errors='replace')[offset:]
+            full_text = self.log.read_text(errors='replace')
+            # The launcher includes a potentially sensitive socket path in this
+            # diagnostic. Never copy the line into the reported error.
+            failure = re.search(r'^Error connecting to shellspawn in the container \([^\n]*\): ([^\n]*)', full_text, re.M)
+            if failure:
+                reason = (' (No such file or directory)' if failure.group(1).strip() == 'No such file or directory' else '')
+                self._error('Darling shellspawn connection failed' + reason)
+            text = full_text[offset:]
             match = re.search(pattern, text, re.M)
             if match:
                 return match

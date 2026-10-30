@@ -104,6 +104,25 @@ class ControlledTests(unittest.TestCase):
         probe.process.kill.assert_not_called()
         probe.process.terminate.assert_not_called()
 
+    def test_shellspawn_failure_beats_ready_and_redacts_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = controlled.ControlledProbe('/other', timeout=15)
+            probe.prefix = Path(directory)
+            probe.log = probe.prefix / 'log'
+            probe.log.write_text('Error connecting to shellspawn in the container (/secret/socket): No such file or directory\nREADY 42\n')
+            probe.process = mock.Mock()
+            probe.process.poll.return_value = None
+            with mock.patch.object(controlled.time, 'sleep') as sleep:
+                with self.assertRaises(controlled.ProbeError) as error:
+                    probe._wait_log(r'^READY ([1-9][0-9]*)$', 0)
+            self.assertIn('shellspawn connection failed (No such file or directory)', str(error.exception))
+            self.assertIn('prefix retained: ' + directory, str(error.exception))
+            self.assertNotIn('/secret/socket', str(error.exception))
+            self.assertEqual(probe.state, 'failed')
+            sleep.assert_not_called()
+            probe.process.kill.assert_not_called()
+            probe.process.terminate.assert_not_called()
+
     def test_failed_reopen_then_cooperative_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             probe = controlled.ControlledProbe('/other')
