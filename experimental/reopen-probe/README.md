@@ -1,5 +1,40 @@
 # Experimental reopen probe (opt-in)
 
+## Controlled physical-close fixture (host API only)
+
+`build-controlled.py` builds the independent neutral fixture without starting a
+guest. `controlled.py` has no CLI or import side effects. A future host may
+explicitly construct `ControlledProbe(configured_prefix)` with its actual
+configured prefix and call `start()`, `observe()`, `reopen()`, and `stop()`.
+The user must physically close the fixture's own window with its X before
+reopen; no input is synthesized. The fixture deliberately intercepts the close
+and hides its window; reopen invokes private `_reopen` and its delegate restores
+that window. This does not establish real client behavior or default AppKit policy.
+Observe the returned log and xwininfo map state before drawing conclusions.
+
+The host must provide the real configured prefix, not a guessed path. The API
+also rejects overlap with an inherited DPREFIX. It requires NoNewPrivs=0, a
+display, and an existing current-user-owned `/tmp/opencode` with mode 0700;
+otherwise it uses a validated current-user-owned `XDG_RUNTIME_DIR` with mode 0700.
+It creates a short-named private child there, sanitizes the child environment,
+and retains that child on every outcome. The control file uses a random nonce and
+monotonic sequence. No server shutdown or forced cleanup is available: stop only
+requests the fixture to exit. Timeouts and failures may leave guest processes
+running and always report the retained path. XID and close logs are observations,
+not cryptographic proof of physical input; another X client can forge events.
+The runner does not modify directory permissions to satisfy its preconditions.
+It requires the initial XID to be IsViewable, the user-closed window to be
+IsUnMapped, and exactly one reopen callback followed by IsViewable for the same
+XID. Any missing observation is inconclusive and retains the prefix. PID/starttime
+is not used as ownership proof: the runner never signals or shuts down a process.
+After an error, `stop()` may still send a cooperative nonce-authenticated request
+if the spawned process is alive, including after startup failed after spawning it.
+Stop permits a sequence gap because an earlier command may have timed out before
+being consumed; reopen still requires the next sequence. A stop timeout is
+inconclusive, retains the prefix, and sends no signal. Fixture exit does not
+establish that the separate guest server stopped.
+Tests: `python3 -m unittest discover -s tests -p test_controlled_reopen.py`.
+
 ## Owned window restoration probe
 
 `python3 experimental/reopen-probe/build-window.py` builds a separate binary;
