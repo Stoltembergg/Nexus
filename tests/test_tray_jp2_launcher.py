@@ -82,13 +82,12 @@ class ExperimentTests(unittest.TestCase):
             root = Path(tmp)
             (root / 'scripts').mkdir()
             shutil.copy(ROOT / 'scripts/riot-launcher.sh', root / 'scripts/riot-launcher.sh')
-            fakebin = root / 'bin'
-            fakebin.mkdir()
-            python = fakebin / 'python3'
-            python.write_text('#!/bin/sh\necho 12345\n')
-            python.chmod(0o755)
+            shutil.copy(ROOT / 'scripts/riot-launcher-lock.py', root / 'scripts/riot-launcher-lock.py')
+            (root / 'scripts/nix-stop.py').write_text('def prefix_server(prefix):\n    return 12345\n')
+            runtime = root / 'runtime'
+            runtime.mkdir(mode=0o700)
             result = subprocess.run(['bash', str(root / 'scripts/riot-launcher.sh'), 'start'],
-                                    env=dict(os.environ, PATH=str(fakebin) + ':' + os.environ['PATH'], DPREFIX=str(root / 'prefix')),
+                                    env=dict(os.environ, XDG_RUNTIME_DIR=str(runtime), DPREFIX=str(root / 'prefix')),
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('already running', result.stdout)

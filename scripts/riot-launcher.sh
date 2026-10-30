@@ -12,8 +12,6 @@ REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 LOG_FILE="$REPO_ROOT/build/riot-launcher.log"
 PREFIX="${DPREFIX:-$HOME/.darling}"
 
-mkdir -p "$REPO_ROOT/build"
-
 export DPREFIX="$PREFIX"
 export RCLOL_GAMEMODE="${RCLOL_GAMEMODE:-0}"
 export RCLOL_REGION="${RCLOL_REGION:-BR}"
@@ -116,13 +114,22 @@ status_client() {
 }
 
 case "${1:-}" in
-    start)
+    start|stop|restart)
+        # The supervisor holds the lock; the operational shell and its children
+        # never inherit its descriptor. The internal action is not a security
+        # boundary against the invoking user.
+        exec python3 "$REPO_ROOT/scripts/riot-launcher-lock.py" "$PREFIX" "$0" "$1"
+        ;;
+    --locked-start)
+        mkdir -p "$REPO_ROOT/build"
         start_client
         ;;
-    stop)
+    --locked-stop)
+        mkdir -p "$REPO_ROOT/build"
         stop_darling
         ;;
-    restart)
+    --locked-restart)
+        mkdir -p "$REPO_ROOT/build"
         stop_darling
         sleep 2
         start_client
