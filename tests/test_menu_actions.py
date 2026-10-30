@@ -109,6 +109,11 @@ class ActionHelperTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='riot-menu-action-')
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
+        runtime = self.base / 'runtime'
+        runtime.mkdir(mode=0o700)
+        env = patch.dict(os.environ, {'XDG_RUNTIME_DIR': str(runtime)})
+        env.start()
+        self.addCleanup(env.stop)
         self.prefix = self.base / '.darling'
         self.prefix.mkdir()
         self.socket = self.prefix / '.darlingserver.sock'

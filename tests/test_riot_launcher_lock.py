@@ -89,6 +89,59 @@ class LauncherLockTests(unittest.TestCase):
         self.stub.write_text('exit 0\n')
         self.assertEqual(self.invoke().returncode, 0)
 
+    def test_launcher_and_quit_exclude_each_other_and_release(self):
+        action = ROOT / 'tools/riot-menu-action.py'
+        script = '''
+import importlib.util, os, pathlib, sys, time
+spec = importlib.util.spec_from_file_location("menu", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.log = lambda msg: None
+m.notify = lambda *args: pathlib.Path(os.environ["NOTICE"]).write_text(args[1])
+def inspect(prefix):
+    pathlib.Path(os.environ["QUIT_MARKER"]).touch()
+    while not pathlib.Path(os.environ["QUIT_RELEASE"]).exists(): time.sleep(.01)
+    return False
+m.game_running = inspect
+m.stop_session = lambda prefix: True
+sys.exit(m.quit_action(pathlib.Path(sys.argv[2])))
+'''
+        notice = self.root / 'notice'
+        marker = self.root / 'quit-marker'
+        release = self.root / 'quit-release'
+        env = dict(self.env, NOTICE=str(notice), QUIT_MARKER=str(marker), QUIT_RELEASE=str(release))
+        cmd = ['python3', '-c', script, str(action)]
+        launcher = subprocess.Popen(['python3', str(HELPER), str(self.prefix), str(self.stub), 'start'], env=env)
+        try:
+            for _ in range(200):
+                if self.marker.exists(): break
+                time.sleep(.01)
+            self.assertTrue(self.marker.exists())
+            result = subprocess.run(cmd + [str(self.prefix)], env=env, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(notice.exists())
+            self.assertFalse(marker.exists())
+            self.release.touch()
+            self.assertEqual(launcher.wait(timeout=5), 0)
+            quit_proc = subprocess.Popen(cmd + [str(self.prefix)], env=env)
+            try:
+                for _ in range(200):
+                    if marker.exists(): break
+                    time.sleep(.01)
+                self.assertTrue(marker.exists())
+                self.assertNotEqual(self.invoke().returncode, 0)
+                other = self.root / 'other'
+                other.mkdir()
+                self.assertEqual(self.invoke(other).returncode, 0)
+                release.touch()
+                self.assertEqual(quit_proc.wait(timeout=5), 0)
+                self.assertEqual(self.invoke().returncode, 0)
+            finally:
+                release.touch()
+                quit_proc.wait(timeout=5)
+        finally:
+            self.release.touch()
+            launcher.wait(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()

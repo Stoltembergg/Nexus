@@ -25,6 +25,7 @@ It never reads or writes account data, and it never touches the client binaries.
 
 import argparse
 import ctypes
+import importlib.util
 import os
 import re
 import shutil
@@ -285,6 +286,29 @@ def stop_session(prefix, proc_root=Path('/proc')):
 
 def quit_action(prefix):
     """End every process of the game tree by ending this session."""
+    # Rendered tools live under build/runtime; the lock module remains in the
+    # source checkout's scripts directory. Unrendered source is testable too.
+    root = Path('@PROJECT_ROOT@')
+    if str(root) == '@' + 'PROJECT_ROOT@':
+        root = Path(__file__).resolve().parents[1]
+    try:
+        spec = importlib.util.spec_from_file_location(
+            'riot_operation_lock', root / 'scripts' / 'riot_operation_lock.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        lock = module.operation_lock(prefix)
+        lock.__enter__()
+    except (OSError, ValueError, ImportError) as error:
+        log(f'cannot acquire session lock: {error}')
+        notify('Riot Client', 'Outra operação pode estar em andamento ou a trava está indisponível. A sessão não foi alterada.')
+        return 1
+    try:
+        return _quit_locked(prefix)
+    finally:
+        lock.__exit__(*sys.exc_info())
+
+
+def _quit_locked(prefix):
     match = game_running(prefix)
     if match is not False:
         answer = confirm('Encerrar a partida?',

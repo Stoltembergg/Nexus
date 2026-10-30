@@ -83,6 +83,7 @@ class ExperimentTests(unittest.TestCase):
             (root / 'scripts').mkdir()
             shutil.copy(ROOT / 'scripts/riot-launcher.sh', root / 'scripts/riot-launcher.sh')
             shutil.copy(ROOT / 'scripts/riot-launcher-lock.py', root / 'scripts/riot-launcher-lock.py')
+            shutil.copy(ROOT / 'scripts/riot_operation_lock.py', root / 'scripts/riot_operation_lock.py')
             (root / 'scripts/nix-stop.py').write_text('def prefix_server(prefix):\n    return 12345\n')
             runtime = root / 'runtime'
             runtime.mkdir(mode=0o700)
@@ -91,6 +92,8 @@ class ExperimentTests(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('already running', result.stdout)
+            self.assertEqual(result.stderr, '')
+            self.assertEqual(len(list(runtime.glob('riot-launcher-*.lock'))), 1)
             self.assertFalse((root / 'build/riot-runtime.log').exists())
 
     def test_install_never_overwrites_foreign_entries(self):
