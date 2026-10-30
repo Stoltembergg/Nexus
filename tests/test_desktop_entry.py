@@ -41,6 +41,11 @@ class DesktopEntryTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.home = self.root / 'home'
         self.home.mkdir()
+        self.bin = self.root / 'bin'
+        self.bin.mkdir()
+        self.gio = self.bin / 'gio'
+        self.gio.write_text('#!/bin/sh\nprintf "%s\\n" "$2" >> "$HOME/gio.log"\nexit "${GIO_STATUS:-0}"\n')
+        self.gio.chmod(0o755)
 
     def project(self, name='project'):
         project = self.root / name
@@ -52,13 +57,72 @@ class DesktopEntryTests(unittest.TestCase):
             shutil.copy2(ROOT / f'assets/{icon}.svg', project / f'assets/{icon}.svg')
         return project
 
-    def install(self, project):
+    def install(self, project, **extra_env):
         script = project / 'desktop-entry.py'
         script.write_text(HELPER.read_text()
                           .replace('@PROJECT_ROOT@', str(project))
                           .replace('@HOST_HOME@', str(self.home)))
         return subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
-                              env=dict(os.environ, HOME=str(self.home)), check=False)
+                              env=dict(os.environ, HOME=str(self.home), PATH=str(self.bin) + os.pathsep + os.environ['PATH'], **extra_env), check=False)
+
+    def test_links_and_fallback_collision_are_preserved(self):
+        project = self.project()
+        apps = self.home / '.local/share/applications'
+        apps.mkdir(parents=True)
+        victim = self.root / 'victim'
+        victim.write_text('X-Nexus-Desktop-Entry=1\nforeign')
+        preferred = apps / 'darling-launcher.desktop'
+        preferred.symlink_to(victim)
+        fallback = apps / 'nexus-darling-launcher.desktop'
+        os.link(victim, fallback)
+        result = self.install(project)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(preferred.is_symlink())
+        self.assertEqual(victim.read_text(), 'X-Nexus-Desktop-Entry=1\nforeign')
+        self.assertEqual(fallback.stat().st_ino, victim.stat().st_ino)
+
+    def test_fallback_and_gio_final_path(self):
+        project = self.project()
+        apps = self.home / '.local/share/applications'
+        apps.mkdir(parents=True)
+        self.entry().write_text('foreign')
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fallback = apps / 'nexus-darling-launcher.desktop'
+        self.assertEqual(self.entry().read_text(), 'foreign')
+        self.assertTrue(fallback.stat().st_mode & 0o111)
+        self.assertIn(str(fallback), (self.home / 'gio.log').read_text().splitlines())
+        self.assertEqual(self.install(project).returncode, 0)
+
+    def test_gio_failure_is_reported(self):
+        result = self.install(self.project(), GIO_STATUS='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('installed successfully', result.stdout)
+        self.assertIn(str(self.entry()), (self.home / 'gio.log').read_text())
+        self.assertTrue(self.entry().stat().st_mode & 0o111)
+
+    def test_missing_gio_warns_without_claiming_trust(self):
+        project = self.project()
+        script = project / 'desktop-entry.py'
+        script.write_text(HELPER.read_text().replace('@PROJECT_ROOT@', str(project)).replace('@HOST_HOME@', str(self.home)))
+        self.gio.unlink()
+        result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                                env=dict(os.environ, HOME=str(self.home), PATH=str(self.bin)), check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('gio unavailable; could not mark launcher as trusted', result.stderr)
+        self.assertIn(str(self.entry()), result.stderr)
+        self.assertTrue(self.entry().stat().st_mode & 0o111)
+
+    def test_concurrent_installers(self):
+        project = self.project()
+        script = project / 'desktop-entry.py'
+        script.write_text(HELPER.read_text().replace('@PROJECT_ROOT@', str(project)).replace('@HOST_HOME@', str(self.home)))
+        env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin) + os.pathsep + os.environ['PATH'])
+        processes = [subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) for _ in range(3)]
+        for process in processes:
+            _, stderr = process.communicate()
+            self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(len(list((self.home / '.local/share/applications').glob('*.desktop'))), 4)
 
     def entry(self):
         return self.home / '.local/share/applications/darling-launcher.desktop'

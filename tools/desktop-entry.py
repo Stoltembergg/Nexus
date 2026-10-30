@@ -11,9 +11,12 @@ artwork. A user who wants different artwork can drop a PNG or SVG with a
 known name into their own icon directory and the installer prefers it.
 """
 import os
+import fcntl
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path("@PROJECT_ROOT@")
@@ -221,13 +224,13 @@ def install_icon(entry, scalable_dir, png_dir) -> str:
         # scalable one. The icon name stays the same either way, so the
         # desktop entry never has to be edited.
         target_dir = png_dir if supplied.suffix == ".png" else scalable_dir
-        shutil.copyfile(supplied, target_dir / f"{name}{supplied.suffix}")
+        copy_icon(supplied, target_dir / f"{name}{supplied.suffix}")
         return name
 
     source = PROJECT_ROOT / entry["asset"]
     if not source.is_file():
         raise SystemExit(f"launcher icon is missing: expected {entry['asset']}")
-    shutil.copyfile(source, scalable_dir / f"{name}.svg")
+    copy_icon(source, scalable_dir / f"{name}.svg")
     return name
 
 
@@ -268,21 +271,58 @@ def target_name(entry, directory: Path) -> Path:
     preferred = directory / f"{entry['id']}.desktop"
     if not (preferred.is_symlink() or preferred.exists()):
         return preferred
-    if entry_owned(preferred):
+    if safe_owned_entry(preferred):
         return preferred
-    return directory / f"nexus-{entry['id']}.desktop"
+    fallback = directory / f"nexus-{entry['id']}.desktop"
+    if os.path.lexists(fallback) and not safe_owned_entry(fallback):
+        raise FileExistsError(f"foreign launcher collision: {fallback}")
+    return fallback
+
+
+def safe_owned_entry(path: Path) -> bool:
+    try:
+        info = path.lstat()
+        return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and entry_owned(path)
+    except OSError:
+        return False
 
 
 def write_entry(path: Path, content: str) -> None:
     """Write a desktop entry and mark it as trusted for the desktop."""
-    path.write_text(content)
-    os.chmod(path, 0o755)
+    fd, temporary = tempfile.mkstemp(prefix='.nexus-entry-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(content)
+            os.fchmod(stream.fileno(), 0o755)
+        if os.path.lexists(path):
+            if not safe_owned_entry(path):
+                raise FileExistsError(f"foreign launcher collision: {path}")
+            os.replace(temporary, path)
+        else:
+            # link is an atomic no-replace publication, including dangling links.
+            os.link(temporary, path)
+    finally:
+        os.unlink(temporary) if os.path.exists(temporary) else None
     gio = shutil.which("gio")
     if gio:
-        subprocess.run([gio, "set", str(path), "metadata::trusted", "true"], check=False)
+        subprocess.run([gio, "set", str(path), "metadata::trusted", "true"], check=True)
+    else:
+        print(f"Warning: gio unavailable; could not mark launcher as trusted: {path}", file=sys.stderr)
 
 
-def main():
+def copy_icon(source: Path, target: Path) -> None:
+    """Publish without writing through an existing symlink or hardlink."""
+    fd, temporary = tempfile.mkstemp(prefix='.nexus-icon-', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream, source.open('rb') as src:
+            shutil.copyfileobj(src, stream)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def install():
     icons_base = HOST_HOME / ".local/share/icons"
     apps_base = HOST_HOME / ".local/share/applications"
 
@@ -341,8 +381,8 @@ def main():
     launcher_png = PROJECT_ROOT / "darling-lol.png"
     if not launcher_svg.is_file() or not launcher_png.is_file():
         raise SystemExit("launcher icon is missing: expected darling-lol.svg and darling-lol.png")
-    shutil.copyfile(launcher_svg, scalable_dir / "darling-launcher.svg")
-    shutil.copyfile(launcher_png, png_dir / "darling-launcher.png")
+    copy_icon(launcher_svg, scalable_dir / "darling-launcher.svg")
+    copy_icon(launcher_png, png_dir / "darling-launcher.png")
 
     for entry in ENTRIES:
         icon_name = install_icon(entry, scalable_dir, png_dir)
@@ -367,6 +407,24 @@ def main():
         subprocess.run([update_icons, "-f", "-t", str(icons_base / "hicolor")], check=False)
 
     print("GNOME application launchers and icons installed successfully.")
+
+
+def main():
+    # This lock coordinates cooperating installers only. External writers can
+    # race ownership checks, directory components, replacement, or gio; this
+    # is not a security boundary against concurrent mutation of those paths.
+    lock_dir = HOST_HOME / '.nexus-desktop-entry-lock'
+    lock_dir.mkdir(mode=0o700, exist_ok=True)
+    info = lock_dir.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError(f'unsafe installer lock directory: {lock_dir}')
+    fd = os.open(lock_dir / 'lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'r+') as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077:
+            raise RuntimeError('unsafe installer lock file')
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        install()
 
 
 if __name__ == "__main__":
