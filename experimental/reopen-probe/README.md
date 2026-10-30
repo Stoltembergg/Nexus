@@ -25,8 +25,9 @@ has been performed by this preparation, and no client behavior is established.
 
 ## Isolated preparation (no guest)
 
-`prepare.py` takes a **nonexistent** output directory outside the Nexus and
-Cocotron trees. It archives the committed `AppKit` from a Cocotron git checkout
+`prepare.py` takes a **nonexistent** output directory disjoint from the Nexus and
+Cocotron trees: neither an ancestor nor a descendant, after resolving symlinks.
+It archives the committed `AppKit` from a Cocotron git checkout
 (not its working tree or a scratch stage), applies the status-notifier and
 reopen patches in order, and records the revision and limitations in a manifest.
 It requires Python 3, git, tar and patch. Specify `--source` if the default
@@ -50,7 +51,9 @@ The wrapper embeds the isolated native library's absolute path. Existing
 
 ### Isolated AppKit relink
 
-With a complete, up-to-date Makefile build and its matching installed framework:
+With a complete, up-to-date Makefile build and its matching installed framework,
+choose a nonexistent output disjoint from both Nexus and the framework (neither
+an ancestor nor a descendant after resolving symlinks):
 
 ```
 python3 experimental/reopen-probe/build-appkit.py /tmp/reopen-appkit \

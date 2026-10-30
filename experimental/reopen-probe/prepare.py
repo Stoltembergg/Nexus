@@ -20,8 +20,9 @@ def run(command, **kwargs):
 
 def prepare(output, source, compile_artifacts=False, sdk=None, flags_file=None):
     output, source = Path(output).resolve(), Path(source).resolve()
-    if output.exists() or output.is_relative_to(ROOT) or output.is_relative_to(source):
-        raise ValueError('output must be a new directory outside the Nexus and source trees')
+    if (output.exists() or any(output.is_relative_to(tree) or tree.is_relative_to(output)
+                               for tree in (ROOT.resolve(), source))):
+        raise ValueError('output must be a new directory disjoint from the Nexus and source trees')
     if not output.parent.is_dir():
         raise ValueError('output parent must already exist')
     for tool in ('git', 'tar', 'patch'):

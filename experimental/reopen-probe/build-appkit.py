@@ -27,8 +27,10 @@ def digest(path):
 
 def build(output, framework):
     output, framework = Path(output).resolve(), Path(framework).resolve()
-    if output.exists() or output.is_relative_to(ROOT) or output.is_relative_to(framework) or not output.parent.is_dir():
-        raise ValueError('output must be a new directory outside Nexus and the source framework')
+    if (output.exists() or not output.parent.is_dir() or
+            any(output.is_relative_to(tree) or tree.is_relative_to(output)
+                for tree in (ROOT.resolve(), framework))):
+        raise ValueError('output must be a new directory disjoint from Nexus and the source framework')
     original_binary = framework / 'Versions/C/AppKit'
     if not original_binary.is_file() or original_binary.is_symlink() or not (framework / 'Versions/C/Resources').is_dir():
         raise ValueError('expected framework Versions/C/AppKit and Resources')
