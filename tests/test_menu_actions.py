@@ -128,6 +128,29 @@ class ActionHelperTests(unittest.TestCase):
                                      (f'NSpid:\t{pid}\t{nspid}\n' if nspid else ''))
         return proc
 
+    def test_notification_failure_does_not_change_action_results(self):
+        module = self.module
+        with patch.object(module.shutil, 'which', return_value='/fake/notify-send'), \
+                patch.object(module.subprocess, 'run') as run, \
+                patch.object(module, 'game_running', return_value=False), \
+                patch.object(module, 'stop_session') as stop, \
+                patch.object(module, 'XRes') as xres, \
+                patch.object(module, 'X11') as x11, \
+                patch.object(module, 'client_windows') as windows, \
+                patch.object(module, 'belongs_to_prefix', return_value=True), \
+                patch.object(module, 'window_viewable', return_value=True), \
+                patch.object(module.time, 'sleep'):
+            for error in (OSError('failed'), subprocess.SubprocessError('failed'),
+                          subprocess.TimeoutExpired('notify-send', 10)):
+                with self.subTest(error=error):
+                    run.side_effect = error
+                    for success in (True, False):
+                        stop.return_value = success
+                        self.assertEqual(module.quit_action(self.prefix), 0 if success else 1)
+                        windows.return_value = ['0x123'] if success else []
+                        self.assertEqual(module.reopen_action(self.prefix), 0 if success else 1)
+            self.assertTrue(run.called)
+
     def test_the_prefix_comes_from_the_environment(self):
         os.environ['DPREFIX'] = str(self.prefix)
         self.addCleanup(os.environ.pop, 'DPREFIX', None)

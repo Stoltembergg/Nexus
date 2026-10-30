@@ -239,8 +239,11 @@ def notify(summary, body):
     """Show a desktop notification when the desktop offers one."""
     if not shutil.which('notify-send'):
         return
-    subprocess.run(['notify-send', '--app-name=Nexus', summary, body],
-                   check=False, capture_output=True, timeout=10)
+    try:
+        subprocess.run(['notify-send', '--app-name=Nexus', summary, body],
+                       check=False, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def confirm(summary, body):
